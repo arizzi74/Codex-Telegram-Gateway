@@ -18,6 +18,7 @@ type Runtime struct {
 	State        string `json:"state"`
 	CodexVersion string `json:"codex_version,omitempty"`
 	DefaultCWD   string `json:"default_cwd,omitempty"`
+	LocalSocket  string `json:"local_socket,omitempty"`
 }
 
 type Session struct {

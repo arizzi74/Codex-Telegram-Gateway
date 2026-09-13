@@ -13,6 +13,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/coder/websocket"
@@ -32,6 +33,7 @@ const (
 // Connection owns only the Worker-to-Gateway transport. It neither starts nor
 // stops local Codex runtimes; connection loss leaves runtime supervision alone.
 type Connection struct {
+	connected atomic.Bool
 	cfg       config.WorkerConfig
 	store     *Store
 	log       *slog.Logger
@@ -43,6 +45,8 @@ type Connection struct {
 	// without a production configuration switch for insecure TLS.
 	dial func(context.Context, string, *websocket.DialOptions) (*websocket.Conn, *http.Response, error)
 }
+
+func (c *Connection) Connected() bool { return c.connected.Load() }
 
 // NewConnection constructs an outbound-only worker transport. onCommand must
 // durably receive the command before it returns an accepted acknowledgement.
@@ -151,6 +155,8 @@ func (c *Connection) connect(ctx context.Context) error {
 	if err := c.acceptGatewayWatermark(helloAck.ResumeFromEventSeq); err != nil {
 		return err
 	}
+	c.connected.Store(true)
+	defer c.connected.Store(false)
 	sent.set(helloAck.ResumeFromEventSeq)
 
 	// Start reading before replay: the gateway can ACK while a large outbox is
