@@ -596,7 +596,7 @@ func sessionFromThread(runtime protocol.Runtime, thread codexadapter.Thread, loa
 	if thread.Status == "systemError" {
 		state = "failed"
 	}
-	return protocol.Session{WorkerID: runtime.WorkerID, RuntimeID: runtime.ID, ThreadID: thread.ID, Name: thread.Name, Preview: thread.Preview, CWD: thread.CWD, State: state, ActiveTurnID: thread.ActiveTurnID, Loaded: loaded}
+	return protocol.Session{WorkerID: runtime.WorkerID, RuntimeID: runtime.ID, ThreadID: thread.ID, Name: thread.Name, Preview: thread.Preview, CWD: thread.CWD, GitBranch: thread.GitBranch, State: state, ActiveTurnID: thread.ActiveTurnID, Loaded: loaded}
 }
 func shouldRestart(policy string, attempts *[]time.Time, now time.Time) bool {
 	if policy != "on-failure" {

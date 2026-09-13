@@ -374,6 +374,7 @@ type Thread struct {
 	CWD           string
 	Model         string
 	ModelProvider string
+	GitBranch     string
 	Status        string
 	CreatedAt     int64
 	UpdatedAt     int64
@@ -400,10 +401,13 @@ func decodeThread(raw json.RawMessage) (Thread, error) {
 		Model         string          `json:"model"`
 		ModelProvider string          `json:"modelProvider"`
 		Status        json.RawMessage `json:"status"`
-		CreatedAt     int64           `json:"createdAt"`
-		UpdatedAt     int64           `json:"updatedAt"`
-		Ephemeral     bool            `json:"ephemeral"`
-		Turns         []struct {
+		GitInfo       struct {
+			Branch string `json:"branch"`
+		} `json:"gitInfo"`
+		CreatedAt int64 `json:"createdAt"`
+		UpdatedAt int64 `json:"updatedAt"`
+		Ephemeral bool  `json:"ephemeral"`
+		Turns     []struct {
 			ID     string `json:"id"`
 			Status string `json:"status"`
 		} `json:"turns"`
@@ -411,7 +415,7 @@ func decodeThread(raw json.RawMessage) (Thread, error) {
 	if err := json.Unmarshal(raw, &wire); err != nil {
 		return Thread{}, err
 	}
-	thread := Thread{ID: wire.ID, SessionID: wire.SessionID, Name: wire.Name, Preview: wire.Preview, CWD: wire.CWD, Model: wire.Model, ModelProvider: wire.ModelProvider, Status: statusName(wire.Status), CreatedAt: wire.CreatedAt, UpdatedAt: wire.UpdatedAt, Ephemeral: wire.Ephemeral, Raw: cloneRaw(raw)}
+	thread := Thread{ID: wire.ID, SessionID: wire.SessionID, Name: wire.Name, Preview: wire.Preview, CWD: wire.CWD, Model: wire.Model, ModelProvider: wire.ModelProvider, GitBranch: wire.GitInfo.Branch, Status: statusName(wire.Status), CreatedAt: wire.CreatedAt, UpdatedAt: wire.UpdatedAt, Ephemeral: wire.Ephemeral, Raw: cloneRaw(raw)}
 	for _, turn := range wire.Turns {
 		if turn.Status == "inProgress" {
 			thread.ActiveTurnID = turn.ID
@@ -559,6 +563,22 @@ func (c *Client) ListThreads(ctx context.Context, cursor string, limit int) (Thr
 		params["limit"] = limit
 	}
 	return c.listThreads(ctx, "thread/list", params)
+}
+
+// LatestThread finds the most recently updated user session in exactly cwd.
+// It never falls back to a thread from another working directory.
+func (c *Client) LatestThread(ctx context.Context, cwd string) (Thread, bool, error) {
+	page, err := c.listThreads(ctx, "thread/list", map[string]any{
+		"cwd": cwd, "limit": 1, "sortKey": "updated_at", "sortDirection": "desc",
+		"sourceKinds": []string{"cli", "vscode", "appServer"},
+	})
+	if err != nil {
+		return Thread{}, false, err
+	}
+	if len(page.Threads) == 0 {
+		return Thread{}, false, nil
+	}
+	return page.Threads[0], true, nil
 }
 
 // LoadedThreads returns a page of currently in-memory thread IDs and metadata.

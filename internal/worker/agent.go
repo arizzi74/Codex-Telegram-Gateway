@@ -416,6 +416,7 @@ func (s *sessionActor) run() {
 		case <-s.agent.ctx.Done():
 			return
 		case snapshot := <-s.snapshots:
+			previous := s.session
 			if snapshot.runtime.Generation < s.runtime.Generation {
 				if snapshot.processed != nil {
 					close(snapshot.processed)
@@ -433,11 +434,21 @@ func (s *sessionActor) run() {
 					s.agent.report(err)
 				}
 				s.queue = nil
-			} else if s.session.ActiveTurnID == "" {
+			} else {
 				s.runtime = snapshot.runtime
-				s.session = snapshot.session
+				if s.session.ActiveTurnID == "" {
+					s.session = snapshot.session
+				} else {
+					s.session.Name, s.session.Preview = snapshot.session.Name, snapshot.session.Preview
+					s.session.CWD, s.session.GitBranch, s.session.GitRoot = snapshot.session.CWD, snapshot.session.GitBranch, snapshot.session.GitRoot
+				}
 			}
 			s.save()
+			current := s.session
+			previous.UpdatedAt, current.UpdatedAt = time.Time{}, time.Time{}
+			if previous != current {
+				s.agent.report(s.agent.emit(s.runtime, s.session.ID, "session_state_changed", s.session))
+			}
 			if snapshot.processed != nil {
 				close(snapshot.processed)
 			}

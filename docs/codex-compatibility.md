@@ -37,7 +37,8 @@ JSONL boundary.
 
 `codex-local attach --socket PATH [THREAD]` runs the supported local TUI form
 `codex --remote unix://PATH resume [THREAD]`. `codex-local start` owns a
-temporary shared runtime for the current directory and attaches with
-`codex --remote unix://PATH resume --last`. Its app-server and proxy stay alive
+temporary shared runtime for the current directory and resolves the newest session in that exact directory, resumes it, then attaches
+with `codex --remote unix://PATH resume THREAD_ID`. If there is no history, it
+opens a fresh terminal session; it does not try to resume a new ID without a persisted rollout. A conflicting active writer produces a clear error. Its app-server and proxy stay alive
 only while that interactive CLI runs; the helper then reaps both processes and
 removes its socket. It never adopts an arbitrary existing Codex PID or socket.

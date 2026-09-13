@@ -48,6 +48,35 @@ func TestAgentAcceptsDuplicateAndRejectsStaleGenerationWithoutRPC(t *testing.T) 
 	}
 }
 
+func TestAgentDiscoveryPublishesMetadataWithoutReplacingActiveTurn(t *testing.T) {
+	a, runtime, _, cleanup := testAgent(t)
+	defer cleanup()
+	session := installSession(a, runtime, "thread-metadata", "turn-current")
+	session.Name, session.GitBranch = "Renamed session", "feature"
+	session.ActiveTurnID, session.State = "", "idle"
+	a.onSession(runtime, session)
+	events, err := a.store.OutboxAfter(0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, event := range events {
+		if event.Kind != "session_state_changed" {
+			continue
+		}
+		var current protocol.Session
+		if err := json.Unmarshal(event.Data, &current); err != nil {
+			t.Fatal(err)
+		}
+		if current.Name == "Renamed session" && current.GitBranch == "feature" && current.ActiveTurnID == "turn-current" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("metadata refresh did not publish the actual fenced actor state")
+	}
+}
+
 func TestAgentSessionFIFOAndIndependentSessions(t *testing.T) {
 	a, runtime, server, cleanup := testAgent(t)
 	defer cleanup()

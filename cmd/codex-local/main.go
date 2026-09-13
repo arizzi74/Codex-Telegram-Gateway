@@ -47,7 +47,8 @@ func usage(out io.Writer) error {
 
 attach opens the local Codex TUI against an existing private Unix socket.
 start creates an owned private app-server and JSONL proxy for the current
-directory, launches "codex resume --last", then stops both children when the
+directory, resumes the latest session in this directory (or creates one), launches the
+interactive CLI on the same thread, then stops both children when the
 interactive CLI exits. The runtime lasts only for that CLI process.
 `)
 	return err
@@ -104,8 +105,38 @@ func start(args []string, stdout, stderr io.Writer) error {
 		return err
 	}
 	defer runtime.Close()
+	thread, err := resumeLatest(ctx, runtime.Client, cwd)
+	if err != nil {
+		return err
+	}
 	fmt.Fprintf(stdout, "Local Codex runtime PID %d; socket %s\n", runtime.PID(), runtime.SocketPath)
-	return runCodex(ctx, attachCommand(socket, "--last"), cwd, stdout, stderr)
+	args = []string{"--remote", "unix://" + socket}
+	if thread.ID != "" {
+		args = attachCommand(socket, thread.ID)
+	}
+	return runCodex(ctx, args, cwd, stdout, stderr)
+}
+
+type sessionClient interface {
+	LatestThread(context.Context, string) (codexadapter.Thread, bool, error)
+	ResumeThread(context.Context, string, codexadapter.ThreadOptions) (codexadapter.Thread, error)
+}
+
+func resumeLatest(ctx context.Context, client sessionClient, cwd string) (codexadapter.Thread, error) {
+	thread, found, err := client.LatestThread(ctx, cwd)
+	if err != nil {
+		return codexadapter.Thread{}, fmt.Errorf("find latest session in current directory: %w", err)
+	}
+	if !found {
+		// Empty threads have no persisted rollout yet. Let the terminal create
+		// its initial thread instead of trying to resume an unpersisted ID.
+		return codexadapter.Thread{}, nil
+	}
+	thread, err = client.ResumeThread(ctx, thread.ID, codexadapter.ThreadOptions{CWD: cwd})
+	if err != nil {
+		return codexadapter.Thread{}, fmt.Errorf("resume latest session: %w; if it is open in another app, close it there or use codex-worker attach for a worker-owned session", err)
+	}
+	return thread, nil
 }
 
 func first(values []string) string {
