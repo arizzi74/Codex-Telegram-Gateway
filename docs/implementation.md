@@ -1,39 +1,49 @@
 # Implementation and verification tracker
 
-The source of truth is `CODEX_TELEGRAM_CONTROL_PLANE_SPEC.md`, plus the user's
-explicit additions: passkey administration, CLI attachment and start/resume
-helpers, static stripped binaries, incremental commits, and deployment on
-`gateway.example.com` with the single numeric Telegram identity from `.botsecrets`.
+The specification and the user's additions are implemented in Go and committed
+in incremental steps. The gateway and local worker are deployed on
+`gateway.example.com`.
 
-## Milestones
+## Completed milestones
 
-- [ ] Foundation: configuration, protocol, migrations, enrollment, WSS, heartbeat.
-- [ ] Codex adapter: stdio RPC, initialization, discovery, supervision.
-- [ ] Telegram: webhook authorization, dedupe, selection and immutable routing.
-- [ ] Durability: ledger, outbox, replay, generations, uncertain outcomes.
-- [ ] Controls: approvals, input, steering, interruption, per-session queues.
-- [ ] Passkey admin UI and enrollment/recovery flow.
-- [ ] Local CLI attach and launch/resume helpers.
-- [ ] Operations: services, nginx, configuration, documentation, release artifacts.
-- [ ] Mandatory acceptance tests AT-01 through AT-20.
-- [ ] Live deployment and requirement-by-requirement completion audit.
+- [x] Configuration, versioned protocol, migrations, enrollment, WSS, heartbeat.
+- [x] Codex adapter, discovery, supervised runtimes and degraded compatibility.
+- [x] Telegram webhook authorization, deduplication, selection and immutable routing.
+- [x] Durable command ledger, event outbox, replay, generations and uncertain outcomes.
+- [x] Approval/input controls, steering, interruption and independent session queues.
+- [x] Passkey admin console, one-time bootstrap and credential management.
+- [x] Local CLI attachment and current-directory launch/resume helper.
+- [x] Service/proxy configuration, portable installer, documentation and release artifacts.
+- [x] AT-01 through AT-20 verification: automated integration, local CI and live drills.
+- [x] Live deployment and requirement audit.
 
-## Environment evidence
+## Verification
 
-Initial inspection: Go 1.26.5 linux/arm64; Codex CLI 0.154.0. No existing
-implementation or Git history. The supplied bot secret file is mode 0600.
-The host has nginx; PostgreSQL availability has not yet been established.
+Go 1.26.5 linux/arm64 and Codex CLI 0.154.0. PostgreSQL 14 runs locally.
+`TEST_DATABASE_URL=... VERSION=0.1.0 ./scripts/ci.sh` passes formatting, vet,
+race tests, cross-builds and archive checksum verification. See
+[the acceptance ledger](acceptance.md) for named tests and their limits.
 
-## Policy additions
+The gateway enforces the numeric Telegram identity configured for the bot;
+other actors are rejected. The current deployed worker is enrolled and
+connected using its private worker credentials. A real database outage made
+readiness fail and recover while the worker and Codex remained alive. A real
+owned Codex process exit advanced its runtime generation and preserved session
+identities.
+The private shared transport and terminal helper were exercised with the
+installed Codex version. No model turns were submitted by live smoke tests.
 
-The user's passkey UI request overrides the specification's browser UI non-goal.
-Public Codex app-server exposure remains prohibited. CLI attachment must stay
-local and preserve the stdio adapter boundary; implementation will be documented
-in an ADR once validated against the installed runtime.
+The local CI job was run; the hosted workflow has not been triggered because
+this local repository has no remote. Darwin executables were cross-built with
+CGO disabled; the LaunchAgent was not run on a Darwin host.
 
-## Validation
+## Owner setup
 
-No milestone or acceptance test has passed yet. Tests must use fake Codex and
-Telegram servers without external model credentials. Live Telegram messaging
-requires the user's existing authorization for bot operation and must stay
-within the configured allowlist.
+The first personal passkey requires the owner's authenticator. Run
+`sudo /usr/local/sbin/codex-gateway-admin admin bootstrap`, then open
+`https://gateway.example.com/admin/` and register. The implementation was tested
+with a synthetic authenticator; production contains no fabricated passkey.
+
+CLI sharing is the user's explicit extension to direct app-server stdio:
+[ADR 0008](adr/0008-shared-local-cli.md) records the private Unix socket and
+stdio byte-proxy/WebSocket framing bridge. Codex itself has no public listener.
