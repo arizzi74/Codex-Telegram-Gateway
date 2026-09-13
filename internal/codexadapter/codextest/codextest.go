@@ -22,16 +22,18 @@ type Response struct {
 	Error  json.RawMessage
 }
 type Server struct {
-	in        *bufio.Scanner
-	out       *json.Encoder
-	close     func()
-	mu        sync.Mutex
-	calls     []Call
-	responses []Response
-	next      int
-	threads   []map[string]any
-	loaded    []string
+	in          *bufio.Scanner
+	out         *json.Encoder
+	close       func()
+	mu          sync.Mutex
+	calls       []Call
+	responses   []Response
+	next        int
+	threads     []map[string]any
+	loaded      []string
+	unavailable map[string]bool
 }
+
 // SetThreads controls the fixture's reconciliation response. Thread values
 // use the app-server wire field names (id, cwd, name, preview, status).
 func (s *Server) SetThreads(threads []map[string]any, loaded []string) {
@@ -41,10 +43,20 @@ func (s *Server) SetThreads(threads []map[string]any, loaded []string) {
 	s.loaded = append([]string(nil), loaded...)
 }
 
+// SetMethodUnavailable makes one RPC method return JSON-RPC -32601.
+func (s *Server) SetMethodUnavailable(method string, unavailable bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.unavailable == nil {
+		s.unavailable = map[string]bool{}
+	}
+	s.unavailable[method] = unavailable
+}
+
 func New(ctx context.Context) (*codexadapter.Client, *Server, error) {
 	inR, inW := io.Pipe()
 	outR, outW := io.Pipe()
-	s := &Server{in: bufio.NewScanner(inR), out: json.NewEncoder(outW), close: func() { _ = inR.Close(); _ = inW.Close(); _ = outR.Close(); _ = outW.Close() }}
+	s := &Server{in: bufio.NewScanner(inR), out: json.NewEncoder(outW), unavailable: map[string]bool{}, close: func() { _ = inR.Close(); _ = inW.Close(); _ = outR.Close(); _ = outW.Close() }}
 	go s.serve()
 	c := codexadapter.New(codexadapter.Transport{In: inW, Out: outR, Close: func() error { s.close(); return nil }}, codexadapter.Config{})
 	if err := c.Initialize(ctx); err != nil {
@@ -92,7 +104,12 @@ func (s *Server) serve() {
 		s.calls = append(s.calls, Call{request.Method, append(json.RawMessage(nil), request.Params...)})
 		s.next++
 		n := s.next
+		unavailable := s.unavailable[request.Method]
 		s.mu.Unlock()
+		if unavailable {
+			_ = s.out.Encode(map[string]any{"id": json.RawMessage(request.ID), "error": map[string]any{"code": -32601, "message": "method not found"}})
+			continue
+		}
 		var result any = map[string]any{}
 		switch request.Method {
 		case "thread/start":
@@ -102,7 +119,13 @@ func (s *Server) serve() {
 				ThreadID string `json:"threadId"`
 			}
 			_ = json.Unmarshal(request.Params, &p)
-			result = map[string]any{"thread": map[string]any{"id": p.ThreadID}}
+			result = map[string]any{"thread": s.thread(p.ThreadID)}
+		case "thread/read":
+			var p struct {
+				ThreadID string `json:"threadId"`
+			}
+			_ = json.Unmarshal(request.Params, &p)
+			result = map[string]any{"thread": s.thread(p.ThreadID)}
 		case "turn/start":
 			var p struct {
 				ThreadID string `json:"threadId"`
@@ -124,4 +147,19 @@ func (s *Server) serve() {
 		}
 		_ = s.out.Encode(map[string]any{"id": json.RawMessage(request.ID), "result": result})
 	}
+}
+
+func (s *Server) thread(id string) map[string]any {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, thread := range s.threads {
+		if thread["id"] == id {
+			copy := make(map[string]any, len(thread))
+			for k, v := range thread {
+				copy[k] = v
+			}
+			return copy
+		}
+	}
+	return map[string]any{"id": id}
 }

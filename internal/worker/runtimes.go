@@ -47,8 +47,30 @@ type RuntimeManager struct {
 }
 
 type managedRuntime struct {
-	runtime protocol.Runtime
-	client  *codexadapter.Client
+	runtime       protocol.Runtime
+	client        *codexadapter.Client
+	subscriptions map[string]struct{}
+	degraded      bool
+}
+
+// runtimePersistenceError marks failures which have crossed the durable local
+// state boundary. Only these are forwarded through RuntimeHooks.OnError, which
+// the Agent treats as fatal; RPC discovery trouble is handled by the runtime.
+type runtimePersistenceError struct{ err error }
+
+func (e *runtimePersistenceError) Error() string { return e.err.Error() }
+func (e *runtimePersistenceError) Unwrap() error { return e.err }
+
+func persistenceError(err error) error {
+	if err == nil {
+		return nil
+	}
+	return &runtimePersistenceError{err: err}
+}
+
+func isPersistenceError(err error) bool {
+	var persistence *runtimePersistenceError
+	return errors.As(err, &persistence)
 }
 
 // NewRuntimeManager constructs a supervisor. It validates all configured
@@ -149,7 +171,13 @@ func (m *RuntimeManager) supervise(ctx context.Context, profile config.RuntimePr
 		m.install(runtime, client)
 		m.emitRuntime(runtime, "runtime_started")
 		if err := m.discover(ctx, runtime, client); err != nil {
-			m.report(err)
+			// Discovery RPC failures mean this runtime cannot currently be
+			// reconciled. They are not a worker persistence failure and must not
+			// tear down the gateway connection through RuntimeHooks.OnError.
+			m.log.Warn("runtime initial discovery failed", "runtime_id", runtime.ID, "error", err)
+			if isPersistenceError(err) {
+				m.report(err)
+			}
 			_ = client.Close()
 			m.markRuntimeFailed(runtime)
 			initial.Do(initialDone)
@@ -162,13 +190,15 @@ func (m *RuntimeManager) supervise(ctx context.Context, profile config.RuntimePr
 			continue
 		}
 		initial.Do(initialDone)
-		m.forwardAdapter(ctx, runtime, client)
+		stopForwarding := m.forwardAdapter(ctx, runtime, client)
 		select {
 		case <-ctx.Done():
 			_ = client.Close()
+			stopForwarding()
 			m.markRuntimeStopped(runtime)
 			return
 		case <-client.Done():
+			stopForwarding()
 			if ctx.Err() != nil {
 				m.markRuntimeStopped(runtime)
 				return
@@ -210,11 +240,18 @@ func (m *RuntimeManager) startProfile(ctx context.Context, profile config.Runtim
 	return runtime, client, nil
 }
 
-func (m *RuntimeManager) forwardAdapter(ctx context.Context, runtime protocol.Runtime, client *codexadapter.Client) {
+// forwardAdapter starts all adapter readers under a private context and
+// returns a join function. supervise calls that function before a client is
+// removed or a runtime is restarted, so no hook can outlive the worker store.
+func (m *RuntimeManager) forwardAdapter(ctx context.Context, runtime protocol.Runtime, client *codexadapter.Client) func() {
+	forwardCtx, cancel := context.WithCancel(ctx)
+	var group sync.WaitGroup
+	group.Add(3)
 	go func() {
+		defer group.Done()
 		for {
 			select {
-			case <-ctx.Done():
+			case <-forwardCtx.Done():
 				return
 			case event, ok := <-client.Events():
 				if !ok {
@@ -227,9 +264,10 @@ func (m *RuntimeManager) forwardAdapter(ctx context.Context, runtime protocol.Ru
 		}
 	}()
 	go func() {
+		defer group.Done()
 		for {
 			select {
-			case <-ctx.Done():
+			case <-forwardCtx.Done():
 				return
 			case request, ok := <-client.Requests():
 				if !ok {
@@ -242,30 +280,54 @@ func (m *RuntimeManager) forwardAdapter(ctx context.Context, runtime protocol.Ru
 		}
 	}()
 	go func() {
+		defer group.Done()
 		ticker := time.NewTicker(discoveryInterval)
 		defer ticker.Stop()
 		for {
 			select {
-			case <-ctx.Done():
+			case <-forwardCtx.Done():
 				return
 			case <-client.Done():
 				return
 			case <-ticker.C:
 				if err := m.discover(ctx, runtime, client); err != nil {
 					m.log.Warn("runtime discovery failed", "runtime_id", runtime.ID, "error", err)
+					if isPersistenceError(err) {
+						m.report(err)
+					}
 				}
 			}
 		}
 	}()
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			cancel()
+			group.Wait()
+		})
+	}
 }
 
 func (m *RuntimeManager) discover(ctx context.Context, runtime protocol.Runtime, client *codexadapter.Client) error {
+	for _, method := range []string{"thread/list", "thread/loaded/list", "thread/read"} {
+		if methodKnownUnavailable(client, method) {
+			return nil
+		}
+	}
 	threads, err := client.ListAllThreads(ctx, discoveryPageSize, discoveryLimit)
 	if err != nil {
+		if errors.Is(err, codexadapter.ErrMethodUnavailable) {
+			m.markRuntimeDegraded(runtime, err)
+			return nil
+		}
 		return err
 	}
 	loaded, err := loadedThreadIDs(ctx, client)
 	if err != nil {
+		if errors.Is(err, codexadapter.ErrMethodUnavailable) {
+			m.markRuntimeDegraded(runtime, err)
+			return nil
+		}
 		return err
 	}
 	// A loaded thread may not yet have a stored log or appear in a history
@@ -277,6 +339,10 @@ func (m *RuntimeManager) discover(ctx context.Context, runtime protocol.Runtime,
 	for id := range loaded {
 		thread, readErr := client.ReadThread(ctx, id, true)
 		if readErr != nil {
+			if errors.Is(readErr, codexadapter.ErrMethodUnavailable) {
+				m.markRuntimeDegraded(runtime, readErr)
+				return nil
+			}
 			return readErr
 		}
 		if index, ok := indexed[id]; ok {
@@ -287,7 +353,7 @@ func (m *RuntimeManager) discover(ctx context.Context, runtime protocol.Runtime,
 	}
 	existing, err := m.store.ListSessions(runtime.ID)
 	if err != nil {
-		return err
+		return persistenceError(err)
 	}
 	byThread := make(map[string]protocol.Session, len(existing))
 	for _, session := range existing {
@@ -302,6 +368,27 @@ func (m *RuntimeManager) discover(ctx context.Context, runtime protocol.Runtime,
 			m.log.Warn("skip discovered thread outside allowed workspace", "runtime_id", runtime.ID, "thread_id", thread.ID)
 			continue
 		}
+		if loaded[thread.ID] {
+			resumed, subscribed, resumeErr := m.subscribeLoadedThread(ctx, runtime, client, thread.ID)
+			if resumeErr != nil {
+				if errors.Is(resumeErr, codexadapter.ErrMethodUnavailable) {
+					m.markRuntimeDegraded(runtime, resumeErr)
+				} else {
+					return resumeErr
+				}
+			} else if subscribed {
+				// thread/resume returns a summary and may omit cwd/status. Keep the
+				// workspace-validated thread/read snapshot, but retain a newer
+				// active turn if this implementation happened to include one.
+				if resumed.ID != thread.ID {
+					return errors.New("runtime manager: resumed a different thread")
+				}
+				if resumed.ActiveTurnID != "" {
+					candidate.ActiveTurnID = resumed.ActiveTurnID
+					candidate.State = "running"
+				}
+			}
+		}
 		if prior, found := byThread[thread.ID]; found {
 			if prior.CWD == "" || !workspaceAllowed(prior.CWD, m.cfg.AllowedWorkspaceRoots) {
 				m.log.Warn("skip persisted thread outside allowed workspace", "runtime_id", runtime.ID, "thread_id", thread.ID)
@@ -315,16 +402,21 @@ func (m *RuntimeManager) discover(ctx context.Context, runtime protocol.Runtime,
 		}
 		saved, err := m.store.UpsertSession(candidate)
 		if err != nil {
-			return err
+			return persistenceError(err)
 		}
 		if err := m.emit(runtime, "session_discovered", saved); err != nil {
-			return err
+			return persistenceError(err)
 		}
 		if m.hooks.OnSession != nil {
 			m.hooks.OnSession(runtime, saved)
 		}
 	}
 	return nil
+}
+
+func methodKnownUnavailable(client *codexadapter.Client, method string) bool {
+	available, observed := client.Capabilities().Methods[method]
+	return observed && !available
 }
 
 func loadedThreadIDs(ctx context.Context, client *codexadapter.Client) (map[string]bool, error) {
@@ -347,6 +439,41 @@ func loadedThreadIDs(ctx context.Context, client *codexadapter.Client) (map[stri
 		cursor = page.NextCursor
 	}
 	return loaded, nil
+}
+
+// subscribeLoadedThread performs the only allowed reconciliation resume: an
+// already-loaded, workspace-validated thread with no options beyond threadId.
+// The per-managed-runtime map resets when a new client/generation is installed.
+func (m *RuntimeManager) subscribeLoadedThread(ctx context.Context, runtime protocol.Runtime, client *codexadapter.Client, threadID string) (codexadapter.Thread, bool, error) {
+	if methodKnownUnavailable(client, "thread/resume") {
+		// The first -32601 already marked this runtime degraded. Do not keep
+		// probing an app-server version that has declared the required RPC absent.
+		return codexadapter.Thread{}, false, nil
+	}
+	m.mu.Lock()
+	current := m.runtimes[runtime.ID]
+	if current == nil || current.client != client || current.runtime.Generation != runtime.Generation {
+		m.mu.Unlock()
+		return codexadapter.Thread{}, false, codexadapter.ErrClosed
+	}
+	if _, found := current.subscriptions[threadID]; found {
+		m.mu.Unlock()
+		return codexadapter.Thread{}, false, nil
+	}
+	// Reserve before issuing RPC so concurrent discovery ticks cannot attach the
+	// same client/thread twice. Release the reservation on failure for retry.
+	current.subscriptions[threadID] = struct{}{}
+	m.mu.Unlock()
+	thread, err := client.ResumeThread(ctx, threadID, codexadapter.ThreadOptions{})
+	if err != nil {
+		m.mu.Lock()
+		if current := m.runtimes[runtime.ID]; current != nil && current.client == client && current.runtime.Generation == runtime.Generation {
+			delete(current.subscriptions, threadID)
+		}
+		m.mu.Unlock()
+		return codexadapter.Thread{}, false, err
+	}
+	return thread, true, nil
 }
 
 func (m *RuntimeManager) markRuntimeFailed(runtime protocol.Runtime) {
@@ -385,8 +512,25 @@ func (m *RuntimeManager) install(runtime protocol.Runtime, client *codexadapter.
 }
 func (m *RuntimeManager) setRuntime(runtime protocol.Runtime, client *codexadapter.Client) {
 	m.mu.Lock()
-	m.runtimes[runtime.ID] = &managedRuntime{runtime: runtime, client: client}
+	m.runtimes[runtime.ID] = &managedRuntime{runtime: runtime, client: client, subscriptions: make(map[string]struct{})}
 	m.mu.Unlock()
+}
+
+func (m *RuntimeManager) markRuntimeDegraded(runtime protocol.Runtime, cause error) {
+	runtime.State = "degraded"
+	m.mu.Lock()
+	current := m.runtimes[runtime.ID]
+	if current == nil || current.runtime.Generation != runtime.Generation || current.degraded {
+		m.mu.Unlock()
+		return
+	}
+	current.runtime = runtime
+	current.degraded = true
+	m.mu.Unlock()
+	m.log.Warn("runtime required RPC unavailable; running degraded", "runtime_id", runtime.ID, "error", cause)
+	if err := m.emit(runtime, "runtime_degraded", runtime); err != nil {
+		m.report(err)
+	}
 }
 func (m *RuntimeManager) remove(runtimeID string, client *codexadapter.Client) {
 	m.mu.Lock()
