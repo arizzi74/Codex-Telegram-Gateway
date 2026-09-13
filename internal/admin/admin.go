@@ -187,7 +187,7 @@ func (s *Server) registrationBegin(w http.ResponseWriter, r *http.Request) {
 			user.creds = decodeCredentials(cs)
 		}
 	}
-	creation, sd, err := s.webauthn.BeginRegistration(user, wa.WithRegistrationOrigin(s.origin), wa.WithResidentKeyRequirement(protocol.ResidentKeyRequirementRequired), wa.WithAuthenticatorSelection(protocol.AuthenticatorSelection{UserVerification: protocol.VerificationRequired}))
+	creation, sd, err := s.webauthn.BeginRegistration(user, wa.WithRegistrationOrigin(s.origin), wa.WithAuthenticatorSelection(protocol.AuthenticatorSelection{UserVerification: protocol.VerificationRequired}), wa.WithResidentKeyRequirement(protocol.ResidentKeyRequirementRequired))
 	if err != nil {
 		fail(w, err)
 		return
