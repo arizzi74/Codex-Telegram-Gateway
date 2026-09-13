@@ -1,0 +1,34 @@
+[Unit]
+Description=Codex Telegram Gateway
+Documentation=https://github.com/iaia/telegramgw
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=codexgateway
+Group=codexgateway
+WorkingDirectory=/var/lib/codex-gateway
+Environment=HOME=/var/lib/codex-gateway
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+EnvironmentFile=/etc/codex-gateway/secrets.env
+ExecStart=/usr/local/lib/codex-telegramgw/codex-gateway --config /etc/codex-gateway/gateway.json serve
+Restart=on-failure
+RestartSec=3s
+TimeoutStopSec=20s
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+ReadWritePaths=/var/lib/codex-gateway
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

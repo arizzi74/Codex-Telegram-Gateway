@@ -29,11 +29,10 @@ func main() {
 }
 
 func run(args []string, logger *slog.Logger) error {
-	base, err := os.UserConfigDir()
+	path, err := defaultConfigPath()
 	if err != nil {
 		return err
 	}
-	path := filepath.Join(base, "codex-worker", "config.json")
 	for i := 0; i < len(args); i++ {
 		if args[i] == "--config" {
 			if i+1 >= len(args) {
@@ -56,11 +55,22 @@ func run(args []string, logger *slog.Logger) error {
 		return nil
 	}
 	if args[0] == "help" || args[0] == "--help" {
-		fmt.Println("codex-worker [--config PATH] run|status|doctor|attach [SESSION]")
+		fmt.Println("codex-worker [--config PATH] run|status|doctor|attach [SESSION]|config export")
 		return nil
 	}
 	cfg, err := config.LoadWorker(path)
 	if err != nil {
+		return err
+	}
+	if args[0] == "config" {
+		if len(args) != 2 || args[1] != "export" {
+			return errors.New("usage: codex-worker [--config PATH] config export")
+		}
+		data, err := exportWorkerConfig(path)
+		if err != nil {
+			return err
+		}
+		_, err = fmt.Fprintln(os.Stdout, string(data))
 		return err
 	}
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -174,4 +184,29 @@ func run(args []string, logger *slog.Logger) error {
 	default:
 		return errors.New("unknown command; use --help")
 	}
+}
+
+// exportWorkerConfig is the installer's normalization boundary. Loading first
+// resolves relative fields against the source JSON file and validates every
+// workspace and secret path before a replacement config is written elsewhere.
+func exportWorkerConfig(path string) ([]byte, error) {
+	cfg, err := config.LoadWorker(path)
+	if err != nil {
+		return nil, err
+	}
+	return json.MarshalIndent(cfg, "", "  ")
+}
+
+// defaultConfigPath intentionally follows the same stable location as the
+// per-user service installer. os.UserConfigDir differs on macOS, while the
+// installer and launch agents consistently use the owning user's HOME.
+func defaultConfigPath() (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("resolve worker home directory: %w", err)
+	}
+	if strings.TrimSpace(home) == "" {
+		return "", errors.New("resolve worker home directory: home is empty")
+	}
+	return filepath.Join(home, ".config", "codex-worker", "config.json"), nil
 }

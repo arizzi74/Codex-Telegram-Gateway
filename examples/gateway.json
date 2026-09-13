@@ -1,0 +1,10 @@
+{
+  "listen": "127.0.0.1:8080",
+  "public_base_url": "https://gateway.example.com",
+  "database_url_env": "CODEX_GATEWAY_DATABASE_URL",
+  "bot_secrets_file": ".botsecrets",
+  "webhook_secret_env": "CODEX_GATEWAY_TELEGRAM_WEBHOOK_SECRET",
+  "heartbeat_interval": "10s",
+  "unreachable_after": "30s",
+  "command_expiry": "1h"
+}
