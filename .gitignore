@@ -1,0 +1,14 @@
+.botsecrets
+.env
+*.env
+!*.env.example
+/config.local.*
+/state/
+/dist/
+/bin/
+/coverage.out
+*.db
+*.db.lock
+*.log
+/tmp/
+
