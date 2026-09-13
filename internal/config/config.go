@@ -7,13 +7,20 @@
 package config
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"net"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/google/uuid"
+	"github.com/iaia/telegramgw/internal/auth"
 )
 
 const (
@@ -52,6 +59,8 @@ type WorkerConfig struct {
 	TokenFile             string           `json:"token_file"`
 	Runtimes              []RuntimeProfile `json:"runtimes"`
 	AllowedWorkspaceRoots []string         `json:"allowed_workspace_roots"`
+	MaxQueuedTurns        int              `json:"max_queued_turns"`
+	RedactPatterns        []string         `json:"redact_patterns"`
 }
 
 // RuntimeProfile defines one local, supervised Codex app-server.
@@ -82,7 +91,7 @@ func LoadGateway(path string) (GatewayConfig, error) {
 		return GatewayConfig{}, fmt.Errorf("read gateway config: %w", err)
 	}
 	var raw gatewayJSON
-	if err := json.Unmarshal(data, &raw); err != nil {
+	if err := decodeConfig(data, &raw); err != nil {
 		return GatewayConfig{}, fmt.Errorf("parse gateway config: %w", err)
 	}
 	cfg, err := raw.config()
@@ -112,15 +121,18 @@ func LoadGateway(path string) (GatewayConfig, error) {
 // LoadWorker reads a JSON worker config and validates its stable identity and
 // configured workspace roots. It does not read the enrollment token.
 func LoadWorker(path string) (WorkerConfig, error) {
+	if err := CheckSecretFilePermissions(path); err != nil {
+		return WorkerConfig{}, err
+	}
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return WorkerConfig{}, fmt.Errorf("read worker config: %w", err)
 	}
 	var cfg WorkerConfig
-	if err := json.Unmarshal(data, &cfg); err != nil {
+	if err := decodeConfig(data, &cfg); err != nil {
 		return WorkerConfig{}, fmt.Errorf("parse worker config: %w", err)
 	}
-	if strings.TrimSpace(cfg.WorkerID) == "" {
+	if _, err := uuid.Parse(cfg.WorkerID); err != nil {
 		return WorkerConfig{}, errors.New("worker config: worker_id is required")
 	}
 	if strings.TrimSpace(cfg.Name) == "" {
@@ -132,9 +144,66 @@ func LoadWorker(path string) (WorkerConfig, error) {
 	if len(cfg.AllowedWorkspaceRoots) == 0 {
 		return WorkerConfig{}, errors.New("worker config: allowed_workspace_roots is required")
 	}
-	for _, r := range cfg.Runtimes {
+	u, err := url.Parse(cfg.GatewayURL)
+	if err != nil || u.Scheme != "wss" || u.Hostname() == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
+		return WorkerConfig{}, errors.New("worker config: gateway_url must be wss without embedded credentials, query, or fragment")
+	}
+	base, err := filepath.Abs(filepath.Dir(path))
+	if err != nil {
+		return WorkerConfig{}, err
+	}
+	resolve := func(p string) string {
+		if filepath.IsAbs(p) {
+			return p
+		}
+		return filepath.Join(base, p)
+	}
+	cfg.StateFile = resolve(cfg.StateFile)
+	cfg.TokenFile = resolve(cfg.TokenFile)
+	if err := CheckSecretFilePermissions(cfg.TokenFile); err != nil {
+		return WorkerConfig{}, err
+	}
+	for i, root := range cfg.AllowedWorkspaceRoots {
+		cfg.AllowedWorkspaceRoots[i] = resolve(root)
+	}
+	cfg.AllowedWorkspaceRoots, err = auth.CanonicalWorkspaceRoots(cfg.AllowedWorkspaceRoots)
+	if err != nil {
+		return WorkerConfig{}, err
+	}
+	if cfg.MaxQueuedTurns == 0 {
+		cfg.MaxQueuedTurns = 20
+	}
+	if cfg.MaxQueuedTurns < 1 || cfg.MaxQueuedTurns > 1000 {
+		return WorkerConfig{}, errors.New("worker config: max_queued_turns must be 1..1000")
+	}
+	if _, err := auth.NewRedactor(cfg.RedactPatterns, ""); err != nil {
+		return WorkerConfig{}, err
+	}
+	seen := map[string]bool{}
+	for i := range cfg.Runtimes {
+		r := &cfg.Runtimes[i]
 		if strings.TrimSpace(r.ID) == "" || strings.TrimSpace(r.CodexBinary) == "" || strings.TrimSpace(r.WorkingDirectory) == "" {
 			return WorkerConfig{}, errors.New("worker config: runtime id, codex_binary, and working_directory are required")
+		}
+		if seen[r.ID] {
+			return WorkerConfig{}, errors.New("worker config: duplicate runtime profile")
+		}
+		seen[r.ID] = true
+		if r.Name == "" {
+			r.Name = r.ID
+		}
+		if r.RestartPolicy == "" {
+			r.RestartPolicy = "on-failure"
+		}
+		if r.RestartPolicy != "on-failure" && r.RestartPolicy != "never" {
+			return WorkerConfig{}, errors.New("worker config: restart_policy must be on-failure or never")
+		}
+		r.WorkingDirectory, err = auth.CanonicalWorkspace(resolve(r.WorkingDirectory), cfg.AllowedWorkspaceRoots)
+		if err != nil {
+			return WorkerConfig{}, err
+		}
+		if strings.ContainsRune(r.CodexBinary, filepath.Separator) {
+			r.CodexBinary = resolve(r.CodexBinary)
 		}
 	}
 	return cfg, nil
@@ -181,10 +250,32 @@ func (r gatewayJSON) config() (GatewayConfig, error) {
 	if cfg.PublicBaseURL == "" {
 		cfg.PublicBaseURL = DefaultPublicBaseURL
 	}
+	u, err := url.Parse(cfg.PublicBaseURL)
+	if err != nil || u.Scheme != "https" || u.Hostname() == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || (u.Path != "" && u.Path != "/") {
+		return GatewayConfig{}, errors.New("gateway config: public_base_url must be an HTTPS origin")
+	}
+	cfg.PublicBaseURL = strings.TrimRight(cfg.PublicBaseURL, "/")
+	host, _, err := net.SplitHostPort(cfg.Listen)
+	if err != nil || net.ParseIP(host) == nil || !net.ParseIP(host).IsLoopback() {
+		return GatewayConfig{}, errors.New("gateway config: listen must be a loopback IP and port behind nginx")
+	}
 	if strings.TrimSpace(cfg.DatabaseURLEnv) == "" || strings.TrimSpace(cfg.WebhookSecretEnv) == "" {
 		return GatewayConfig{}, errors.New("gateway config: database_url_env and webhook_secret_env are required")
 	}
 	return cfg, nil
+}
+
+func decodeConfig(data []byte, dst any) error {
+	d := json.NewDecoder(bytes.NewReader(data))
+	d.DisallowUnknownFields()
+	if err := d.Decode(dst); err != nil {
+		return err
+	}
+	var extra any
+	if err := d.Decode(&extra); err != io.EOF {
+		return errors.New("configuration must contain exactly one JSON object")
+	}
+	return nil
 }
 
 func durationOrDefault(value string, fallback time.Duration) (time.Duration, error) {

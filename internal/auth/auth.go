@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -81,6 +82,9 @@ func CanonicalWorkspace(path string, allowedRoots []string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("resolve workspace path: %w", err)
 	}
+	if info, err := os.Stat(canonical); err != nil || !info.IsDir() {
+		return "", errors.New("workspace must be an existing directory")
+	}
 	for _, root := range allowedRoots {
 		rootPath, err := canonicalRoot(root)
 		if err != nil {
@@ -122,6 +126,9 @@ func canonicalRoot(root string) (string, error) {
 	resolved, err := filepath.EvalSymlinks(filepath.Clean(abs))
 	if err != nil {
 		return "", fmt.Errorf("resolve workspace root: %w", err)
+	}
+	if info, err := os.Stat(resolved); err != nil || !info.IsDir() {
+		return "", errors.New("workspace root must be an existing directory")
 	}
 	return resolved, nil
 }

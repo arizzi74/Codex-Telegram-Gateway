@@ -79,3 +79,15 @@ func writeFile(t *testing.T, path, contents string) {
 		t.Fatal(err)
 	}
 }
+
+func TestRejectUnknownConfigurationAndPublicListener(t *testing.T) {
+	dir := t.TempDir()
+	writeSecret(t, filepath.Join(dir, ".botsecrets"), "BOTNAME=b\nBOTTOKEN=x\nWLNAME=n\nWLID=7\n")
+	path := filepath.Join(dir, "gateway.json")
+	for _, extra := range []string{`,"allowd_user_ids":[8]`, `,"listen":"0.0.0.0:8080"`, `,"public_base_url":"http://example.com"`} {
+		writeFile(t, path, `{"database_url_env":"DB","webhook_secret_env":"WH"`+extra+`}`)
+		if _, err := LoadGateway(path); err == nil {
+			t.Fatal("unsafe configuration accepted")
+		}
+	}
+}
