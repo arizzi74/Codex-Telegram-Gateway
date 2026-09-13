@@ -14,4 +14,8 @@ var SQL embed.FS
 // Files is the ordered migration list. Versions are encoded in the filename.
 var Files = []string{
 	"001_registry.sql",
+	"002_approval_response_claim.sql",
+	"003_admin_passkeys.sql",
+	"004_delivery_state.sql",
+	"005_input_answer_routing.sql",
 }
