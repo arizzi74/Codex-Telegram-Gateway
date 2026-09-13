@@ -23,6 +23,7 @@ type Event struct {
 	ThreadID  string
 	TurnID    string
 	ItemID    string
+	ItemType  string
 	State     string
 	Text      string
 	Thread    *Thread
@@ -37,22 +38,23 @@ type Event struct {
 type Request struct {
 	// RequestID is a stable, lossless encoding of the JSON-RPC ID. It avoids
 	// collisions between e.g. numeric 1 and string "1".
-	RequestID    string
-	Kind         string
-	ID           json.RawMessage
-	Method       string
-	Params       json.RawMessage
-	ThreadID     string
-	TurnID       string
-	ItemID       string
-	ApprovalType string
-	Summary      string
-	Reason       string
-	Command      string
-	CWD          string
-	Decisions    []string
-	Questions    []Question
-	Permissions  json.RawMessage
+	RequestID      string
+	Kind           string
+	ID             json.RawMessage
+	Method         string
+	Params         json.RawMessage
+	ThreadID       string
+	TurnID         string
+	ItemID         string
+	ApprovalType   string
+	Summary        string
+	Reason         string
+	Command        string
+	CWD            string
+	Decisions      []string
+	DecisionValues []json.RawMessage
+	Questions      []Question
+	Permissions    json.RawMessage
 }
 
 // Question and Choice are normalized request_user_input prompts.
@@ -71,8 +73,8 @@ func newEvent(method string, params json.RawMessage) Event {
 	threadID, turnID, itemID := ids(params)
 	event := Event{Kind: eventKind(method), Method: method, Params: cloneRaw(params), Raw: cloneRaw(params), ThreadID: threadID, TurnID: turnID, ItemID: itemID, Unknown: !knownNotification(method)}
 	var value struct {
-		Status string          `json:"status"`
-		State  string          `json:"state"`
+		Status json.RawMessage `json:"status"`
+		State  json.RawMessage `json:"state"`
 		Delta  string          `json:"delta"`
 		Text   string          `json:"text"`
 		Thread json.RawMessage `json:"thread"`
@@ -82,12 +84,25 @@ func newEvent(method string, params json.RawMessage) Event {
 		Item struct {
 			Status string `json:"status"`
 			Text   string `json:"text"`
+			Type   string `json:"type"`
 		} `json:"item"`
 		RequestID json.RawMessage `json:"requestId"`
 	}
 	if json.Unmarshal(params, &value) == nil {
-		event.State = first(value.State, value.Status, value.Turn.Status, value.Item.Status)
+		event.State = first(statusName(value.State), statusName(value.Status), value.Turn.Status, value.Item.Status)
 		event.Text = first(value.Delta, value.Text, value.Item.Text)
+		event.ItemType = value.Item.Type
+		if method == "item/completed" && value.Item.Type == "agentMessage" {
+			event.Kind = "final_agent_message"
+		}
+		if method == "turn/completed" {
+			switch event.State {
+			case "failed":
+				event.Kind = "turn_failed"
+			case "interrupted":
+				event.Kind = "turn_interrupted"
+			}
+		}
 		if len(value.Thread) != 0 {
 			if thread, err := decodeThread(value.Thread); err == nil {
 				event.Thread = &thread
@@ -104,11 +119,12 @@ func newRequest(method string, id, params json.RawMessage) Request {
 	threadID, turnID, itemID := ids(params)
 	request := Request{RequestID: stableRequestID(id), Kind: requestKind(method), ID: cloneRaw(id), Method: method, Params: cloneRaw(params), ThreadID: threadID, TurnID: turnID, ItemID: itemID}
 	var value struct {
-		Reason      string          `json:"reason"`
-		Command     string          `json:"command"`
-		CWD         string          `json:"cwd"`
-		Permissions json.RawMessage `json:"permissions"`
-		Questions   []struct {
+		Reason             string          `json:"reason"`
+		Command            string          `json:"command"`
+		CWD                string          `json:"cwd"`
+		Permissions        json.RawMessage `json:"permissions"`
+		AvailableDecisions json.RawMessage `json:"availableDecisions"`
+		Questions          []struct {
 			ID       string `json:"id"`
 			Header   string `json:"header"`
 			Question string `json:"question"`
@@ -124,7 +140,15 @@ func newRequest(method string, id, params json.RawMessage) Request {
 	request.Reason, request.Command, request.CWD, request.Permissions = value.Reason, value.Command, value.CWD, cloneRaw(value.Permissions)
 	switch request.Kind {
 	case "approval_requested":
-		request.ApprovalType, request.Decisions = approvalDetails(method)
+		request.ApprovalType = approvalType(method)
+		choices := decodeAvailableDecisions(value.AvailableDecisions)
+		// App-server v0.154 schemas do not include availableDecisions for
+		// command/file requests. Use the versioned scalar enum only when the
+		// field is absent or null; an explicit [] means no decision is offered.
+		if value.AvailableDecisions == nil || string(value.AvailableDecisions) == "null" {
+			choices = schemaApprovalDecisions(method)
+		}
+		request.Decisions, request.DecisionValues = approvalDecisions(choices)
 		request.Summary = approvalSummary(request.ApprovalType, value.Command, value.CWD, value.Reason)
 	case "input_requested":
 		for _, question := range value.Questions {
@@ -137,6 +161,33 @@ func newRequest(method string, id, params json.RawMessage) Request {
 		request.Summary = "Codex requested user input"
 	}
 	return request
+}
+
+func decodeAvailableDecisions(raw json.RawMessage) []json.RawMessage {
+	var values []json.RawMessage
+	if json.Unmarshal(raw, &values) != nil {
+		return nil
+	}
+	return values
+}
+
+// schemaApprovalDecisions is the generated v0.154 response enum fallback for
+// requests that do not include availableDecisions. When app-server supplies
+// that field, its exact scalar or structured values always take precedence.
+func schemaApprovalDecisions(method string) []json.RawMessage {
+	var values []string
+	switch method {
+	case "item/commandExecution/requestApproval", "item/fileChange/requestApproval":
+		values = []string{"accept", "acceptForSession", "decline", "cancel"}
+	default:
+		return nil
+	}
+	result := make([]json.RawMessage, 0, len(values))
+	for _, value := range values {
+		encoded, _ := json.Marshal(value)
+		result = append(result, encoded)
+	}
+	return result
 }
 
 func first(values ...string) string {
@@ -181,7 +232,7 @@ func requestKind(method string) string {
 	switch method {
 	case "item/commandExecution/requestApproval", "item/fileChange/requestApproval", "item/permissions/requestApproval":
 		return "approval_requested"
-	case "tool/requestUserInput":
+	case "item/tool/requestUserInput", "tool/requestUserInput":
 		return "input_requested"
 	case "mcpServer/elicitation/request":
 		return "elicitation_requested"
@@ -190,17 +241,31 @@ func requestKind(method string) string {
 	}
 }
 
-func approvalDetails(method string) (string, []string) {
+func approvalType(method string) string {
 	switch method {
 	case "item/commandExecution/requestApproval":
-		return "command_execution", []string{"accept", "acceptForSession", "decline", "cancel"}
+		return "command_execution"
 	case "item/fileChange/requestApproval":
-		return "file_change", []string{"accept", "acceptForSession", "decline", "cancel"}
+		return "file_change"
 	case "item/permissions/requestApproval":
-		return "permissions", []string{"grant", "decline"}
+		return "permissions"
 	default:
-		return "unknown", nil
+		return "unknown"
 	}
+}
+
+func approvalDecisions(raw []json.RawMessage) ([]string, []json.RawMessage) {
+	values := make([]json.RawMessage, 0, len(raw))
+	var labels []string
+	for _, value := range raw {
+		value = cloneRaw(value)
+		values = append(values, value)
+		var label string
+		if json.Unmarshal(value, &label) == nil {
+			labels = append(labels, label)
+		}
+	}
+	return labels, values
 }
 
 func approvalSummary(kind, command, cwd, reason string) string {
@@ -313,6 +378,7 @@ type Thread struct {
 	CreatedAt     int64
 	UpdatedAt     int64
 	Ephemeral     bool
+	ActiveTurnID  string
 	Raw           json.RawMessage
 }
 
@@ -326,22 +392,47 @@ type Turn struct {
 
 func decodeThread(raw json.RawMessage) (Thread, error) {
 	var wire struct {
-		ID            string `json:"id"`
-		SessionID     string `json:"sessionId"`
-		Name          string `json:"name"`
-		Preview       string `json:"preview"`
-		CWD           string `json:"cwd"`
-		Model         string `json:"model"`
-		ModelProvider string `json:"modelProvider"`
-		Status        string `json:"status"`
-		CreatedAt     int64  `json:"createdAt"`
-		UpdatedAt     int64  `json:"updatedAt"`
-		Ephemeral     bool   `json:"ephemeral"`
+		ID            string          `json:"id"`
+		SessionID     string          `json:"sessionId"`
+		Name          string          `json:"name"`
+		Preview       string          `json:"preview"`
+		CWD           string          `json:"cwd"`
+		Model         string          `json:"model"`
+		ModelProvider string          `json:"modelProvider"`
+		Status        json.RawMessage `json:"status"`
+		CreatedAt     int64           `json:"createdAt"`
+		UpdatedAt     int64           `json:"updatedAt"`
+		Ephemeral     bool            `json:"ephemeral"`
+		Turns         []struct {
+			ID     string `json:"id"`
+			Status string `json:"status"`
+		} `json:"turns"`
 	}
 	if err := json.Unmarshal(raw, &wire); err != nil {
 		return Thread{}, err
 	}
-	return Thread{ID: wire.ID, SessionID: wire.SessionID, Name: wire.Name, Preview: wire.Preview, CWD: wire.CWD, Model: wire.Model, ModelProvider: wire.ModelProvider, Status: wire.Status, CreatedAt: wire.CreatedAt, UpdatedAt: wire.UpdatedAt, Ephemeral: wire.Ephemeral, Raw: cloneRaw(raw)}, nil
+	thread := Thread{ID: wire.ID, SessionID: wire.SessionID, Name: wire.Name, Preview: wire.Preview, CWD: wire.CWD, Model: wire.Model, ModelProvider: wire.ModelProvider, Status: statusName(wire.Status), CreatedAt: wire.CreatedAt, UpdatedAt: wire.UpdatedAt, Ephemeral: wire.Ephemeral, Raw: cloneRaw(raw)}
+	for _, turn := range wire.Turns {
+		if turn.Status == "inProgress" {
+			thread.ActiveTurnID = turn.ID
+			break
+		}
+	}
+	return thread, nil
+}
+
+func statusName(raw json.RawMessage) string {
+	var value string
+	if json.Unmarshal(raw, &value) == nil {
+		return value
+	}
+	var object struct {
+		Type string `json:"type"`
+	}
+	if json.Unmarshal(raw, &object) == nil {
+		return object.Type
+	}
+	return ""
 }
 
 func decodeTurn(raw json.RawMessage) (Turn, error) {
@@ -460,7 +551,7 @@ type ThreadPage struct {
 // ListThreads returns one persisted-thread page. Call ListAllThreads to follow
 // cursors through a bounded discovery scan.
 func (c *Client) ListThreads(ctx context.Context, cursor string, limit int) (ThreadPage, error) {
-	params := map[string]any{}
+	params := map[string]any{"sourceKinds": []string{"cli", "vscode", "exec", "appServer"}}
 	if cursor != "" {
 		params["cursor"] = cursor
 	}

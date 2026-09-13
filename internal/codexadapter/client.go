@@ -32,6 +32,9 @@ var (
 	// ErrMethodUnavailable marks a JSON-RPC -32601 response. The worker can use
 	// Supports to expose a deterministic degraded runtime state.
 	ErrMethodUnavailable = errors.New("codex app-server method unavailable")
+	// ErrRequestNotPending rejects a stale or duplicate response to a
+	// server-initiated approval/input request.
+	ErrRequestNotPending = errors.New("codex app-server request is no longer pending")
 )
 
 // ClientInfo identifies this integration during the app-server handshake.
@@ -66,6 +69,9 @@ func (c Config) normalized() Config {
 	}
 	if c.ClientInfo.Name == "" {
 		c.ClientInfo.Name = "telegramgw"
+	}
+	if c.ClientInfo.Version == "" {
+		c.ClientInfo.Version = "dev"
 	}
 	if c.RequestTimeout <= 0 {
 		c.RequestTimeout = 30 * time.Second
@@ -112,6 +118,7 @@ type Client struct {
 	methods        map[string]bool
 	serverRequests map[string]Request
 	pid            int
+	localSocket    string
 	nextID         atomic.Int64
 	stop           sync.Once
 }
@@ -249,6 +256,16 @@ func (c *Client) Events() <-chan Event { return c.events }
 // input prompts. The Request ID must be returned verbatim through Reply.
 func (c *Client) Requests() <-chan Request { return c.reqs }
 
+// RequestPending reports whether a server-initiated request is still awaiting
+// a reply. Coordinators must check it when consuming Requests because a
+// serverRequest/resolved notification can arrive first on the event stream.
+func (c *Client) RequestPending(requestID string) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	_, pending := c.serverRequests[requestID]
+	return pending
+}
+
 // Err reports the terminal process or transport error after Done closes.
 func (c *Client) Err() error {
 	c.mu.Lock()
@@ -265,6 +282,14 @@ func (c *Client) PID() int {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.pid
+}
+
+// LocalSocket is the owned private Unix app-server socket for a shared
+// runtime. Direct stdio runtimes return an empty string.
+func (c *Client) LocalSocket() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.localSocket
 }
 
 // ExecutableVersion returns the installed CLI's version text. It is separate
@@ -667,29 +692,35 @@ func (c *Client) ReplyError(ctx context.Context, request Request, code int, mess
 // permission grant, omit Permissions to grant exactly the requested subset;
 // provide a JSON array only to grant a narrower subset.
 type ApprovalResponse struct {
-	Decision    string
-	Permissions json.RawMessage
-	Scope       string
+	// Decision is a scalar decision selected from Request.Decisions. For a
+	// structured decision supplied by app-server, preserve it in DecisionValue.
+	Decision      string
+	DecisionValue json.RawMessage
+	Permissions   json.RawMessage
+	Scope         string
 }
 
 // ReplyApproval builds the version-specific response internally and consumes
 // the tracked request before writing, preventing a second stale reply.
 func (c *Client) ReplyApproval(ctx context.Context, requestID string, response ApprovalResponse) error {
-	request, err := c.takeRequest(requestID)
+	request, err := c.snapshotRequest(requestID)
 	if err != nil {
 		return err
 	}
 	if request.Kind != "approval_requested" {
 		return errors.New("server request is not an approval")
 	}
+	var payload any
 	switch request.ApprovalType {
 	case "command_execution", "file_change":
-		if !contains(request.Decisions, response.Decision) {
-			return fmt.Errorf("invalid %s decision %q", request.ApprovalType, response.Decision)
+		decision, err := approvalDecision(request, response)
+		if err != nil {
+			return err
 		}
-		return c.replyRaw(ctx, request.ID, map[string]any{"decision": response.Decision})
+		payload = map[string]any{"decision": decision}
 	case "permissions":
 		var permissions json.RawMessage
+		scope := response.Scope
 		switch response.Decision {
 		case "grant":
 			permissions = response.Permissions
@@ -697,35 +728,84 @@ func (c *Client) ReplyApproval(ctx context.Context, requestID string, response A
 				permissions = request.Permissions
 			}
 		case "decline":
-			permissions = json.RawMessage("[]")
+			permissions = json.RawMessage("{}")
 		default:
 			return fmt.Errorf("invalid permissions decision %q", response.Decision)
 		}
-		if len(permissions) == 0 {
+		if !jsonObject(permissions) {
 			return errors.New("permission grant requires requested permissions")
 		}
-		payload := map[string]any{"permissions": permissions}
-		if response.Scope != "" {
-			payload["scope"] = response.Scope
+		if scope == "" {
+			scope = "turn"
 		}
-		return c.replyRaw(ctx, request.ID, payload)
+		if scope != "turn" && scope != "session" {
+			return fmt.Errorf("invalid permission scope %q", scope)
+		}
+		payload = map[string]any{"permissions": permissions, "scope": scope}
 	default:
 		return fmt.Errorf("unsupported approval type %q", request.ApprovalType)
 	}
+	request, err = c.takeRequest(requestID)
+	if err != nil {
+		return err
+	}
+	return c.replyRaw(ctx, request.ID, payload)
+}
+
+func jsonObject(raw json.RawMessage) bool {
+	var object map[string]json.RawMessage
+	return len(raw) != 0 && json.Unmarshal(raw, &object) == nil && object != nil
+}
+
+func approvalDecision(request Request, response ApprovalResponse) (json.RawMessage, error) {
+	if len(response.DecisionValue) != 0 {
+		for _, allowed := range request.DecisionValues {
+			if string(allowed) == string(response.DecisionValue) {
+				return cloneRaw(response.DecisionValue), nil
+			}
+		}
+		return nil, fmt.Errorf("decision is not available for %s", request.ApprovalType)
+	}
+	if !contains(request.Decisions, response.Decision) {
+		return nil, fmt.Errorf("invalid %s decision %q", request.ApprovalType, response.Decision)
+	}
+	return json.RawMessage(fmt.Sprintf("%q", response.Decision)), nil
 }
 
 // ReplyAnswers responds to a normalized request_user_input request.
 func (c *Client) ReplyAnswers(ctx context.Context, requestID string, answers map[string][]string) error {
-	request, err := c.takeRequest(requestID)
+	request, err := c.snapshotRequest(requestID)
 	if err != nil {
 		return err
 	}
 	if request.Kind != "input_requested" {
 		return errors.New("server request is not user input")
 	}
+	known := make(map[string]struct{}, len(request.Questions))
+	for _, question := range request.Questions {
+		known[question.ID] = struct{}{}
+		values, present := answers[question.ID]
+		if !present || len(values) == 0 {
+			return fmt.Errorf("missing answer for question %q", question.ID)
+		}
+		for _, value := range values {
+			if value == "" {
+				return fmt.Errorf("empty answer for question %q", question.ID)
+			}
+		}
+	}
+	for id := range answers {
+		if _, ok := known[id]; !ok {
+			return fmt.Errorf("answer for unknown question %q", id)
+		}
+	}
 	payload := make(map[string]any, len(answers))
 	for id, values := range answers {
 		payload[id] = map[string]any{"answers": values}
+	}
+	request, err = c.takeRequest(requestID)
+	if err != nil {
+		return err
 	}
 	return c.replyRaw(ctx, request.ID, map[string]any{"answers": payload})
 }
@@ -751,7 +831,20 @@ func (c *Client) takeRequest(requestID string) (Request, error) {
 		return Request{}, ErrNotInitialized
 	}
 	if !found {
-		return Request{}, errors.New("server request is no longer pending")
+		return Request{}, ErrRequestNotPending
+	}
+	return request, nil
+}
+
+func (c *Client) snapshotRequest(requestID string) (Request, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !c.ready {
+		return Request{}, ErrNotInitialized
+	}
+	request, found := c.serverRequests[requestID]
+	if !found {
+		return Request{}, ErrRequestNotPending
 	}
 	return request, nil
 }

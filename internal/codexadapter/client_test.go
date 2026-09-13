@@ -186,10 +186,16 @@ func TestNotificationsServerRequestsAndExactReply(t *testing.T) {
 func TestApprovalProjectionBuildsOneExactReply(t *testing.T) {
 	client, fake := newFake(t)
 	initialize(t, client, fake)
-	fake.write(t, map[string]any{"method": "item/commandExecution/requestApproval", "id": 17, "params": map[string]any{"threadId": "thr_1", "turnId": "turn_1", "itemId": "item_1", "command": "go test ./...", "cwd": "/work", "reason": "verification"}})
+	fake.write(t, map[string]any{"method": "item/commandExecution/requestApproval", "id": 17, "params": map[string]any{"threadId": "thr_1", "turnId": "turn_1", "itemId": "item_1", "command": "go test ./...", "cwd": "/work", "reason": "verification", "availableDecisions": []any{"accept", "acceptForSession", "decline"}}})
 	request := <-client.Requests()
 	if request.Kind != "approval_requested" || request.ApprovalType != "command_execution" || request.RequestID == "" || request.Command != "go test ./..." || !contains(request.Decisions, "acceptForSession") {
 		t.Fatalf("approval projection = %#v", request)
+	}
+	if err := client.ReplyApproval(context.Background(), request.RequestID, ApprovalResponse{Decision: "cancel"}); err == nil {
+		t.Fatal("accepted unavailable approval decision")
+	}
+	if !client.RequestPending(request.RequestID) {
+		t.Fatal("invalid decision consumed pending approval")
 	}
 	done := make(chan error, 1)
 	go func() {
@@ -206,8 +212,37 @@ func TestApprovalProjectionBuildsOneExactReply(t *testing.T) {
 	if err := <-done; err != nil {
 		t.Fatalf("approval reply: %v", err)
 	}
-	if err := client.ReplyApproval(context.Background(), request.RequestID, ApprovalResponse{Decision: "accept"}); err == nil || !strings.Contains(err.Error(), "no longer pending") {
+	if err := client.ReplyApproval(context.Background(), request.RequestID, ApprovalResponse{Decision: "accept"}); !errors.Is(err, ErrRequestNotPending) {
 		t.Fatalf("duplicate reply error = %v", err)
+	}
+}
+
+func TestReplyAnswersValidatesBeforeConsumingRequest(t *testing.T) {
+	client, fake := newFake(t)
+	initialize(t, client, fake)
+	fake.write(t, map[string]any{"method": "item/tool/requestUserInput", "id": 19, "params": map[string]any{"threadId": "thr_1", "turnId": "turn_1", "itemId": "item_1", "isBlocking": true, "questions": []map[string]any{{"id": "choice", "header": "Choice", "question": "Continue?"}}}})
+	request := <-client.Requests()
+	if err := client.ReplyAnswers(context.Background(), request.RequestID, map[string][]string{}); err == nil {
+		t.Fatal("accepted missing answer")
+	}
+	if !client.RequestPending(request.RequestID) {
+		t.Fatal("invalid answers consumed pending request")
+	}
+	done := make(chan error, 1)
+	go func() {
+		done <- client.ReplyAnswers(context.Background(), request.RequestID, map[string][]string{"choice": {"yes"}})
+	}()
+	response := fake.next(t)
+	var result struct {
+		Answers map[string]struct {
+			Answers []string `json:"answers"`
+		} `json:"answers"`
+	}
+	if err := json.Unmarshal(response["result"], &result); err != nil || result.Answers["choice"].Answers[0] != "yes" {
+		t.Fatalf("answer response = %s, %v", response["result"], err)
+	}
+	if err := <-done; err != nil {
+		t.Fatalf("reply answers: %v", err)
 	}
 }
 
@@ -221,7 +256,7 @@ func TestServerRequestResolvedClearsTrackedApproval(t *testing.T) {
 	if event.Kind != "server_request_resolved" || event.RequestID != request.RequestID {
 		t.Fatalf("resolved event = %#v, request = %#v", event, request)
 	}
-	if err := client.ReplyApproval(context.Background(), request.RequestID, ApprovalResponse{Decision: "accept"}); err == nil || !strings.Contains(err.Error(), "no longer pending") {
+	if err := client.ReplyApproval(context.Background(), request.RequestID, ApprovalResponse{Decision: "accept"}); !errors.Is(err, ErrRequestNotPending) {
 		t.Fatalf("cleared approval reply error = %v", err)
 	}
 }
@@ -344,6 +379,36 @@ func TestMissingRequiredMethodMarksCapabilityUnavailable(t *testing.T) {
 	}
 	if client.Supports("thread/list") || client.Capabilities().Methods["thread/list"] {
 		t.Fatal("thread/list capability remained available")
+	}
+}
+
+func TestSchemaStatusAndCompletionProjections(t *testing.T) {
+	thread, err := decodeThread(json.RawMessage(`{"id":"thr_1","sessionId":"thr_1","status":{"type":"active","activeFlags":["waitingOnApproval"]},"turns":[{"id":"turn_old","status":"completed"},{"id":"turn_live","status":"inProgress"}]}`))
+	if err != nil || thread.Status != "active" || thread.ActiveTurnID != "turn_live" {
+		t.Fatalf("thread status projection = %#v, %v", thread, err)
+	}
+	status := newEvent("thread/status/changed", json.RawMessage(`{"threadId":"thr_1","status":{"type":"notLoaded"}}`))
+	if status.State != "notLoaded" {
+		t.Fatalf("thread status event = %#v", status)
+	}
+	final := newEvent("item/completed", json.RawMessage(`{"threadId":"thr_1","turnId":"turn_1","item":{"id":"item_1","type":"agentMessage","status":"completed","text":"done"}}`))
+	if final.Kind != "final_agent_message" || final.ItemType != "agentMessage" || final.Text != "done" {
+		t.Fatalf("final item = %#v", final)
+	}
+	failed := newEvent("turn/completed", json.RawMessage(`{"threadId":"thr_1","turn":{"id":"turn_1","status":"failed"}}`))
+	if failed.Kind != "turn_failed" || failed.State != "failed" {
+		t.Fatalf("failed turn = %#v", failed)
+	}
+}
+
+func TestApprovalDecisionsHonorExplicitEmptyList(t *testing.T) {
+	request := newRequest("item/commandExecution/requestApproval", json.RawMessage("1"), json.RawMessage(`{"availableDecisions":[]}`))
+	if len(request.Decisions) != 0 || len(request.DecisionValues) != 0 {
+		t.Fatalf("explicit empty decisions = %#v", request)
+	}
+	fallback := newRequest("item/commandExecution/requestApproval", json.RawMessage("2"), json.RawMessage(`{}`))
+	if !contains(fallback.Decisions, "accept") {
+		t.Fatalf("missing schema fallback: %#v", fallback)
 	}
 }
 
