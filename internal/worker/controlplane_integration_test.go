@@ -97,18 +97,24 @@ func TestControlPlaneWorkerOutboxSurvivesGatewayRestartIntegration(t *testing.T)
 		sessions, e = store.SessionSnapshot(ctx)
 		return e == nil && len(sessions) == 3
 	})
-	targetThread := sessions[0].ThreadID
+	runtimeID := agent.manager.Snapshot()[0].ID
 
-	// Selection and a normal Telegram message travel through the actual webhook;
-	// dispatcher routing stays frozen even while selection changes later.
-	postTelegram(t, gw.server.Client(), gw.server.URL, "secret", 1, "/connect "+sessions[0].ID, 0)
-	postTelegram(t, gw.server.Client(), gw.server.URL, "secret", 2, "perform an offline-safe turn", 0)
+	// AT-03: /sessions traverses the actual webhook, Registry delivery and
+	// sender renderer; the Telegram result contains every discovered thread.
+	postTelegram(t, gw.server.Client(), gw.server.URL, "secret", 1, "/sessions "+runtimeID, 0)
+	waitControl(t, func() bool { return tg.hasText("Sessions", "Alpha", "Beta", "Gamma") })
+
+	a, b := sessions[0], sessions[1]
+	targetThread := a.ThreadID
+
+	// Selection and a normal Telegram message travel through the actual webhook.
+	postTelegram(t, gw.server.Client(), gw.server.URL, "secret", 2, "/connect "+a.ID, 0)
+	postTelegram(t, gw.server.Client(), gw.server.URL, "secret", 3, "perform an offline-safe turn", 0)
 	waitControl(t, func() bool {
 		fakeMu.Lock()
 		defer fakeMu.Unlock()
 		return fake != nil && countFixtureCalls(fake.Calls(), "turn/start") == 1
 	})
-	runtimeID := agent.manager.Snapshot()[0].ID
 	active := ""
 	waitControl(t, func() bool {
 		localSessions, e := local.ListSessions(runtimeID)
@@ -123,12 +129,84 @@ func TestControlPlaneWorkerOutboxSurvivesGatewayRestartIntegration(t *testing.T)
 		return active != ""
 	})
 
+	// AT-04: changing the Telegram selection changes only the binding. It must
+	// neither interrupt A nor issue another resume/start while A is running.
+	fakeMu.Lock()
+	f := fake
+	beforeStart := countFixtureCalls(f.Calls(), "turn/start")
+	beforeInterrupt := countFixtureCalls(f.Calls(), "turn/interrupt")
+	beforeResume := countFixtureCalls(f.Calls(), "thread/resume")
+	fakeMu.Unlock()
+	postTelegram(t, gw.server.Client(), gw.server.URL, "secret", 4, "/connect "+b.ID, 0)
+	waitControl(t, func() bool { return tg.hasText("Connected to", "Beta") })
+	time.Sleep(250 * time.Millisecond)
+	fakeMu.Lock()
+	if got := countFixtureCalls(f.Calls(), "turn/start"); got != beforeStart {
+		fakeMu.Unlock()
+		t.Fatalf("selection started another turn: got %d want %d", got, beforeStart)
+	}
+	if got := countFixtureCalls(f.Calls(), "turn/interrupt"); got != beforeInterrupt {
+		fakeMu.Unlock()
+		t.Fatalf("selection interrupted A: got %d want %d", got, beforeInterrupt)
+	}
+	if got := countFixtureCalls(f.Calls(), "thread/resume"); got != beforeResume {
+		fakeMu.Unlock()
+		t.Fatalf("selection resumed a thread: got %d want %d", got, beforeResume)
+	}
+	fakeMu.Unlock()
+	if currentActive(t, local, runtimeID, targetThread) != active {
+		t.Fatalf("selection changed A active turn: got %q want %q", currentActive(t, local, runtimeID, targetThread), active)
+	}
+
+	// AT-10: lose only the WSS transport. The server keeps running, the runtime
+	// and active turn remain local, Registry marks the worker unreachable, then
+	// the same worker reconnects and restores Registry liveness.
+	slot.blockAndClose()
+	waitControl(t, func() bool { return workerConnectivity(store, ctx, workerID) == "unreachable" })
+	if currentActive(t, local, runtimeID, targetThread) != active || len(agent.manager.Snapshot()) != 1 {
+		t.Fatal("WSS loss changed the local active turn or runtime")
+	}
+	slot.restore()
+	waitControl(t, func() bool {
+		return len(gw.hub.ConnectedWorkers()) == 1 && workerConnectivity(store, ctx, workerID) == "online"
+	})
+	waitControl(t, func() bool {
+		reconciled, err := store.SessionSnapshot(ctx)
+		return err == nil && len(reconciled) == 3 && currentActive(t, local, runtimeID, targetThread) == active
+	})
+
+	// AT-13: the approval button is persisted by the sender, then Codex clears
+	// the exact server request before the click. The click produces only the
+	// durable stale-button UI response and no App Server reply.
+	connected := tg.countText("Connected to")
+	postTelegram(t, gw.server.Client(), gw.server.URL, "secret", 5, "/connect "+a.ID, 0)
+	waitControl(t, func() bool { return tg.countText("Connected to") > connected })
+	if err := f.Request("item/commandExecution/requestApproval", 91, map[string]any{"threadId": targetThread, "turnId": active, "command": "go test ./...", "availableDecisions": []string{"accept", "decline"}}); err != nil {
+		t.Fatal(err)
+	}
+	var staleCallback string
+	waitControl(t, func() bool {
+		staleCallback = tg.callbackFor("Approval required")
+		return staleCallback != ""
+	})
+	responses := len(f.Responses())
+	if err := f.Emit("serverRequest/resolved", map[string]any{"threadId": targetThread, "turnId": active, "requestId": 91}); err != nil {
+		t.Fatal(err)
+	}
+	waitControl(t, func() bool {
+		dashboard, err := store.AdminDashboardSnapshot(ctx)
+		return err == nil && dashboard.PendingApprovals == 0
+	})
+	postCallback(t, gw.server.Client(), gw.server.URL, "secret", 6, staleCallback)
+	waitControl(t, func() bool { return tg.hasText("This button is expired") })
+	time.Sleep(250 * time.Millisecond)
+	if got := len(f.Responses()); got != responses {
+		t.Fatalf("stale approval reached Codex: responses got %d want %d", got, responses)
+	}
+
 	// Stop only the gateway. The live worker/runtime continues; a final event
 	// emitted during the outage must remain in bbolt until reconnection.
 	gw.close()
-	fakeMu.Lock()
-	f := fake
-	fakeMu.Unlock()
 	if active == "" {
 		t.Fatal("fixture did not return a turn id")
 	}
@@ -212,12 +290,37 @@ func startControlGateway(t *testing.T, store *registry.Store, telegram gateway.T
 }
 
 type gatewaySlot struct {
-	mu  sync.RWMutex
-	run *gatewayRun
+	mu        sync.RWMutex
+	run       *gatewayRun
+	available bool
+	conn      *websocket.Conn
 }
 
-func (s *gatewaySlot) set(run *gatewayRun)  { s.mu.Lock(); s.run = run; s.mu.Unlock() }
-func (s *gatewaySlot) current() *gatewayRun { s.mu.RLock(); defer s.mu.RUnlock(); return s.run }
+func (s *gatewaySlot) set(run *gatewayRun) {
+	s.mu.Lock()
+	s.run, s.available = run, true
+	s.mu.Unlock()
+}
+func (s *gatewaySlot) current() (*gatewayRun, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.run, s.available
+}
+func (s *gatewaySlot) remember(conn *websocket.Conn) {
+	s.mu.Lock()
+	s.conn = conn
+	s.mu.Unlock()
+}
+func (s *gatewaySlot) blockAndClose() {
+	s.mu.Lock()
+	s.available = false
+	conn := s.conn
+	s.mu.Unlock()
+	if conn != nil {
+		conn.CloseNow()
+	}
+}
+func (s *gatewaySlot) restore() { s.mu.Lock(); s.available = true; s.mu.Unlock() }
 
 func (g *gatewayRun) close() {
 	if g.server == nil {
@@ -234,14 +337,18 @@ func dialTestServer(slot *gatewaySlot) func(config.WorkerConfig, *Store, *slog.L
 			return nil, e
 		}
 		c.dial = func(ctx context.Context, _ string, options *websocket.DialOptions) (*websocket.Conn, *http.Response, error) {
-			current := slot.current()
-			if current == nil || current.server == nil {
+			current, available := slot.current()
+			if !available || current == nil || current.server == nil {
 				return nil, nil, errors.New("test gateway is stopped")
 			}
 			client := current.server.Client()
 			copy := *options
 			copy.HTTPClient = client
-			return websocket.Dial(ctx, "wss"+strings.TrimPrefix(current.server.URL, "https")+"/api/v1/workers/connect", &copy)
+			conn, response, err := websocket.Dial(ctx, "wss"+strings.TrimPrefix(current.server.URL, "https")+"/api/v1/workers/connect", &copy)
+			if err == nil {
+				slot.remember(conn)
+			}
+			return conn, response, err
 		}
 		return c, nil
 	}
@@ -274,6 +381,40 @@ func (t *telegramRecorder) countText(v string) int {
 		}
 	}
 	return n
+}
+func (t *telegramRecorder) hasText(parts ...string) bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	for _, m := range t.messages {
+		matched := true
+		for _, part := range parts {
+			if !strings.Contains(m.Text, part) {
+				matched = false
+				break
+			}
+		}
+		if matched {
+			return true
+		}
+	}
+	return false
+}
+func (t *telegramRecorder) callbackFor(messagePart string) string {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	for _, m := range t.messages {
+		if !strings.Contains(m.Text, messagePart) || m.Keyboard == nil {
+			continue
+		}
+		for _, row := range m.Keyboard.Rows {
+			for _, button := range row {
+				if button.Data != "" {
+					return button.Data
+				}
+			}
+		}
+	}
+	return ""
 }
 
 type readinessFail struct{ *registry.Store }
@@ -336,6 +477,51 @@ func postTelegram(t *testing.T, c *http.Client, base, secret string, id int64, t
 	if res.StatusCode != http.StatusOK {
 		t.Fatalf("telegram update %d status %d", id, res.StatusCode)
 	}
+}
+func postCallback(t *testing.T, c *http.Client, base, secret string, id int64, data string) {
+	t.Helper()
+	body, err := json.Marshal(map[string]any{"update_id": id, "callback_query": map[string]any{"id": "callback-" + string(rune('0'+id)), "from": map[string]any{"id": 7}, "data": data, "message": map[string]any{"message_id": id, "chat": map[string]any{"id": 9}}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req, err := http.NewRequest(http.MethodPost, base+"/api/v1/telegram/webhook", strings.NewReader(string(body)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("X-Telegram-Bot-Api-Secret-Token", secret)
+	res, err := c.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("Telegram callback %d status %d", id, res.StatusCode)
+	}
+}
+func currentActive(t *testing.T, local *Store, runtimeID, threadID string) string {
+	t.Helper()
+	sessions, err := local.ListSessions(runtimeID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, session := range sessions {
+		if session.ThreadID == threadID {
+			return session.ActiveTurnID
+		}
+	}
+	return ""
+}
+func workerConnectivity(store *registry.Store, ctx context.Context, id uuid.UUID) string {
+	workers, err := store.ListWorkers(ctx)
+	if err != nil {
+		return ""
+	}
+	for _, worker := range workers {
+		if worker.ID == id {
+			return worker.Connectivity
+		}
+	}
+	return ""
 }
 func waitControl(t *testing.T, ok func() bool) {
 	t.Helper()

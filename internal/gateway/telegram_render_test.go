@@ -95,6 +95,16 @@ func renderFixture() *renderStoreFake {
 	}
 }
 
+func TestRenderResolvedInputDoesNotRetryObsoletePrompt(t *testing.T) {
+	store := renderFixture()
+	store.approvalErr = registry.ErrTelegramTarget
+	payload, _ := json.Marshal(registry.AcceptResult{View: "input_pending", ApprovalID: testApproval.String(), QuestionID: "q2"})
+	text, keyboard, err := testSender(store, nil).render(context.Background(), registry.Delivery{Kind: "ui_response", Payload: payload})
+	if err != nil || keyboard != nil || !strings.Contains(text, "no longer pending") {
+		t.Fatalf("obsolete prompt: %q %v %v", text, keyboard, err)
+	}
+}
+
 func testSender(store *renderStoreFake, redactor *auth.Redactor) *Sender {
 	return NewSender(store, nil, slog.New(slog.NewTextHandler(io.Discard, nil)), SenderOptions{BotID: "bot", OwnerID: 42, Redactor: redactor})
 }

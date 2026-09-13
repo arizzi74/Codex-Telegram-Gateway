@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"io"
 	"sync"
+	"time"
 
 	"github.com/iaia/telegramgw/internal/codexadapter"
 )
@@ -24,6 +25,8 @@ type Response struct {
 type Server struct {
 	in          *bufio.Scanner
 	out         *json.Encoder
+	raw         io.Writer
+	writeMu     sync.Mutex
 	close       func()
 	mu          sync.Mutex
 	calls       []Call
@@ -32,6 +35,7 @@ type Server struct {
 	threads     []map[string]any
 	loaded      []string
 	unavailable map[string]bool
+	delays      map[string]time.Duration
 }
 
 // SetThreads controls the fixture's reconciliation response. Thread values
@@ -53,10 +57,21 @@ func (s *Server) SetMethodUnavailable(method string, unavailable bool) {
 	s.unavailable[method] = unavailable
 }
 
+// SetResponseDelay delays replies for method. It lets tests exercise caller
+// deadlines while keeping the fixture on the real JSONL transport.
+func (s *Server) SetResponseDelay(method string, delay time.Duration) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.delays == nil {
+		s.delays = map[string]time.Duration{}
+	}
+	s.delays[method] = delay
+}
+
 func New(ctx context.Context) (*codexadapter.Client, *Server, error) {
 	inR, inW := io.Pipe()
 	outR, outW := io.Pipe()
-	s := &Server{in: bufio.NewScanner(inR), out: json.NewEncoder(outW), unavailable: map[string]bool{}, close: func() { _ = inR.Close(); _ = inW.Close(); _ = outR.Close(); _ = outW.Close() }}
+	s := &Server{in: bufio.NewScanner(inR), out: json.NewEncoder(outW), raw: outW, unavailable: map[string]bool{}, delays: map[string]time.Duration{}, close: func() { _ = inR.Close(); _ = inW.Close(); _ = outR.Close(); _ = outW.Close() }}
 	go s.serve()
 	c := codexadapter.New(codexadapter.Transport{In: inW, Out: outR, Close: func() error { s.close(); return nil }}, codexadapter.Config{})
 	if err := c.Initialize(ctx); err != nil {
@@ -77,10 +92,31 @@ func (s *Server) Responses() []Response {
 	return append([]Response(nil), s.responses...)
 }
 func (s *Server) Emit(method string, params any) error {
-	return s.out.Encode(map[string]any{"method": method, "params": params})
+	return s.write(map[string]any{"method": method, "params": params})
 }
 func (s *Server) Request(method string, id any, params any) error {
-	return s.out.Encode(map[string]any{"method": method, "id": id, "params": params})
+	return s.write(map[string]any{"method": method, "id": id, "params": params})
+}
+
+// EmitRaw writes one raw JSONL record verbatim. Tests use it to make the
+// adapter observe malformed input while retaining the same fixture process.
+func (s *Server) EmitRaw(record string) error {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	if _, err := io.WriteString(s.raw, record); err != nil {
+		return err
+	}
+	if len(record) == 0 || record[len(record)-1] != '\n' {
+		_, err := io.WriteString(s.raw, "\n")
+		return err
+	}
+	return nil
+}
+
+func (s *Server) write(value any) error {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	return s.out.Encode(value)
 }
 
 func (s *Server) serve() {
@@ -105,9 +141,17 @@ func (s *Server) serve() {
 		s.next++
 		n := s.next
 		unavailable := s.unavailable[request.Method]
+		delay := s.delays[request.Method]
 		s.mu.Unlock()
+		// JSON-RPC notifications such as initialized have no response ID.
+		if len(request.ID) == 0 {
+			continue
+		}
+		if delay > 0 {
+			time.Sleep(delay)
+		}
 		if unavailable {
-			_ = s.out.Encode(map[string]any{"id": json.RawMessage(request.ID), "error": map[string]any{"code": -32601, "message": "method not found"}})
+			_ = s.write(map[string]any{"id": json.RawMessage(request.ID), "error": map[string]any{"code": -32601, "message": "method not found"}})
 			continue
 		}
 		var result any = map[string]any{}
@@ -145,7 +189,7 @@ func (s *Server) serve() {
 			s.mu.Unlock()
 			result = map[string]any{"data": loaded}
 		}
-		_ = s.out.Encode(map[string]any{"id": json.RawMessage(request.ID), "result": result})
+		_ = s.write(map[string]any{"id": json.RawMessage(request.ID), "result": result})
 	}
 }
 

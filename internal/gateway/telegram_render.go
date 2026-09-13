@@ -290,6 +290,9 @@ func (s *Sender) renderPendingInput(ctx context.Context, row registry.Delivery, 
 	}
 	approval, err := store.PendingApproval(ctx, approvalID)
 	if err != nil {
+		if errors.Is(err, registry.ErrTelegramTarget) {
+			return "This input request is no longer pending.", nil, nil
+		}
 		return "", nil, fmt.Errorf("render pending input request: %w", err)
 	}
 	question, ok := findQuestion(approval.Questions, response.QuestionID)
@@ -415,7 +418,7 @@ func (s *Sender) renderEvent(ctx context.Context, row registry.Delivery) (string
 
 func (s *Sender) renderApproval(ctx context.Context, row registry.Delivery, identity string, event protocol.Event, approval protocol.Approval) (string, *TelegramKeyboard, error) {
 	if len(approval.Decisions) == 0 {
-		return "", nil, errors.New("render approval request: no decisions")
+		return "⚠️ " + identity + "\n\nCodex requested approval without a supported decision. Open the local Codex terminal to review this request.\n" + approval.Summary, nil, nil
 	}
 	approvalID, err := requiredUUID("approval", approval.ID)
 	if err != nil {
