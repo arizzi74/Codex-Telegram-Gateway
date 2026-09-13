@@ -262,12 +262,12 @@ func (s *Store) applyEvent(ctx context.Context, tx pgx.Tx, workerID uuid.UUID, e
 	// Older generation events remain in events for audit and may resolve their
 	// own immutable command, but may not overwrite current runtime/session or
 	// approval state.
-	if event.Kind == "runtime_started" || event.Kind == "runtime_stopped" || event.Kind == "runtime_failed" {
+	if event.Kind == "runtime_started" || event.Kind == "runtime_stopped" || event.Kind == "runtime_failed" || event.Kind == "runtime_degraded" {
 		if target.runtimeID == nil {
 			return false, nil, ErrEventTarget
 		}
 		if target.runtimeCurrent || target.runtimeFuture {
-			state := map[string]string{"runtime_started": "running", "runtime_stopped": "stopped", "runtime_failed": "failed"}[event.Kind]
+			state := map[string]string{"runtime_started": "running", "runtime_stopped": "stopped", "runtime_failed": "failed", "runtime_degraded": "degraded"}[event.Kind]
 			if _, err := tx.Exec(ctx, `UPDATE runtimes
                 SET generation = $3, state = $4, last_seen_at = now(),
                     started_at = CASE WHEN $4 = 'running' THEN now() ELSE started_at END,
@@ -290,7 +290,7 @@ func (s *Store) applyEvent(ctx context.Context, tx pgx.Tx, workerID uuid.UUID, e
 					return false, nil, fmt.Errorf("registry: clear failed runtime approvals: %w", err)
 				}
 			}
-			return event.Kind == "runtime_failed", nil, nil
+			return event.Kind == "runtime_failed" || event.Kind == "runtime_degraded", nil, nil
 		}
 		return false, nil, nil
 	}
@@ -371,7 +371,7 @@ func (s *Store) applyEvent(ctx context.Context, tx pgx.Tx, workerID uuid.UUID, e
 			}
 		}
 	}
-	return notificationRequired(event.Kind), commandID, nil
+	return notificationRequired(event.Kind) || (event.Kind == "command_completed" && result.Session != nil), commandID, nil
 }
 
 func sessionTransition(kind string, result protocol.Result) (state, activeTurn, terminalTurn string) {
@@ -407,7 +407,7 @@ func sessionTransition(kind string, result protocol.Result) (state, activeTurn, 
 
 func notificationRequired(kind string) bool {
 	switch kind {
-	case "turn_completed", "approval_requested", "user_input_requested", "turn_failed", "runtime_failed", "command_result_unknown":
+	case "turn_completed", "approval_requested", "user_input_requested", "turn_failed", "runtime_failed", "runtime_degraded", "command_failed", "command_result_unknown":
 		return true
 	default:
 		return false
@@ -521,7 +521,7 @@ func enqueueEventDeliveries(ctx context.Context, tx pgx.Tx, eventID uuid.UUID, e
         SELECT binding.bot_id, binding.chat_id, binding.message_thread_id
         FROM telegram_bindings AS binding
         JOIN sessions AS session ON session.session_id = binding.session_id
-        WHERE session.runtime_id = $2 AND $3 = 'runtime_failed'
+        WHERE session.runtime_id = $2 AND $3 IN ('runtime_failed','runtime_degraded')
         UNION
         SELECT telegram_bot_id, telegram_chat_id, COALESCE(telegram_message_thread_id, 0)
         FROM commands WHERE command_id = $4 AND telegram_bot_id IS NOT NULL AND telegram_chat_id IS NOT NULL

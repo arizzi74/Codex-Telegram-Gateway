@@ -300,6 +300,18 @@ func (h *Hub) SendCommand(ctx context.Context, c protocol.Command) error {
 	return p.send(ctx, "command", c)
 }
 
+func (h *Hub) ConnectedWorkers() []uuid.UUID {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	ids := make([]uuid.UUID, 0, len(h.peers))
+	for _, p := range h.peers {
+		if p.ctx.Err() == nil {
+			ids = append(ids, p.workerID)
+		}
+	}
+	return ids
+}
+
 func (h *Hub) Run(ctx context.Context) {
 	timer := time.NewTicker(h.heartbeat)
 	defer timer.Stop()

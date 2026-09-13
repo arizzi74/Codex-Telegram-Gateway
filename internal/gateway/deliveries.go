@@ -1,0 +1,194 @@
+package gateway
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"log/slog"
+	"time"
+
+	"github.com/google/uuid"
+	"github.com/iaia/telegramgw/internal/auth"
+	"github.com/iaia/telegramgw/internal/protocol"
+	"github.com/iaia/telegramgw/internal/registry"
+)
+
+type DeliveryStore interface {
+	ClaimDeliveries(context.Context, int) ([]registry.Delivery, error)
+	DeliveryChunks(context.Context, string) ([]registry.DeliveryChunk, error)
+	ExtendDelivery(context.Context, string) error
+	PrepareDeliveryChunks(context.Context, string, []json.RawMessage) ([]registry.DeliveryChunk, error)
+	MarkDeliveryChunkSent(context.Context, string, int, int64, string, string, string, ...string) error
+	RetryDelivery(context.Context, string, time.Duration, string) error
+	SessionSnapshot(context.Context) ([]protocol.Session, error)
+	RuntimeSnapshot(context.Context) ([]protocol.Runtime, error)
+	CreateCallback(context.Context, registry.Callback) (string, error)
+	ListWorkers(context.Context) ([]registry.Worker, error)
+	TelegramSessionStatus(context.Context, uuid.UUID) (registry.SessionStatus, error)
+	PendingApproval(context.Context, uuid.UUID) (protocol.Approval, error)
+}
+type SenderOptions struct {
+	BotID    string
+	OwnerID  int64
+	Redactor *auth.Redactor
+}
+type Sender struct {
+	store   DeliveryStore
+	api     TelegramAPI
+	log     *slog.Logger
+	options SenderOptions
+}
+
+func NewSender(store DeliveryStore, api TelegramAPI, logger *slog.Logger, options ...SenderOptions) *Sender {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	var option SenderOptions
+	if len(options) > 0 {
+		option = options[0]
+	}
+	return &Sender{store: store, api: api, log: logger, options: option}
+}
+func (s *Sender) Run(ctx context.Context) error {
+	ticker := time.NewTicker(200 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		if err := s.flush(ctx); err != nil {
+			s.log.Warn("telegram delivery flush", "error", err)
+		}
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-ticker.C:
+		}
+	}
+}
+func (s *Sender) flush(ctx context.Context) error {
+	// A single short lease avoids a slow Telegram request stranding a batch.
+	rows, err := s.store.ClaimDeliveries(ctx, 1)
+	if err != nil {
+		return err
+	}
+	for _, row := range rows {
+		if err := s.sendDelivery(ctx, row); err != nil {
+			delay := time.Second << min(max(row.Attempt-1, 0), 6)
+			if delay > time.Minute {
+				delay = time.Minute
+			}
+			var telegram *TelegramError
+			if errors.As(err, &telegram) && telegram.RetryAfter > 0 {
+				delay = telegram.RetryAfter
+			}
+			if retryErr := s.store.RetryDelivery(ctx, row.ID, delay, "Telegram delivery deferred"); retryErr != nil {
+				return retryErr
+			}
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *Sender) sendDelivery(ctx context.Context, row registry.Delivery) error {
+	checkpoints, err := s.store.DeliveryChunks(ctx, row.ID)
+	if err != nil {
+		return err
+	}
+	if len(checkpoints) == 0 {
+		renderCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		text, keyboard, err := s.render(renderCtx, row)
+		cancel()
+		if err != nil {
+			return err
+		}
+		if text == "" {
+			return errors.New("empty Telegram delivery")
+		}
+		parts := SplitText(text, 4000)
+		messages := make([]json.RawMessage, 0, len(parts))
+		for index, part := range parts {
+			message := SendMessage{ChatID: row.ChatID, TopicID: row.TopicID, Text: part}
+			// Put controls after their complete explanation.
+			if index == len(parts)-1 {
+				message.Keyboard = keyboard
+			}
+			raw, err := json.Marshal(message)
+			if err != nil {
+				return err
+			}
+			messages = append(messages, raw)
+		}
+		checkpoints, err = s.store.PrepareDeliveryChunks(ctx, row.ID, messages)
+		if err != nil {
+			return err
+		}
+	}
+	sessionID, turnID, approvalID := deliveryRoute(row)
+	for _, chunk := range checkpoints {
+		if chunk.Sent {
+			continue
+		}
+		if err := s.store.ExtendDelivery(ctx, row.ID); err != nil {
+			return err
+		}
+		var message SendMessage
+		if err := json.Unmarshal(chunk.Payload, &message); err != nil {
+			return err
+		}
+		sendCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+		id, err := s.api.Send(sendCtx, message)
+		cancel()
+		if err != nil {
+			return err
+		}
+		if id <= 0 {
+			return errors.New("Telegram returned no message identity")
+		}
+		if err := s.store.MarkDeliveryChunkSent(ctx, row.ID, chunk.Index, id, sessionID, turnID, approvalID, deliveryQuestion(row)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func deliveryRoute(row registry.Delivery) (sessionID, turnID, approvalID string) {
+	if row.Kind == "ui_response" {
+		var v struct {
+			SessionID  string `json:"session_id"`
+			ApprovalID string `json:"approval_id"`
+		}
+		_ = json.Unmarshal(row.Payload, &v)
+		return v.SessionID, "", v.ApprovalID
+	}
+	var event protocol.Event
+	if json.Unmarshal(row.Payload, &event) != nil {
+		return "", "", ""
+	}
+	sessionID = event.SessionID
+	var approval protocol.Approval
+	if event.Kind == "approval_requested" || event.Kind == "user_input_requested" {
+		if json.Unmarshal(event.Data, &approval) == nil {
+			return sessionID, approval.TurnID, approval.ID
+		}
+	}
+	var result protocol.Result
+	if json.Unmarshal(event.Data, &result) == nil {
+		turnID = result.TurnID
+	}
+	return
+}
+
+func deliveryQuestion(row registry.Delivery) string {
+	if row.Kind == "ui_response" {
+		var value registry.AcceptResult
+		_ = json.Unmarshal(row.Payload, &value)
+		return value.QuestionID
+	}
+	if row.Kind == "user_input_requested" {
+		var event protocol.Event
+		var approval protocol.Approval
+		if json.Unmarshal(row.Payload, &event) == nil && json.Unmarshal(event.Data, &approval) == nil && len(approval.Questions) > 0 {
+			return approval.Questions[0].ID
+		}
+	}
+	return ""
+}

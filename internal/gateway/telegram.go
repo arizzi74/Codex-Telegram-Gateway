@@ -1,0 +1,176 @@
+package gateway
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"strings"
+	"time"
+)
+
+type TelegramUser struct {
+	ID       int64  `json:"id"`
+	Username string `json:"username"`
+}
+type TelegramChat struct {
+	ID int64 `json:"id"`
+}
+type TelegramMessage struct {
+	ID      int64            `json:"message_id"`
+	From    *TelegramUser    `json:"from"`
+	Chat    TelegramChat     `json:"chat"`
+	TopicID int64            `json:"message_thread_id"`
+	Text    string           `json:"text"`
+	ReplyTo *TelegramMessage `json:"reply_to_message"`
+}
+type TelegramCallback struct {
+	ID      string           `json:"id"`
+	From    TelegramUser     `json:"from"`
+	Message *TelegramMessage `json:"message"`
+	Data    string           `json:"data"`
+}
+type TelegramUpdate struct {
+	ID       int64             `json:"update_id"`
+	Message  *TelegramMessage  `json:"message"`
+	Callback *TelegramCallback `json:"callback_query"`
+}
+type TelegramButton struct {
+	Text string `json:"text"`
+	Data string `json:"callback_data"`
+}
+type TelegramKeyboard struct {
+	Rows [][]TelegramButton `json:"inline_keyboard"`
+}
+type SendMessage struct {
+	ChatID   int64             `json:"chat_id"`
+	TopicID  int64             `json:"message_thread_id,omitempty"`
+	Text     string            `json:"text"`
+	Keyboard *TelegramKeyboard `json:"reply_markup,omitempty"`
+}
+type TelegramAPI interface {
+	Send(context.Context, SendMessage) (int64, error)
+	Edit(context.Context, int64, int64, string, *TelegramKeyboard) error
+	AnswerCallback(context.Context, string, string) error
+}
+type TelegramClient struct {
+	token, endpoint string
+	http            *http.Client
+}
+type TelegramError struct {
+	Code        int
+	RetryAfter  time.Duration
+	Description string
+}
+
+func (e *TelegramError) Error() string {
+	return fmt.Sprintf("Telegram API error %d: %s", e.Code, e.Description)
+}
+
+func NewTelegramClient(token string) *TelegramClient {
+	return &TelegramClient{token: token, endpoint: "https://api.telegram.org", http: &http.Client{Timeout: 15 * time.Second}}
+}
+
+func (t *TelegramClient) call(ctx context.Context, method string, payload any, result any) error {
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, t.endpoint+"/bot"+t.token+"/"+method, bytes.NewReader(data))
+	if err != nil {
+		return errors.New("invalid Telegram endpoint")
+	}
+	req.Header.Set("Content-Type", "application/json")
+	response, err := t.http.Do(req)
+	if err != nil {
+		return errors.New("Telegram request could not be completed")
+	}
+	defer response.Body.Close()
+	var envelope struct {
+		OK          bool            `json:"ok"`
+		Result      json.RawMessage `json:"result"`
+		Code        int             `json:"error_code"`
+		Description string          `json:"description"`
+		Parameters  struct {
+			RetryAfter int `json:"retry_after"`
+		} `json:"parameters"`
+	}
+	if err := json.NewDecoder(io.LimitReader(response.Body, 2<<20)).Decode(&envelope); err != nil {
+		return errors.New("invalid Telegram response")
+	}
+	if !envelope.OK {
+		return &TelegramError{Code: envelope.Code, Description: strings.ReplaceAll(envelope.Description, t.token, "[REDACTED]"), RetryAfter: time.Duration(envelope.Parameters.RetryAfter) * time.Second}
+	}
+	if result != nil {
+		return json.Unmarshal(envelope.Result, result)
+	}
+	return nil
+}
+func (t *TelegramClient) Send(ctx context.Context, message SendMessage) (int64, error) {
+	var reply struct {
+		ID int64 `json:"message_id"`
+	}
+	err := t.call(ctx, "sendMessage", message, &reply)
+	return reply.ID, err
+}
+func (t *TelegramClient) Edit(ctx context.Context, chatID, messageID int64, text string, keyboard *TelegramKeyboard) error {
+	payload := map[string]any{"chat_id": chatID, "message_id": messageID, "text": text}
+	if keyboard != nil {
+		payload["reply_markup"] = keyboard
+	}
+	return t.call(ctx, "editMessageText", payload, nil)
+}
+func (t *TelegramClient) AnswerCallback(ctx context.Context, id, text string) error {
+	return t.call(ctx, "answerCallbackQuery", map[string]any{"callback_query_id": id, "text": text}, nil)
+}
+
+type WebhookInfo struct {
+	URL            string `json:"url"`
+	PendingUpdates int    `json:"pending_update_count"`
+	LastError      string `json:"last_error_message"`
+}
+
+func (t *TelegramClient) GetWebhook(ctx context.Context) (WebhookInfo, error) {
+	var result WebhookInfo
+	err := t.call(ctx, "getWebhookInfo", struct{}{}, &result)
+	return result, err
+}
+func (t *TelegramClient) SetWebhook(ctx context.Context, url, secret string) error {
+	return t.call(ctx, "setWebhook", map[string]any{"url": url, "secret_token": secret, "allowed_updates": []string{"message", "callback_query"}, "drop_pending_updates": false}, nil)
+}
+func (t *TelegramClient) Identity(ctx context.Context) (TelegramUser, error) {
+	var result TelegramUser
+	err := t.call(ctx, "getMe", struct{}{}, &result)
+	return result, err
+}
+
+// SplitText uses UTF-16 code units, conservatively respecting Telegram's text
+// limit even for astral Unicode characters. Plain text needs no markup escaping.
+func SplitText(text string, limit int) []string {
+	if limit < 2 {
+		limit = 4000
+	}
+	var chunks []string
+	var b strings.Builder
+	units := 0
+	for _, r := range text {
+		width := 1
+		if r > 0xffff {
+			width = 2
+		}
+		if units+width > limit {
+			chunks = append(chunks, b.String())
+			b.Reset()
+			units = 0
+		}
+		b.WriteRune(r)
+		units += width
+	}
+	if b.Len() > 0 {
+		chunks = append(chunks, b.String())
+	}
+	return chunks
+}
