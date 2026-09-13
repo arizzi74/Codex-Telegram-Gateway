@@ -1,0 +1,195 @@
+package protocol
+
+import (
+	"encoding/json"
+	"errors"
+	"time"
+
+	"github.com/google/uuid"
+)
+
+type Runtime struct {
+	ID           string `json:"runtime_id"`
+	WorkerID     string `json:"worker_id,omitempty"`
+	ProfileID    string `json:"profile_id"`
+	Name         string `json:"name"`
+	Generation   uint64 `json:"generation"`
+	PID          int    `json:"pid"`
+	State        string `json:"state"`
+	CodexVersion string `json:"codex_version,omitempty"`
+	DefaultCWD   string `json:"default_cwd,omitempty"`
+}
+
+type Session struct {
+	ID           string    `json:"session_id"`
+	WorkerID     string    `json:"worker_id"`
+	RuntimeID    string    `json:"runtime_id"`
+	ThreadID     string    `json:"codex_thread_id"`
+	Name         string    `json:"name"`
+	Preview      string    `json:"preview,omitempty"`
+	CWD          string    `json:"cwd"`
+	GitBranch    string    `json:"git_branch,omitempty"`
+	GitRoot      string    `json:"git_root,omitempty"`
+	State        string    `json:"state"`
+	ActiveTurnID string    `json:"active_turn_id,omitempty"`
+	Loaded       bool      `json:"loaded"`
+	Archived     bool      `json:"archived"`
+	UpdatedAt    time.Time `json:"updated_at"`
+}
+
+type Hello struct {
+	WorkerID          string    `json:"worker_id"`
+	WorkerName        string    `json:"worker_name"`
+	Hostname          string    `json:"hostname"`
+	OS                string    `json:"os"`
+	Arch              string    `json:"arch"`
+	WorkerVersion     string    `json:"worker_version"`
+	ProtocolMin       int       `json:"protocol_min"`
+	ProtocolMax       int       `json:"protocol_max"`
+	LastAckedEventSeq uint64    `json:"last_acked_event_seq"`
+	Runtimes          []Runtime `json:"runtimes"`
+}
+
+type HelloAck struct {
+	ConnectionID             string `json:"connection_id"`
+	HeartbeatIntervalSeconds int    `json:"heartbeat_interval_seconds"`
+	ResumeFromEventSeq       uint64 `json:"resume_from_event_seq"`
+}
+
+type Heartbeat struct {
+	WorkerID      string    `json:"worker_id"`
+	UptimeSeconds int64     `json:"uptime_seconds"`
+	Runtimes      []Runtime `json:"runtimes"`
+}
+
+type Operation string
+
+const (
+	StartTurn        Operation = "start_turn"
+	NewSession       Operation = "new_session"
+	Steer            Operation = "steer"
+	Interrupt        Operation = "interrupt"
+	ApprovalResponse Operation = "approval_response"
+	InputResponse    Operation = "input_response"
+)
+
+// Command contains an immutable execution target. No dispatch path may consult a
+// mutable selection to replace any of these fields.
+type Command struct {
+	ID                string    `json:"command_id"`
+	WorkerID          string    `json:"worker_id"`
+	RuntimeID         string    `json:"runtime_id"`
+	RuntimeGeneration uint64    `json:"runtime_generation"`
+	SessionID         string    `json:"session_id,omitempty"`
+	ThreadID          string    `json:"codex_thread_id,omitempty"`
+	Operation         Operation `json:"operation"`
+	ExpectedTurnID    string    `json:"expected_turn_id,omitempty"`
+	Arguments         Arguments `json:"arguments"`
+	CreatedAt         time.Time `json:"created_at"`
+	ExpiresAt         time.Time `json:"expires_at"`
+}
+
+type Arguments struct {
+	Text       string              `json:"text,omitempty"`
+	ApprovalID string              `json:"approval_id,omitempty"`
+	RequestID  string              `json:"request_id,omitempty"`
+	Decision   string              `json:"decision,omitempty"`
+	Answers    map[string][]string `json:"answers,omitempty"`
+}
+
+func (c Command) Validate() error {
+	for _, id := range []string{c.ID, c.WorkerID, c.RuntimeID} {
+		if _, err := uuid.Parse(id); err != nil {
+			return errors.New("invalid command identity")
+		}
+	}
+	if c.RuntimeGeneration == 0 {
+		return errors.New("missing runtime generation")
+	}
+	if c.CreatedAt.IsZero() || c.ExpiresAt.IsZero() || !c.ExpiresAt.After(c.CreatedAt) {
+		return errors.New("invalid command lifetime")
+	}
+	switch c.Operation {
+	case NewSession:
+		if c.SessionID != "" || c.ThreadID != "" {
+			return errors.New("new session cannot target an existing thread")
+		}
+	case StartTurn, Steer, Interrupt, ApprovalResponse, InputResponse:
+		if _, err := uuid.Parse(c.SessionID); err != nil || c.ThreadID == "" {
+			return errors.New("missing session target")
+		}
+	default:
+		return errors.New("unsupported operation")
+	}
+	if (c.Operation == Steer || c.Operation == Interrupt) && c.ExpectedTurnID == "" {
+		return errors.New("missing expected turn")
+	}
+	if (c.Operation == StartTurn || c.Operation == Steer) && c.Arguments.Text == "" {
+		return errors.New("missing text")
+	}
+	if (c.Operation == ApprovalResponse || c.Operation == InputResponse) && (c.Arguments.RequestID == "" || c.Arguments.ApprovalID == "") {
+		return errors.New("missing request target")
+	}
+	return nil
+}
+
+type CommandAck struct {
+	CommandID string `json:"command_id"`
+	Status    string `json:"status"`
+	Error     *Error `json:"error,omitempty"`
+}
+
+type Event struct {
+	Seq               uint64          `json:"event_seq"`
+	ID                string          `json:"event_id"`
+	WorkerID          string          `json:"worker_id"`
+	RuntimeID         string          `json:"runtime_id,omitempty"`
+	RuntimeGeneration uint64          `json:"runtime_generation,omitempty"`
+	SessionID         string          `json:"session_id,omitempty"`
+	Kind              string          `json:"kind"`
+	OccurredAt        time.Time       `json:"occurred_at"`
+	Data              json.RawMessage `json:"data"`
+}
+
+func (e Event) Durable() bool {
+	switch e.Kind {
+	case "agent_message_delta", "command_output_delta", "tool_progress", "token_usage_partial":
+		return false
+	default:
+		return true // Unknown events fail toward preserving data.
+	}
+}
+
+type EventAck struct {
+	Seq uint64 `json:"event_seq"`
+}
+
+type Result struct {
+	CommandID string   `json:"command_id,omitempty"`
+	TurnID    string   `json:"turn_id,omitempty"`
+	Text      string   `json:"text,omitempty"`
+	State     string   `json:"state,omitempty"`
+	Error     *Error   `json:"error,omitempty"`
+	Session   *Session `json:"session,omitempty"`
+}
+
+type Approval struct {
+	ID        string     `json:"approval_id"`
+	RequestID string     `json:"request_id"`
+	ThreadID  string     `json:"thread_id"`
+	TurnID    string     `json:"turn_id,omitempty"`
+	ItemID    string     `json:"item_id,omitempty"`
+	Type      string     `json:"approval_type"`
+	Summary   string     `json:"summary"`
+	Decisions []string   `json:"decisions,omitempty"`
+	Questions []Question `json:"questions,omitempty"`
+	State     string     `json:"state,omitempty"`
+}
+
+type Question struct {
+	ID      string   `json:"id"`
+	Header  string   `json:"header,omitempty"`
+	Prompt  string   `json:"prompt"`
+	Options []string `json:"options,omitempty"`
+	Secret  bool     `json:"secret,omitempty"`
+}
