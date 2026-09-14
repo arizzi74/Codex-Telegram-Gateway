@@ -65,3 +65,15 @@ commentary from the final answer. The sender checkpoints temporary message IDs
 and deletes them after the full terminal response reaches the same destination.
 Cleanup has its own retry loop and survives gateway restarts. Late progress is
 suppressed, and failure/interruption also clean up the completed turn.
+
+After this worker-hosted turn ends, activate the verified 0.2.1 release from a
+normal terminal on the deployed host:
+
+```sh
+/home/USERNAME/projects/telegramgw/scripts/deploy-host-update.sh --wait
+```
+
+The helper verifies release checksums and waits up to ten minutes for running
+or waiting turns to finish. `--check` performs a read-only preflight. Installation
+requires the normal terminal's `sudo`; it cannot run from a worker process with
+`NoNewPrivs` enabled.
