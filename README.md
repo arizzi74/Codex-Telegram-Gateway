@@ -15,6 +15,10 @@ processes and support local terminal attachment.
 - Worker configuration: `~/.config/codex-worker/config.json`
 - Allowed workspace: `/home/USERNAME/projects/telegramgw`
 
+The worker uses the local account's sudo policy for authorized administration.
+Its service permits privilege elevation and writes to system configuration;
+the public gateway retains its separate service restrictions.
+
 The bot authorizes only the numeric `WLID` in the supplied private `.botsecrets`.
 Changing a Telegram username does not grant access. To use the bot, send
 `/tgstart`, then `/tginstances` or `/tgsessions` and select a session.

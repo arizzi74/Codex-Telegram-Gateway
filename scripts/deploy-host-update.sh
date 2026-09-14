@@ -92,5 +92,10 @@ else:
 for binary in (gateway, worker):
     if subprocess.check_output([str(binary), "version"], text=True).strip() != "0.2.1":
         fail("Installed binary version verification failed: " + binary.name)
-print("Installed 0.2.1; services are active, worker connected, runtimes running, and events acknowledged.")
+for pid in [status["pid"]] + [r["pid"] for r in status["runtimes"]]:
+    flags = dict(line.split(":", 1) for line in pathlib.Path(f"/proc/{pid}/status").read_text().splitlines() if ":" in line)
+    if flags.get("NoNewPrivs", "").strip() != "0":
+        fail("Worker or Codex runtime still blocks privilege elevation after restart.")
+run(["sudo", "-n", "/usr/bin/true"])
+print("Installed 0.2.1; services active, worker connected, runtimes running, events acknowledged, and privilege restriction removed.")
 PY

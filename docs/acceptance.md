@@ -30,10 +30,18 @@ race tests with PostgreSQL, ten release archives, and inner/outer checksums.
   phase, preserve older servers with no phase, reject stale turn messages,
   and redact progress before it enters the durable outbox.
 
-Activation is pending a normal-terminal deployment. The current Codex turn is
-running on the worker being updated, and its process has `NoNewPrivs: 1`, so
-`sudo` cannot install the gateway binary or restart the system service here.
-The existing version 0.2.0 remains running until the verified release is applied.
+The owner authorized removing the worker restriction and restarting it. The
+installed unit and repository template now set `NoNewPrivileges=no` and
+`ProtectSystem=no`; `PrivateTmp=yes` and `UMask=0077` remain. After the user
+manager reloaded the unit, a new transient service with the same settings ran
+`sudo -n id -u` successfully and returned `0`.
+
+Activation of version 0.2.1 is scheduled through the user service manager after
+all worker turns finish. The existing worker process still has `NoNewPrivs: 1`
+because that process flag cannot be cleared; the restart applies the changed
+settings to its replacement and Codex children. Version 0.2.0 remains running
+until the maintenance job applies the verified release. Completion and the
+replacement worker's reconnection have not yet been observed.
 
 ## AT-01 through AT-20
 

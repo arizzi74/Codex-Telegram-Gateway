@@ -13,9 +13,9 @@ ExecStart=%h/.local/bin/codex-worker --config %h/.config/codex-worker/config.jso
 Restart=on-failure
 RestartSec=3s
 TimeoutStopSec=20s
-NoNewPrivileges=yes
+NoNewPrivileges=no
 PrivateTmp=yes
-ProtectSystem=full
+ProtectSystem=no
 UMask=0077
 
 [Install]

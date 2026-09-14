@@ -66,14 +66,25 @@ and deletes them after the full terminal response reaches the same destination.
 Cleanup has its own retry loop and survives gateway restarts. Late progress is
 suppressed, and failure/interruption also clean up the completed turn.
 
-After this worker-hosted turn ends, activate the verified 0.2.1 release from a
-normal terminal on the deployed host:
+The owner authorized removing the worker restriction that prevented `sudo` and
+restarting the service. The installed worker unit and repository template now
+set `NoNewPrivileges=no` and `ProtectSystem=no`, retaining `PrivateTmp=yes` and
+`UMask=0077`. The gateway service keeps its existing restrictions. A new
+transient service launched by the user service manager with the worker settings
+successfully ran `sudo -n id -u` and returned `0`.
+
+The running worker and its existing children retain `NoNewPrivs: 1` until they
+exit. Maintenance is scheduled through the user service manager, outside the
+worker's process group, to wait for all turns to finish and then activate the
+verified 0.2.1 release with:
 
 ```sh
 /home/USERNAME/projects/telegramgw/scripts/deploy-host-update.sh --wait
 ```
 
 The helper verifies release checksums and waits up to ten minutes for running
-or waiting turns to finish. `--check` performs a read-only preflight. Installation
-requires the normal terminal's `sudo`; it cannot run from a worker process with
-`NoNewPrivs` enabled.
+or waiting turns to finish. It installs the release, restarts the gateway and
+worker, and verifies reconnection. `--check` performs a read-only preflight.
+The maintenance job can use `sudo` because the user service manager does not
+carry the old worker's `NoNewPrivs` flag. Activation and the replacement worker's
+reconnection remain pending observation.
