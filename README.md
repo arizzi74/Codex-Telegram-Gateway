@@ -31,7 +31,11 @@ Codex is preparing a response and stops when a reply or an input request arrives
 See [Telegram commands](docs/telegram-commands.md) for syntax and supported actions.
 
 Ordinary messages submit turns to the selection frozen when each message is
-accepted. Replies to earlier bot messages retain that session's routing.
+accepted, without a separate “Queued for…” acknowledgement. Codex's progress
+messages appear temporarily while the turn runs and are removed after the final
+response is delivered. Cleanup also handles interruption and failure, and
+resumes after gateway restarts. Replies to earlier bot messages retain that
+session's routing.
 Approval and input buttons refer to the exact pending request and expire.
 If a saved session is open in another independent Codex process, close it there
 before sending a turn, use `/fork` to branch its saved conversation, or `/tgnew`

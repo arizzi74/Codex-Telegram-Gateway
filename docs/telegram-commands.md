@@ -96,3 +96,21 @@ Replies retain their originating session even if selection changes. A delayed
 new/fork completion cannot replace a later selection or undo a disconnect.
 Command output is delivered to the requesting chat; session lifecycle events
 retain the gateway's normal subscriptions.
+
+## Temporary progress messages
+
+Plain prompts are accepted without a “Queued for…” reply. The typing indicator
+shows that work is pending or running. As Codex completes each commentary
+message, Telegram displays it silently as a temporary progress message.
+
+After all chunks of the final response have been delivered, the gateway removes
+the temporary messages for that turn. The final answer remains in the chat.
+Interrupted or failed turns leave their terminal notice and remove their
+progress messages. Progress received after a turn has ended is skipped.
+
+Message IDs and deletion retries are stored in PostgreSQL, so gateway restarts
+and temporary Telegram errors do not lose cleanup work or resend the final
+answer. Cleanup follows the original chat/topic and turn even if you change
+the selected session. Telegram's Bot API permits deletion of these outgoing
+messages within 48 hours of sending; a longer outage or turn can exceed that
+limit. See [Telegram deleteMessage](https://core.telegram.org/bots/api#deletemessage).

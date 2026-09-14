@@ -10,6 +10,31 @@ The PostgreSQL tests below require `TEST_DATABASE_URL`. They create a fresh
 schema and use migrations, so they exercise the real registry database without
 using a shared test schema.
 
+## Temporary Telegram progress (2026-09-14)
+
+Version 0.2.1 passes the full local `scripts/ci.sh` job: formatting, vet,
+race tests with PostgreSQL, ten release archives, and inner/outer checksums.
+
+- `TestControlPlaneWorkerOutboxSurvivesGatewayRestartIntegration` verifies
+  quiet prompt acceptance, two visible commentary messages during an active
+  turn, gateway restart, one permanent final answer, and deletion of only the
+  temporary message IDs after the final send.
+- Registry integration tests verify all final chunks must be checkpointed
+  before cleanup, retry leases survive a fresh Store, late progress is
+  suppressed, and cleanup stays within the same bot/chat/topic/session/turn
+  and runtime generation. Failure and interruption use the same cleanup flow.
+- Gateway tests verify silent progress messages, precise deletion targets,
+  Telegram retry-after handling, already-deleted messages, and independent
+  retries that never resend the final answer.
+- Worker tests distinguish commentary from final answers using Codex item
+  phase, preserve older servers with no phase, reject stale turn messages,
+  and redact progress before it enters the durable outbox.
+
+Activation is pending a normal-terminal deployment. The current Codex turn is
+running on the worker being updated, and its process has `NoNewPrivs: 1`, so
+`sudo` cannot install the gateway binary or restart the system service here.
+The existing version 0.2.0 remains running until the verified release is applied.
+
 ## AT-01 through AT-20
 
 | ID | Status | Current evidence | Remaining proof |

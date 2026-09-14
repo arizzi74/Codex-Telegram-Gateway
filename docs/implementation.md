@@ -56,3 +56,12 @@ transient typing indicators and precise writer-lock diagnostics. `/status`
 includes selected-session recorded context usage. New/fork completion compares
 selection revisions before automatic selection, preserving later user choices.
 See [Telegram commands](telegram-commands.md) for syntax and terminal-only limits.
+
+## 2026-09-14 temporary progress update
+
+Plain prompts no longer enqueue a Telegram acknowledgement. Completed Codex
+commentary items produce durable progress events; item phase distinguishes
+commentary from the final answer. The sender checkpoints temporary message IDs
+and deletes them after the full terminal response reaches the same destination.
+Cleanup has its own retry loop and survives gateway restarts. Late progress is
+suppressed, and failure/interruption also clean up the completed turn.
