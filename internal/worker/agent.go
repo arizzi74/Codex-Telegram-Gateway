@@ -303,7 +303,11 @@ func (a *Agent) createLoop(runtimeID string, queue <-chan protocol.Command) {
 				a.report(err)
 				continue
 			}
-			cwd, err := auth.CanonicalWorkspace(runtime.DefaultCWD, a.cfg.AllowedWorkspaceRoots)
+			cwd := runtime.DefaultCWD
+			if c.Arguments.CWD != "" {
+				cwd = c.Arguments.CWD
+			}
+			cwd, err := auth.CanonicalWorkspace(cwd, a.cfg.AllowedWorkspaceRoots)
 			if err != nil {
 				_, err = a.reject(c, protocol.InvalidWorkspace, "Workspace is not allowed.")
 				a.report(err)
@@ -343,21 +347,86 @@ func (a *Agent) createLoop(runtimeID string, queue <-chan protocol.Command) {
 }
 
 func (a *Agent) executionError(c protocol.Command, err error) error {
+	var commandError *protocol.Error
+	if errors.As(err, &commandError) {
+		code := commandError.Code
+		if code == "" {
+			code = protocol.InternalError
+		}
+		result := &protocol.Result{CommandID: c.ID, State: "failed", Error: &protocol.Error{Code: code, Message: safeErrorMessage(a.redactor, commandError.Message, "The command is invalid."), Retryable: commandError.Retryable}}
+		_, saveErr := a.record(c, CommandFailed, result, "command_failed")
+		return saveErr
+	}
+	var validation *CodexCommandValidationError
+	if errors.As(err, &validation) {
+		result := &protocol.Result{CommandID: c.ID, State: "failed", Error: &protocol.Error{Code: protocol.CodexCommandInvalid, Message: safeErrorMessage(a.redactor, validation.Message, "The Codex command is invalid.")}}
+		_, saveErr := a.record(c, CommandFailed, result, "command_failed")
+		return saveErr
+	}
 	var rpc *codexadapter.RPCError
-	if errors.As(err, &rpc) || errors.Is(err, codexadapter.ErrStaleTurn) || errors.Is(err, codexadapter.ErrRequestNotPending) {
+	if errors.As(err, &rpc) || errors.Is(err, codexadapter.ErrMethodUnavailable) || errors.Is(err, codexadapter.ErrStaleTurn) || errors.Is(err, codexadapter.ErrRequestNotPending) {
 		code := protocol.CodexProtocolError
+		message := "Codex rejected the operation."
+		retryable := false
 		if errors.Is(err, codexadapter.ErrRequestNotPending) {
 			code = protocol.ApprovalNotPending
+			message = "This request is no longer pending."
 		}
 		if errors.Is(err, codexadapter.ErrStaleTurn) {
 			code = protocol.StaleTurn
+			message = "The active turn has changed."
 		}
-		_, saveErr := a.reject(c, code, "Codex rejected the operation.")
+		if errors.Is(err, codexadapter.ErrMethodUnavailable) {
+			code = protocol.CodexMethodUnsupported
+			message = "This Codex app-server does not support the requested operation. Update Codex and retry."
+		}
+		if rpc != nil {
+			if threadWriterConflict(rpc.Message) {
+				code = protocol.SessionBusy
+				message = "This thread is open in another Codex client. Close that client and retry, use /fork to create a branch, or use /tgnew to start fresh."
+				retryable = true
+			} else if code == protocol.CodexProtocolError {
+				message = codexRPCMessage(a.redactor, rpc)
+			}
+		}
+		result := &protocol.Result{CommandID: c.ID, State: "failed", Error: &protocol.Error{Code: code, Message: message, Retryable: retryable}}
+		_, saveErr := a.record(c, CommandFailed, result, "command_failed")
 		return saveErr
 	}
 	result := &protocol.Result{CommandID: c.ID, State: "outcome_unknown", Error: &protocol.Error{Code: protocol.OutcomeUnknown, Message: "Codex response was not confirmed. Inspect the thread before retrying."}}
 	_, saveErr := a.record(c, CommandOutcomeUnknown, result, "command_result_unknown")
 	return saveErr
+}
+
+func threadWriterConflict(message string) bool {
+	message = strings.ToLower(message)
+	return strings.Contains(message, "writer lock") ||
+		strings.Contains(message, "thread is locked") ||
+		strings.Contains(message, "thread locked") ||
+		strings.Contains(message, "already open") ||
+		strings.Contains(message, "another codex")
+}
+
+func codexRPCMessage(redactor *auth.Redactor, rpc *codexadapter.RPCError) string {
+	message := safeErrorMessage(redactor, rpc.Message, "")
+	if message == "" {
+		return fmt.Sprintf("Codex rejected the operation (RPC %d).", rpc.Code)
+	}
+	return fmt.Sprintf("Codex rejected the operation (RPC %d): %s", rpc.Code, message)
+}
+
+func safeErrorMessage(redactor *auth.Redactor, message, fallback string) string {
+	message = strings.Join(strings.Fields(message), " ")
+	if redactor != nil {
+		message = redactor.Redact(message)
+	}
+	if runes := []rune(message); len(runes) > 240 {
+		message = string(runes[:240]) + "…"
+	}
+	if message == "" {
+		return fallback
+	}
+	return message
 }
 
 type actorCommand struct {
@@ -493,6 +562,10 @@ func (s *sessionActor) command(req actorCommand) {
 		req.reply <- commandReply{ack: protocol.CommandAck{CommandID: c.ID, Status: "accepted"}}
 		return
 	}
+	if c.Operation == protocol.CodexCommand && s.session.ActiveTurnID != "" && codexCommandNeedsIdle(c.Arguments.Codex.Name, c.Arguments.Codex.Args) {
+		reject(protocol.SessionBusy, "This thread has an active turn. Wait for it to finish before running a Codex command.")
+		return
+	}
 	if (c.Operation == protocol.Steer || c.Operation == protocol.Interrupt) && (c.ExpectedTurnID == "" || c.ExpectedTurnID != s.session.ActiveTurnID) {
 		reject(protocol.StaleTurn, "The active turn has changed.")
 		return
@@ -515,6 +588,34 @@ func (s *sessionActor) command(req actorCommand) {
 		return
 	}
 	req.reply <- commandReply{ack: protocol.CommandAck{CommandID: c.ID, Status: "accepted"}}
+	if c.Operation == protocol.CodexCommand {
+		result, err := s.executeCodexCommand(s.agent.ctx, client, c.Arguments.Codex.Name, c.Arguments.Codex.Args)
+		if err != nil {
+			s.agent.report(s.agent.executionError(c, err))
+			return
+		}
+		result.CommandID = c.ID
+		if result.State == "" {
+			result.State = "completed"
+		}
+		result.Text = s.agent.redactor.Redact(result.Text)
+		kind := "command_completed"
+		if result.Session == nil && result.TurnID != "" && result.State == "running" {
+			// Special commands such as /review and /init create a turn outside
+			// start(). Preserve the same command-to-turn correlation as a normal
+			// Telegram prompt so the terminal event, typing indicator, and final
+			// answer remain attached to this command.
+			s.session.ActiveTurnID = result.TurnID
+			s.session.State, s.session.Loaded = "running", true
+			s.activeCommand = &c
+			s.text.Reset()
+			s.save()
+			kind = "turn_started"
+		}
+		_, err = s.agent.record(c, CommandCompleted, &result, kind)
+		s.agent.report(err)
+		return
+	}
 	var err error
 	switch c.Operation {
 	case protocol.Steer:
@@ -550,6 +651,26 @@ func (s *sessionActor) command(req actorCommand) {
 	s.agent.report(err)
 }
 
+// codexCommandNeedsIdle reports commands that can start or modify the thread
+// itself. Read-only inspection and background-terminal controls remain useful
+// while an ordinary turn is running and must not replace that turn's command
+// correlation.
+func codexCommandNeedsIdle(name, args string) bool {
+	name, args = strings.ToLower(strings.TrimSpace(name)), strings.TrimSpace(args)
+	switch name {
+	case "review":
+		return true
+	case "init", "compact", "archive":
+		return args == ""
+	case "rename", "model", "reasoning", "permissions", "approvals", "plan", "personality", "memories", "goal":
+		return args != ""
+	case "fast":
+		return args != "" && args != "status"
+	default:
+		return false
+	}
+}
+
 func (s *sessionActor) start(c protocol.Command) {
 	client, runtime, ok := s.agent.manager.Client(s.runtime.ID)
 	if !ok || runtime.Generation != c.RuntimeGeneration {
@@ -562,25 +683,17 @@ func (s *sessionActor) start(c protocol.Command) {
 		s.agent.report(err)
 		return
 	}
-	cwd, err := auth.CanonicalWorkspace(s.session.CWD, s.agent.cfg.AllowedWorkspaceRoots)
-	if err != nil {
+	if _, err := auth.CanonicalWorkspace(s.session.CWD, s.agent.cfg.AllowedWorkspaceRoots); err != nil {
 		_, err = s.agent.reject(c, protocol.InvalidWorkspace, "Session workspace is not allowed.")
 		s.agent.report(err)
 		return
 	}
-	if err = s.agent.store.SetCommandState(c.ID, CommandExecuting, nil); err != nil {
+	if err := s.agent.store.SetCommandState(c.ID, CommandExecuting, nil); err != nil {
 		s.agent.report(err)
 		return
 	}
-	if !s.session.Loaded {
-		_, err = client.ResumeThread(s.agent.ctx, s.session.ThreadID, codexadapter.ThreadOptions{CWD: cwd, ApprovalPolicy: "on-request", Sandbox: "workspace-write"})
-		if err != nil {
-			s.session.State = "failed"
-			s.save()
-			s.agent.report(s.agent.executionError(c, err))
-			return
-		}
-		s.session.Loaded = true
+	if !s.resumeForCommand(c, client) {
+		return
 	}
 	turn, err := client.StartTurn(s.agent.ctx, s.session.ThreadID, c.Arguments.Text)
 	if err != nil {
@@ -598,6 +711,40 @@ func (s *sessionActor) start(c protocol.Command) {
 	s.save()
 	_, err = s.agent.record(c, CommandCompleted, &protocol.Result{CommandID: c.ID, TurnID: turn.ID, State: "running"}, "turn_started")
 	s.agent.report(err)
+}
+
+// resumeForCommand lazily attaches a cold selected thread. Selection itself
+// never changes a thread; this runs only after a command has been accepted.
+func (s *sessionActor) resumeForCommand(c protocol.Command, client *codexadapter.Client) bool {
+	if s.session.Loaded && s.session.State != "not_loaded" {
+		return true
+	}
+	// Preserve the persisted thread settings. The app-server specifies threadId
+	// as its preferred resume key, so do not inject CWD, sandbox, or approvals.
+	resumed, err := client.ResumeThread(s.agent.ctx, s.session.ThreadID, codexadapter.ThreadOptions{})
+	if err != nil {
+		s.session.State = "failed"
+		s.save()
+		s.agent.report(s.agent.executionError(c, err))
+		return false
+	}
+	if resumed.ID != s.session.ThreadID {
+		s.session.State = "unknown"
+		s.save()
+		_, err = s.agent.reject(c, protocol.CodexProtocolError, "Codex resumed a different thread. Inspect the selected thread before retrying.")
+		s.agent.report(err)
+		return false
+	}
+	s.session.Loaded = true
+	if resumed.ActiveTurnID != "" || resumed.Status == "active" || resumed.Status == "running" {
+		s.session.ActiveTurnID = resumed.ActiveTurnID
+		s.session.State = "running"
+		s.save()
+		_, err = s.agent.reject(c, protocol.SessionBusy, "This thread already has an active turn. Wait for it to finish, or start a new Telegram session.")
+		s.agent.report(err)
+		return false
+	}
+	return true
 }
 
 func (s *sessionActor) save() {

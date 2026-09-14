@@ -37,6 +37,12 @@ var (
 	ErrRequestNotPending = errors.New("codex app-server request is no longer pending")
 )
 
+// Plugin and app catalogs can legitimately exceed the old 8 MiB Scanner
+// ceiling because app-server returns their descriptive metadata in one RPC
+// response. Keep one shared, bounded limit for direct JSONL and WebSocket
+// transports so a large valid catalog cannot tear down the whole runtime.
+const maxJSONRPCMessageBytes = 32 << 20
+
 // ClientInfo identifies this integration during the app-server handshake.
 type ClientInfo struct {
 	Name    string `json:"name"`
@@ -246,6 +252,14 @@ func defaultMethods() map[string]bool {
 		"initialize": true, "thread/start": true, "thread/resume": true,
 		"thread/read": true, "thread/list": true, "thread/loaded/list": true,
 		"turn/start": true, "turn/steer": true, "turn/interrupt": true,
+		"config/read": true, "account/usage/read": true, "account/rateLimits/read": true,
+		"model/list": true, "thread/settings/update": true, "thread/compact/start": true,
+		"thread/name/set": true, "thread/fork": true, "review/start": true,
+		"thread/goal/get": true, "thread/goal/set": true, "thread/goal/clear": true,
+		"mcpServerStatus/list": true, "app/installed": true, "skills/list": true,
+		"hooks/list": true, "plugin/list": true, "thread/backgroundTerminals/list": true,
+		"thread/backgroundTerminals/clean": true, "thread/archive": true,
+		"thread/memoryMode/set": true,
 	}
 }
 
@@ -399,7 +413,7 @@ func (c *Client) emitRequest(request Request) {
 
 func (c *Client) reader() {
 	s := bufio.NewScanner(c.t.Out)
-	s.Buffer(make([]byte, 64*1024), 8*1024*1024)
+	s.Buffer(make([]byte, 64*1024), maxJSONRPCMessageBytes)
 	for s.Scan() {
 		line := append([]byte(nil), s.Bytes()...)
 		c.handleLine(line)
@@ -579,8 +593,15 @@ func (c *Client) Initialize(ctx context.Context) error {
 	c.mu.Unlock()
 	var reply InitializeInfo
 	params := struct {
-		ClientInfo ClientInfo `json:"clientInfo"`
+		ClientInfo   ClientInfo `json:"clientInfo"`
+		Capabilities struct {
+			ExperimentalAPI bool `json:"experimentalApi"`
+		} `json:"capabilities"`
 	}{ClientInfo: c.config.ClientInfo}
+	// Telegram implements a deliberately typed subset of the v2 methods,
+	// including thread settings, goals, apps, and plugins. Opting in here is
+	// required by app-server before those schema-backed methods may be called.
+	params.Capabilities.ExperimentalAPI = true
 	if err := c.request(ctx, "initialize", params, &reply, true); err != nil {
 		return err
 	}

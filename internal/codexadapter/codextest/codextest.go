@@ -35,7 +35,13 @@ type Server struct {
 	threads     []map[string]any
 	loaded      []string
 	unavailable map[string]bool
+	rpcErrors   map[string]rpcError
 	delays      map[string]time.Duration
+}
+
+type rpcError struct {
+	code    int
+	message string
 }
 
 // SetThreads controls the fixture's reconciliation response. Thread values
@@ -57,6 +63,22 @@ func (s *Server) SetMethodUnavailable(method string, unavailable bool) {
 	s.unavailable[method] = unavailable
 }
 
+// SetRPCError makes method return a JSON-RPC failure. It is useful for tests
+// that need to preserve the app-server's failure boundary rather than mock a
+// worker-domain error.
+func (s *Server) SetRPCError(method string, code int, message string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.rpcErrors == nil {
+		s.rpcErrors = map[string]rpcError{}
+	}
+	if message == "" {
+		delete(s.rpcErrors, method)
+		return
+	}
+	s.rpcErrors[method] = rpcError{code: code, message: message}
+}
+
 // SetResponseDelay delays replies for method. It lets tests exercise caller
 // deadlines while keeping the fixture on the real JSONL transport.
 func (s *Server) SetResponseDelay(method string, delay time.Duration) {
@@ -71,7 +93,7 @@ func (s *Server) SetResponseDelay(method string, delay time.Duration) {
 func New(ctx context.Context) (*codexadapter.Client, *Server, error) {
 	inR, inW := io.Pipe()
 	outR, outW := io.Pipe()
-	s := &Server{in: bufio.NewScanner(inR), out: json.NewEncoder(outW), raw: outW, unavailable: map[string]bool{}, delays: map[string]time.Duration{}, close: func() { _ = inR.Close(); _ = inW.Close(); _ = outR.Close(); _ = outW.Close() }}
+	s := &Server{in: bufio.NewScanner(inR), out: json.NewEncoder(outW), raw: outW, unavailable: map[string]bool{}, rpcErrors: map[string]rpcError{}, delays: map[string]time.Duration{}, close: func() { _ = inR.Close(); _ = inW.Close(); _ = outR.Close(); _ = outW.Close() }}
 	go s.serve()
 	c := codexadapter.New(codexadapter.Transport{In: inW, Out: outR, Close: func() error { s.close(); return nil }}, codexadapter.Config{})
 	if err := c.Initialize(ctx); err != nil {
@@ -141,6 +163,7 @@ func (s *Server) serve() {
 		s.next++
 		n := s.next
 		unavailable := s.unavailable[request.Method]
+		rpcFailure, hasRPCFailure := s.rpcErrors[request.Method]
 		delay := s.delays[request.Method]
 		s.mu.Unlock()
 		// JSON-RPC notifications such as initialized have no response ID.
@@ -152,6 +175,10 @@ func (s *Server) serve() {
 		}
 		if unavailable {
 			_ = s.write(map[string]any{"id": json.RawMessage(request.ID), "error": map[string]any{"code": -32601, "message": "method not found"}})
+			continue
+		}
+		if hasRPCFailure {
+			_ = s.write(map[string]any{"id": json.RawMessage(request.ID), "error": map[string]any{"code": rpcFailure.code, "message": rpcFailure.message}})
 			continue
 		}
 		var result any = map[string]any{}
@@ -176,6 +203,12 @@ func (s *Server) serve() {
 			}
 			_ = json.Unmarshal(request.Params, &p)
 			result = map[string]any{"turn": map[string]any{"id": "turn-" + string(rune('0'+n)), "threadId": p.ThreadID}}
+		case "review/start":
+			var p struct {
+				ThreadID string `json:"threadId"`
+			}
+			_ = json.Unmarshal(request.Params, &p)
+			result = map[string]any{"turn": map[string]any{"id": "turn-review-" + string(rune('0'+n)), "threadId": p.ThreadID}}
 		case "turn/steer":
 			result = map[string]any{"turnId": "turn-steered"}
 		case "thread/list":

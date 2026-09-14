@@ -40,6 +40,7 @@ func dialProxyWebSocket(ctx context.Context, in io.WriteCloser, out io.ReadClose
 		_ = connection.Close()
 		return nil, fmt.Errorf("WebSocket upgrade through app-server proxy: %w", err)
 	}
+	ws.SetReadLimit(maxJSONRPCMessageBytes)
 	return ws, nil
 }
 
@@ -107,7 +108,7 @@ func (b *jsonlWSBridge) transport(close func() error) Transport {
 
 func (b *jsonlWSBridge) writeLoop() {
 	scanner := bufio.NewScanner(b.inReader)
-	scanner.Buffer(make([]byte, 64*1024), 8*1024*1024)
+	scanner.Buffer(make([]byte, 64*1024), maxJSONRPCMessageBytes)
 	for scanner.Scan() {
 		payload := append([]byte(nil), scanner.Bytes()...)
 		if err := b.ws.Write(b.ctx, websocket.MessageText, payload); err != nil {

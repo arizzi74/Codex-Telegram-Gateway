@@ -6,6 +6,7 @@ import (
 	"io"
 	"log/slog"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -45,6 +46,206 @@ func TestAgentAcceptsDuplicateAndRejectsStaleGenerationWithoutRPC(t *testing.T) 
 	}
 	if countCall(server.Calls(), "turn/start") != 1 {
 		t.Fatal("duplicate turn caused a second RPC")
+	}
+}
+
+func TestAgentColdSessionResumesOnlyOnCommandWithThreadID(t *testing.T) {
+	a, runtime, server, cleanup := testAgent(t)
+	defer cleanup()
+	session := installColdSession(a, runtime, "thread-cold")
+	command := agentCommand(runtime, session, protocol.StartTurn)
+	command.Arguments.Text = "resume it"
+	if ack, err := a.HandleCommand(context.Background(), command); err != nil || ack.Status != "accepted" {
+		t.Fatalf("ack %#v %v", ack, err)
+	}
+	waitFor(t, func() bool { return hasCall(server.Calls(), "turn/start") })
+	var resume map[string]any
+	for _, call := range server.Calls() {
+		if call.Method == "thread/resume" {
+			if err := json.Unmarshal(call.Params, &resume); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if len(resume) != 1 || resume["threadId"] != session.ThreadID {
+		t.Fatalf("cold resume parameters = %#v, want only threadId", resume)
+	}
+}
+
+func TestAgentColdSessionRefusesResumedActiveTurn(t *testing.T) {
+	a, runtime, server, cleanup := testAgent(t)
+	defer cleanup()
+	server.SetThreads([]map[string]any{{"id": "thread-active", "cwd": runtime.DefaultCWD, "status": "active", "turns": []map[string]any{{"id": "turn-live", "status": "inProgress"}}}}, nil)
+	session := installColdSession(a, runtime, "thread-active")
+	command := agentCommand(runtime, session, protocol.StartTurn)
+	if ack, err := a.HandleCommand(context.Background(), command); err != nil || ack.Status != "accepted" {
+		t.Fatalf("ack %#v %v", ack, err)
+	}
+	waitFor(t, func() bool {
+		record, found, err := a.store.LoadCommand(command.ID)
+		return err == nil && found && record.State == CommandFailed
+	})
+	if hasCall(server.Calls(), "turn/start") {
+		t.Fatal("active resumed thread received a new turn")
+	}
+	record, found, err := a.store.LoadCommand(command.ID)
+	if err != nil || !found || record.Result == nil || record.Result.Error == nil {
+		t.Fatalf("record %#v found=%v err=%v", record, found, err)
+	}
+	if record.Result.Error.Code != protocol.SessionBusy || record.Result.Error.Message != "This thread already has an active turn. Wait for it to finish, or start a new Telegram session." {
+		t.Fatalf("active resume result = %#v", record.Result.Error)
+	}
+}
+
+func TestAgentReportsThreadWriterConflictActionably(t *testing.T) {
+	a, runtime, server, cleanup := testAgent(t)
+	defer cleanup()
+	server.SetRPCError("thread/resume", -32000, "thread writer lock is held by another Codex client")
+	session := installColdSession(a, runtime, "thread-locked")
+	command := agentCommand(runtime, session, protocol.StartTurn)
+	if ack, err := a.HandleCommand(context.Background(), command); err != nil || ack.Status != "accepted" {
+		t.Fatalf("ack %#v %v", ack, err)
+	}
+	waitFor(t, func() bool {
+		record, found, err := a.store.LoadCommand(command.ID)
+		return err == nil && found && record.State == CommandFailed
+	})
+	record, _, err := a.store.LoadCommand(command.ID)
+	if err != nil || record.Result == nil || record.Result.Error == nil {
+		t.Fatalf("record %#v err=%v", record, err)
+	}
+	if record.Result.Error.Code != protocol.SessionBusy || !record.Result.Error.Retryable {
+		t.Fatalf("writer conflict result = %#v", record.Result.Error)
+	}
+	if record.Result.Error.Message != "This thread is open in another Codex client. Close that client and retry, use /fork to create a branch, or use /tgnew to start fresh." {
+		t.Fatalf("writer conflict message = %q", record.Result.Error.Message)
+	}
+}
+
+func TestAgentReportsUnavailableResumeAsUnsupported(t *testing.T) {
+	a, runtime, server, cleanup := testAgent(t)
+	defer cleanup()
+	server.SetMethodUnavailable("thread/resume", true)
+	session := installColdSession(a, runtime, "thread-old-server")
+	command := agentCommand(runtime, session, protocol.StartTurn)
+	if ack, err := a.HandleCommand(context.Background(), command); err != nil || ack.Status != "accepted" {
+		t.Fatalf("ack %#v %v", ack, err)
+	}
+	waitFor(t, func() bool {
+		record, found, err := a.store.LoadCommand(command.ID)
+		return err == nil && found && record.State == CommandFailed
+	})
+	record, _, err := a.store.LoadCommand(command.ID)
+	if err != nil || record.Result == nil || record.Result.Error == nil {
+		t.Fatalf("record %#v err=%v", record, err)
+	}
+	if record.Result.Error.Code != protocol.CodexMethodUnsupported {
+		t.Fatalf("unavailable resume result = %#v", record.Result.Error)
+	}
+}
+
+func TestAgentCodexUsageErrorIsDefiniteFailure(t *testing.T) {
+	a, runtime, server, cleanup := testAgent(t)
+	defer cleanup()
+	session := installSession(a, runtime, "thread-command", "")
+	command := agentCommand(runtime, session, protocol.CodexCommand)
+	command.Arguments = protocol.Arguments{Codex: &protocol.CodexCommandPayload{Name: "compact", Args: "unexpected"}}
+	if ack, err := a.HandleCommand(context.Background(), command); err != nil || ack.Status != "accepted" {
+		t.Fatalf("ack %#v %v", ack, err)
+	}
+	waitFor(t, func() bool {
+		record, found, err := a.store.LoadCommand(command.ID)
+		return err == nil && found && record.State == CommandFailed
+	})
+	if hasCall(server.Calls(), "thread/compact/start") {
+		t.Fatal("invalid command reached Codex")
+	}
+	record, _, err := a.store.LoadCommand(command.ID)
+	if err != nil || record.Result == nil || record.Result.Error == nil {
+		t.Fatalf("record %#v err=%v", record, err)
+	}
+	if record.Result.Error.Code != protocol.CodexCommandInvalid || record.Result.Error.Message != "/compact does not accept arguments" {
+		t.Fatalf("usage result = %#v", record.Result.Error)
+	}
+}
+
+func TestAgentCodexReviewRecordsCorrelatedTurnStarted(t *testing.T) {
+	a, runtime, server, cleanup := testAgent(t)
+	defer cleanup()
+	session := installSession(a, runtime, "thread-review", "")
+	command := agentCommand(runtime, session, protocol.CodexCommand)
+	command.Arguments = protocol.Arguments{Codex: &protocol.CodexCommandPayload{Name: "review"}}
+	if ack, err := a.HandleCommand(context.Background(), command); err != nil || ack.Status != "accepted" {
+		t.Fatalf("ack %#v %v", ack, err)
+	}
+	waitFor(t, func() bool { return sessionTurn(a.store, session.ID) != "" })
+	turnID := sessionTurn(a.store, session.ID)
+	if !hasCall(server.Calls(), "review/start") {
+		t.Fatal("review command did not start its Codex turn")
+	}
+	waitFor(t, func() bool { return hasTurnEventForCommand(a.store, "turn_started", command.ID, turnID) })
+	a.onEvent(runtime, codexadapter.Event{Kind: "turn_completed", ThreadID: session.ThreadID, TurnID: turnID})
+	waitFor(t, func() bool { return sessionTurn(a.store, session.ID) == "" })
+	assertTurnCompletedForCommand(t, a.store, command.ID, turnID)
+}
+
+func TestAgentCodexStatusDuringActiveTurnPreservesOriginalCommand(t *testing.T) {
+	a, runtime, server, cleanup := testAgent(t)
+	defer cleanup()
+	session := installSession(a, runtime, "thread-status-active", "")
+	original := agentCommand(runtime, session, protocol.StartTurn)
+	original.Arguments.Text = "keep working"
+	if ack, err := a.HandleCommand(context.Background(), original); err != nil || ack.Status != "accepted" {
+		t.Fatalf("start ack %#v %v", ack, err)
+	}
+	waitFor(t, func() bool { return sessionTurn(a.store, session.ID) != "" })
+	turnID := sessionTurn(a.store, session.ID)
+	status := agentCommand(runtime, session, protocol.CodexCommand)
+	status.Arguments = protocol.Arguments{Codex: &protocol.CodexCommandPayload{Name: "status"}}
+	status.ExpectedTurnID = ""
+	if ack, err := a.HandleCommand(context.Background(), status); err != nil || ack.Status != "accepted" {
+		t.Fatalf("status ack %#v %v", ack, err)
+	}
+	waitFor(t, func() bool {
+		record, found, err := a.store.LoadCommand(status.ID)
+		return err == nil && found && record.State == CommandCompleted
+	})
+	if got := countCall(server.Calls(), "turn/start"); got != 1 {
+		t.Fatalf("turn/start calls = %d, want original turn only", got)
+	}
+	if got := countCall(server.Calls(), "turn/interrupt"); got != 0 {
+		t.Fatalf("turn/interrupt calls = %d", got)
+	}
+	if got := sessionTurn(a.store, session.ID); got != turnID {
+		t.Fatalf("active turn changed to %q, want %q", got, turnID)
+	}
+	a.onEvent(runtime, codexadapter.Event{Kind: "turn_completed", ThreadID: session.ThreadID, TurnID: turnID})
+	waitFor(t, func() bool { return sessionTurn(a.store, session.ID) == "" })
+	assertTurnCompletedForCommand(t, a.store, original.ID, turnID)
+}
+
+func TestAgentExecutionErrorRedactsAndBoundsProtocolError(t *testing.T) {
+	a, runtime, _, cleanup := testAgent(t)
+	defer cleanup()
+	session := installSession(a, runtime, "thread-error", "")
+	command := agentCommand(runtime, session, protocol.CodexCommand)
+	command.Arguments = protocol.Arguments{Codex: &protocol.CodexCommandPayload{Name: "status"}}
+	if received, err := a.store.Receive(command); err != nil || !received.Accepted {
+		t.Fatalf("receive %#v %v", received, err)
+	}
+	if err := a.store.SetCommandState(command.ID, CommandExecuting, nil); err != nil {
+		t.Fatal(err)
+	}
+	message := "sk-abcdefghijklmnopqrstuvwxyz0123456789-secret " + strings.Repeat("é", 300)
+	if err := a.executionError(command, &protocol.Error{Code: "invalid_command", Message: message}); err != nil {
+		t.Fatal(err)
+	}
+	record, _, err := a.store.LoadCommand(command.ID)
+	if err != nil || record.State != CommandFailed || record.Result == nil || record.Result.Error == nil {
+		t.Fatalf("record %#v err=%v", record, err)
+	}
+	if strings.Contains(record.Result.Error.Message, "sk-") || len([]rune(record.Result.Error.Message)) > 241 {
+		t.Fatalf("unsafe bounded message = %q", record.Result.Error.Message)
 	}
 }
 
@@ -274,6 +475,15 @@ func installSession(a *Agent, runtime protocol.Runtime, threadID, active string)
 	a.onSession(runtime, s)
 	return s
 }
+
+func installColdSession(a *Agent, runtime protocol.Runtime, threadID string) protocol.Session {
+	s, err := a.store.UpsertSession(protocol.Session{RuntimeID: runtime.ID, ThreadID: threadID, CWD: runtime.DefaultCWD, State: "not_loaded", Loaded: false})
+	if err != nil {
+		panic(err)
+	}
+	a.onSession(runtime, s)
+	return s
+}
 func agentCommand(runtime protocol.Runtime, s protocol.Session, op protocol.Operation) protocol.Command {
 	now := time.Now()
 	return protocol.Command{ID: uuid.NewString(), WorkerID: runtime.WorkerID, RuntimeID: runtime.ID, RuntimeGeneration: runtime.Generation, SessionID: s.ID, ThreadID: s.ThreadID, Operation: op, ExpectedTurnID: s.ActiveTurnID, Arguments: protocol.Arguments{Text: "x"}, CreatedAt: now, ExpiresAt: now.Add(time.Hour)}
@@ -316,6 +526,30 @@ func turnTexts(calls []codextest.Call, threadID string) []string {
 		}
 	}
 	return texts
+}
+
+func assertTurnCompletedForCommand(t *testing.T, store *Store, commandID, turnID string) {
+	t.Helper()
+	if !hasTurnEventForCommand(store, "turn_completed", commandID, turnID) {
+		t.Fatalf("missing turn_completed for command=%s turn=%s", commandID, turnID)
+	}
+}
+
+func hasTurnEventForCommand(store *Store, kind, commandID, turnID string) bool {
+	events, err := store.OutboxAfter(0)
+	if err != nil {
+		return false
+	}
+	for _, event := range events {
+		if event.Kind != kind {
+			continue
+		}
+		var result protocol.Result
+		if json.Unmarshal(event.Data, &result) == nil && result.CommandID == commandID && result.TurnID == turnID {
+			return true
+		}
+	}
+	return false
 }
 func activeTurn(t *testing.T, store *Store, id string) string {
 	t.Helper()
