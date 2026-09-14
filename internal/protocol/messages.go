@@ -72,6 +72,7 @@ const (
 	Interrupt        Operation = "interrupt"
 	ApprovalResponse Operation = "approval_response"
 	InputResponse    Operation = "input_response"
+	CodexCommand     Operation = "codex_command"
 )
 
 // Command contains an immutable execution target. No dispatch path may consult a
@@ -91,11 +92,20 @@ type Command struct {
 }
 
 type Arguments struct {
-	Text       string              `json:"text,omitempty"`
-	ApprovalID string              `json:"approval_id,omitempty"`
-	RequestID  string              `json:"request_id,omitempty"`
-	Decision   string              `json:"decision,omitempty"`
-	Answers    map[string][]string `json:"answers,omitempty"`
+	SelectionRevision *uint64              `json:"selection_revision,omitempty"`
+	Codex             *CodexCommandPayload `json:"codex,omitempty"`
+	CWD               string               `json:"cwd,omitempty"`
+	Text              string               `json:"text,omitempty"`
+	ApprovalID        string               `json:"approval_id,omitempty"`
+	RequestID         string               `json:"request_id,omitempty"`
+	Decision          string               `json:"decision,omitempty"`
+	Answers           map[string][]string  `json:"answers,omitempty"`
+}
+
+// CodexCommandPayload names a client command, never an arbitrary RPC method.
+type CodexCommandPayload struct {
+	Name string `json:"name"`
+	Args string `json:"args,omitempty"`
 }
 
 func (c Command) Validate() error {
@@ -115,7 +125,7 @@ func (c Command) Validate() error {
 		if c.SessionID != "" || c.ThreadID != "" {
 			return errors.New("new session cannot target an existing thread")
 		}
-	case StartTurn, Steer, Interrupt, ApprovalResponse, InputResponse:
+	case StartTurn, Steer, Interrupt, ApprovalResponse, InputResponse, CodexCommand:
 		if _, err := uuid.Parse(c.SessionID); err != nil || c.ThreadID == "" {
 			return errors.New("missing session target")
 		}
@@ -130,6 +140,16 @@ func (c Command) Validate() error {
 	}
 	if (c.Operation == ApprovalResponse || c.Operation == InputResponse) && (c.Arguments.RequestID == "" || c.Arguments.ApprovalID == "") {
 		return errors.New("missing request target")
+	}
+	if c.Operation == CodexCommand {
+		if c.Arguments.Codex == nil || len(c.Arguments.Codex.Name) == 0 || len(c.Arguments.Codex.Name) > 64 || len(c.Arguments.Codex.Args) > 16384 {
+			return errors.New("invalid Codex command")
+		}
+		for _, ch := range c.Arguments.Codex.Name {
+			if (ch < 'a' || ch > 'z') && ch != '-' {
+				return errors.New("invalid Codex command name")
+			}
+		}
 	}
 	return nil
 }

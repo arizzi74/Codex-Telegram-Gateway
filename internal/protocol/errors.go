@@ -26,6 +26,7 @@ const (
 	CodexUnavailable       = "codex_unavailable"
 	CodexProtocolError     = "codex_protocol_error"
 	CodexMethodUnsupported = "codex_method_unsupported"
+	CodexCommandInvalid    = "codex_command_invalid"
 	OutcomeUnknown         = "outcome_unknown"
 	InternalError          = "internal_error"
 )
