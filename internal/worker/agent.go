@@ -467,6 +467,7 @@ type sessionActor struct {
 	queue                           []protocol.Command
 	pending                         map[string]pendingRequest
 	activeCommand                   *protocol.Command
+	awaitingTurnStart               bool
 	text                            strings.Builder
 }
 
@@ -475,7 +476,7 @@ func (s *sessionActor) runtimeRequests() chan actorRequest { return s.requestQue
 
 func (s *sessionActor) run() {
 	for {
-		if s.session.ActiveTurnID == "" && (s.session.State == "idle" || s.session.State == "not_loaded" || s.session.State == "failed") && s.runtime.State == "running" && len(s.queue) > 0 {
+		if s.session.ActiveTurnID == "" && s.activeCommand == nil && (s.session.State == "idle" || s.session.State == "not_loaded" || s.session.State == "failed") && s.runtime.State == "running" && len(s.queue) > 0 {
 			c := s.queue[0]
 			s.queue = s.queue[1:]
 			s.start(c)
@@ -497,6 +498,7 @@ func (s *sessionActor) run() {
 				s.session = snapshot.session
 				s.pending = map[string]pendingRequest{}
 				s.activeCommand = nil
+				s.awaitingTurnStart = false
 				s.text.Reset()
 				for _, c := range s.queue {
 					_, err := s.agent.reject(c, protocol.StaleRuntime, "Runtime restarted before execution.")
@@ -505,7 +507,7 @@ func (s *sessionActor) run() {
 				s.queue = nil
 			} else {
 				s.runtime = snapshot.runtime
-				if s.session.ActiveTurnID == "" {
+				if s.session.ActiveTurnID == "" && s.activeCommand == nil {
 					s.session = snapshot.session
 				} else {
 					s.session.Name, s.session.Preview = snapshot.session.Name, snapshot.session.Preview
@@ -600,7 +602,7 @@ func (s *sessionActor) command(req actorCommand) {
 		}
 		result.Text = s.agent.redactor.Redact(result.Text)
 		kind := "command_completed"
-		if result.Session == nil && result.TurnID != "" && result.State == "running" {
+		if result.Session == nil && result.State == "running" {
 			// Special commands such as /review and /init create a turn outside
 			// start(). Preserve the same command-to-turn correlation as a normal
 			// Telegram prompt so the terminal event, typing indicator, and final
@@ -610,7 +612,15 @@ func (s *sessionActor) command(req actorCommand) {
 			s.activeCommand = &c
 			s.text.Reset()
 			s.save()
-			kind = "turn_started"
+			if result.TurnID != "" {
+				kind = "turn_started"
+			} else {
+				// thread/compact/start acknowledges before its asynchronous turn id
+				// exists. Keep the command in-flight until turn/started supplies
+				// that identity, so presence and completion routing remain intact.
+				s.awaitingTurnStart = true
+				return
+			}
 		}
 		_, err = s.agent.record(c, CommandCompleted, &result, kind)
 		s.agent.report(err)
@@ -768,7 +778,17 @@ func (s *sessionActor) event(event codexadapter.Event) {
 		s.session.State = "running"
 		s.session.Loaded = true
 		s.save()
-		s.agent.report(s.agent.emit(s.runtime, s.session.ID, "turn_started", protocol.Result{TurnID: event.TurnID, State: "running"}))
+		result := protocol.Result{TurnID: event.TurnID, State: "running"}
+		if s.activeCommand != nil {
+			result.CommandID = s.activeCommand.ID
+		}
+		if s.awaitingTurnStart && s.activeCommand != nil {
+			s.awaitingTurnStart = false
+			_, err := s.agent.record(*s.activeCommand, CommandCompleted, &result, "turn_started")
+			s.agent.report(err)
+		} else {
+			s.agent.report(s.agent.emit(s.runtime, s.session.ID, "turn_started", result))
+		}
 	case "agent_message_delta":
 		if event.TurnID == s.session.ActiveTurnID && s.text.Len() < 256<<10 {
 			s.text.WriteString(event.Text)
@@ -800,6 +820,7 @@ func (s *sessionActor) event(event codexadapter.Event) {
 		s.session.ActiveTurnID = ""
 		s.session.State = state
 		s.activeCommand = nil
+		s.awaitingTurnStart = false
 		s.text.Reset()
 		s.save()
 		for key := range s.pending {

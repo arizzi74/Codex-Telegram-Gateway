@@ -189,6 +189,46 @@ func TestAgentCodexReviewRecordsCorrelatedTurnStarted(t *testing.T) {
 	assertTurnCompletedForCommand(t, a.store, command.ID, turnID)
 }
 
+func TestAgentCompactAwaitsTurnStartedBeforeReleasingQueue(t *testing.T) {
+	a, runtime, server, cleanup := testAgent(t)
+	defer cleanup()
+	session := installSession(a, runtime, "thread-compact", "")
+	compact := agentCommand(runtime, session, protocol.CodexCommand)
+	compact.Arguments = protocol.Arguments{Codex: &protocol.CodexCommandPayload{Name: "compact"}}
+	if ack, err := a.HandleCommand(context.Background(), compact); err != nil || ack.Status != "accepted" {
+		t.Fatalf("compact ack %#v %v", ack, err)
+	}
+	waitFor(t, func() bool {
+		record, found, err := a.store.LoadCommand(compact.ID)
+		return err == nil && found && record.State == CommandExecuting && hasCall(server.Calls(), "thread/compact/start")
+	})
+	next := agentCommand(runtime, session, protocol.StartTurn)
+	next.Arguments.Text = "after compaction"
+	if ack, err := a.HandleCommand(context.Background(), next); err != nil || ack.Status != "accepted" {
+		t.Fatalf("queued ack %#v %v", ack, err)
+	}
+	if !hasCall(server.Calls(), "thread/compact/start") {
+		t.Fatal("compact command did not reach Codex")
+	}
+	if got := countCall(server.Calls(), "turn/start"); got != 0 {
+		t.Fatalf("queued turn started before compact emitted turn_started: %d", got)
+	}
+	compactTurn := "turn-compact"
+	a.onEvent(runtime, codexadapter.Event{Kind: "turn_started", ThreadID: session.ThreadID, TurnID: compactTurn})
+	waitFor(t, func() bool { return sessionTurn(a.store, session.ID) == compactTurn })
+	waitFor(t, func() bool { return hasTurnEventForCommand(a.store, "turn_started", compact.ID, compactTurn) })
+	record, found, err := a.store.LoadCommand(compact.ID)
+	if err != nil || !found || record.State != CommandCompleted {
+		t.Fatalf("compact did not complete at turn_started: %#v found=%v err=%v", record, found, err)
+	}
+	if got := countCall(server.Calls(), "turn/start"); got != 0 {
+		t.Fatalf("queued turn started before compact completion: %d", got)
+	}
+	a.onEvent(runtime, codexadapter.Event{Kind: "turn_completed", ThreadID: session.ThreadID, TurnID: compactTurn})
+	waitFor(t, func() bool { return countCall(server.Calls(), "turn/start") == 1 })
+	assertTurnCompletedForCommand(t, a.store, compact.ID, compactTurn)
+}
+
 func TestAgentCodexStatusDuringActiveTurnPreservesOriginalCommand(t *testing.T) {
 	a, runtime, server, cleanup := testAgent(t)
 	defer cleanup()
