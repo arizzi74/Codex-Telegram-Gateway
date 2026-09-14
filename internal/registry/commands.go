@@ -11,6 +11,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/iaia/telegramgw/internal/protocol"
+	"github.com/iaia/telegramgw/internal/telegramcommands"
 	"github.com/jackc/pgx/v5"
 )
 
@@ -198,6 +199,18 @@ func telegramContextKey(in IncomingUpdate) string {
 func (s *Store) acceptAction(ctx context.Context, tx pgx.Tx, in IncomingUpdate) (AcceptResult, error) {
 	action := strings.ToLower(strings.TrimSpace(in.Action))
 	switch action {
+	case "unknown_command":
+		return AcceptResult{View: "error", ErrorCode: "unknown_command", Action: in.Target}, nil
+	case "codex":
+		return s.acceptCodexCommand(ctx, tx, in)
+	case "input_command":
+		parts := strings.Fields(in.Text)
+		if len(parts) < 3 {
+			return AcceptResult{View: "error", ErrorCode: "input_usage"}, nil
+		}
+		in.Target, in.QuestionID = parts[0], parts[1]
+		in.Text = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(strings.TrimPrefix(in.Text, parts[0])), parts[1]))
+		return acceptInput(ctx, tx, in)
 	case "help", "instances":
 		return AcceptResult{View: action}, nil
 	case "sessions":
@@ -231,6 +244,9 @@ func (s *Store) acceptAction(ctx context.Context, tx pgx.Tx, in IncomingUpdate) 
 		}
 		return AcceptResult{View: "selected", SessionID: target.sessionID.String(), RuntimeID: target.runtimeID.String()}, nil
 	case "disconnect":
+		if err := bumpSelectionRevision(ctx, tx, in); err != nil {
+			return AcceptResult{}, err
+		}
 		if _, err := tx.Exec(ctx, `DELETE FROM telegram_bindings WHERE bot_id=$1 AND user_id=$2 AND chat_id=$3 AND message_thread_id=$4`, in.BotID, in.UserID, in.ChatID, in.TopicID); err != nil {
 			return AcceptResult{}, fmt.Errorf("registry: disconnect selection: %w", err)
 		}
@@ -255,6 +271,59 @@ func (s *Store) acceptAction(ctx context.Context, tx pgx.Tx, in IncomingUpdate) 
 	default:
 		return acceptTextCommand(ctx, tx, in, protocol.StartTurn)
 	}
+}
+
+// Codex commands share the ordinary frozen routing transaction, but have their
+// own operation so client commands can never become model prompts by accident.
+func (s *Store) acceptCodexCommand(ctx context.Context, tx pgx.Tx, in IncomingUpdate) (AcceptResult, error) {
+	if len(in.Text) > 16384 {
+		return AcceptResult{View: "error", ErrorCode: "command_too_long"}, nil
+	}
+	name, ok := telegramcommands.Canonical(in.Target)
+	if !ok {
+		return AcceptResult{View: "error", ErrorCode: "unknown_command", Action: in.Target}, nil
+	}
+	switch name {
+	case "help":
+		return AcceptResult{View: "codex_help"}, nil
+	case "quit", "exit":
+		in.Action = "disconnect"
+		return s.acceptAction(ctx, tx, in)
+	case "resume", "agent", "subagents":
+		in.Action, in.Target = "connect", strings.TrimSpace(in.Text)
+		if in.Target == "" {
+			in.Action = "sessions"
+		}
+		return s.acceptAction(ctx, tx, in)
+	case "new", "clear":
+		target, err := resolveRoute(ctx, tx, in)
+		if errors.Is(err, ErrTelegramTarget) {
+			in.Action, in.Target = "new", ""
+			return s.acceptAction(ctx, tx, in)
+		}
+		if err != nil {
+			return AcceptResult{}, err
+		}
+		var cwd string
+		if err := tx.QueryRow(ctx, "SELECT COALESCE(cwd,'') FROM sessions WHERE session_id=$1", target.sessionID).Scan(&cwd); err != nil {
+			return AcceptResult{}, err
+		}
+		target.sessionID, target.threadID, target.activeTurnID = uuid.Nil, "", ""
+		command, err := createTelegramCommand(ctx, tx, in, target, protocol.NewSession, "", "", protocol.Arguments{CWD: cwd})
+		if err != nil {
+			return AcceptResult{}, err
+		}
+		return AcceptResult{View: "queued", RuntimeID: target.runtimeID.String(), CommandID: command.ID}, nil
+	}
+	target, err := resolveRoute(ctx, tx, in)
+	if err != nil {
+		return AcceptResult{}, err
+	}
+	command, err := createTelegramCommand(ctx, tx, in, target, protocol.CodexCommand, target.sessionID.String(), "", protocol.Arguments{Codex: &protocol.CodexCommandPayload{Name: name, Args: in.Text}})
+	if err != nil {
+		return AcceptResult{}, err
+	}
+	return AcceptResult{View: "queued", SessionID: target.sessionID.String(), RuntimeID: target.runtimeID.String(), CommandID: command.ID}, nil
 }
 
 func acceptTextCommand(ctx context.Context, tx pgx.Tx, in IncomingUpdate, operation protocol.Operation) (AcceptResult, error) {
@@ -606,6 +675,13 @@ func resolveSessionLookup(ctx context.Context, tx pgx.Tx, raw string) (routeTarg
 }
 
 func createTelegramCommand(ctx context.Context, tx pgx.Tx, in IncomingUpdate, target routeTarget, operation protocol.Operation, sessionID, expectedTurn string, args protocol.Arguments) (protocol.Command, error) {
+	if operation == protocol.NewSession || (operation == protocol.CodexCommand && args.Codex != nil && args.Codex.Name == "fork") {
+		revision, err := selectionRevision(ctx, tx, in)
+		if err != nil {
+			return protocol.Command{}, err
+		}
+		args.SelectionRevision = &revision
+	}
 	if target.generation < 0 || target.generation > math.MaxInt64 {
 		return protocol.Command{}, ErrTelegramTarget
 	}
@@ -643,6 +719,9 @@ func createTelegramCommand(ctx context.Context, tx pgx.Tx, in IncomingUpdate, ta
 }
 
 func setBinding(ctx context.Context, tx pgx.Tx, in IncomingUpdate, sessionID uuid.UUID) error {
+	if err := bumpSelectionRevision(ctx, tx, in); err != nil {
+		return err
+	}
 	_, err := tx.Exec(ctx, `INSERT INTO telegram_bindings (bot_id,user_id,chat_id,message_thread_id,session_id)
         VALUES ($1,$2,$3,$4,$5) ON CONFLICT (bot_id,user_id,chat_id,message_thread_id)
         DO UPDATE SET session_id=EXCLUDED.session_id, selected_at=now()`, in.BotID, in.UserID, in.ChatID, in.TopicID, sessionID)

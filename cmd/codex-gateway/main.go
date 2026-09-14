@@ -23,6 +23,7 @@ import (
 	"github.com/iaia/telegramgw/internal/config"
 	"github.com/iaia/telegramgw/internal/gateway"
 	"github.com/iaia/telegramgw/internal/registry"
+	"github.com/iaia/telegramgw/internal/telegramcommands"
 )
 
 func main() {
@@ -58,7 +59,7 @@ func run(args []string, logger *slog.Logger) error {
 		return nil
 	}
 	if args[0] == "help" || args[0] == "--help" {
-		fmt.Println("codex-gateway [--config gateway.json] serve|migrate|admin bootstrap|webhook set|webhook status|worker create --name NAME|worker list|worker revoke ID|worker rotate-token ID")
+		fmt.Println("codex-gateway [--config gateway.json] serve|migrate|admin bootstrap|webhook set|webhook status|menu set|menu status|worker create --name NAME|worker list|worker revoke ID|worker rotate-token ID")
 		return nil
 	}
 	cfg, err := config.LoadGateway(path)
@@ -83,6 +84,33 @@ func run(args []string, logger *slog.Logger) error {
 		return err
 	}
 	switch args[0] {
+	case "menu":
+		if len(args) != 2 || (args[1] != "set" && args[1] != "status") {
+			return errors.New("use menu set or menu status")
+		}
+		api := gateway.NewTelegramClient(cfg.Secrets.BotToken)
+		if args[1] == "set" {
+			identity, err := api.Identity(ctx)
+			if err != nil {
+				return err
+			}
+			if !strings.EqualFold(identity.Username, strings.TrimPrefix(cfg.Secrets.BotName, "@")) {
+				return errors.New("Telegram token belongs to a different bot than BOTNAME")
+			}
+			if err := api.SetMyCommands(ctx, telegramcommands.Commands()); err != nil {
+				return err
+			}
+			if err := api.SetChatMenuButton(ctx, 0, gateway.MenuButton{Type: "commands"}); err != nil {
+				return err
+			}
+			fmt.Println("Telegram command menu configured.")
+			return nil
+		}
+		commands, err := api.GetMyCommands(ctx)
+		if err != nil {
+			return err
+		}
+		return json.NewEncoder(os.Stdout).Encode(commands)
 	case "migrate":
 		fmt.Println("Migrations applied.")
 		return nil
@@ -161,6 +189,7 @@ func run(args []string, logger *slog.Logger) error {
 		services.Go(func() { hub.Run(serviceCtx) })
 		services.Go(func() { _ = sender.Run(serviceCtx) })
 		services.Go(func() { _ = dispatcher.Run(serviceCtx) })
+		services.Go(func() { _ = gateway.NewPresence(store, api, logger).Run(serviceCtx) })
 		defer func() { stopService(); services.Wait() }()
 		errCh := make(chan error, 1)
 		go func() { errCh <- server.ListenAndServe() }()

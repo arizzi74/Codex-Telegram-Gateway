@@ -12,6 +12,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/iaia/telegramgw/internal/protocol"
 	"github.com/iaia/telegramgw/internal/registry"
+	"github.com/iaia/telegramgw/internal/telegramcommands"
 )
 
 const callbackLifetime = 15 * time.Minute
@@ -67,6 +68,8 @@ func (s *Sender) renderUIResponse(ctx context.Context, row registry.Delivery) (s
 	switch response.View {
 	case "help", "start":
 		return helpText(), nil, nil
+	case "codex_help":
+		return codexHelpText(), nil, nil
 	case "instances":
 		inventory, err := s.inventory(ctx)
 		if err != nil {
@@ -395,22 +398,25 @@ func (s *Sender) renderEvent(ctx context.Context, row registry.Delivery) (string
 		if degraded.CodexVersion != "" {
 			version = degraded.CodexVersion
 		}
-		return "⚠️ " + identity + "\n\nRuntime compatibility is degraded. Some Codex features may be unavailable.\nState: " + displayValue(degraded.State) + "\nCodex version: " + version + "\n\nUse /status and check the worker logs before retrying failed operations.", nil, nil
+		return "⚠️ " + identity + "\n\nRuntime compatibility is degraded. Some Codex features may be unavailable.\nState: " + displayValue(degraded.State) + "\nCodex version: " + version + "\n\nUse /tgstatus and check the worker logs before retrying failed operations.", nil, nil
 	case "command_completed":
 		var result protocol.Result
 		if err := json.Unmarshal(event.Data, &result); err != nil {
 			return "", nil, fmt.Errorf("render completed command: %w", err)
 		}
-		if result.Session == nil {
+		if result.Session == nil || result.Session.ID == event.SessionID {
+			if strings.TrimSpace(result.Text) != "" {
+				return identity + "\n\n" + result.Text, nil, nil
+			}
 			return "✅ " + identity + "\n\nCommand completed.", nil, nil
 		}
 		_, created, createdRuntime, createdWorker, err := s.selectedIdentity(ctx, result.Session.ID, result.Session.RuntimeID)
 		if err != nil {
 			return "", nil, err
 		}
-		return "✅ New session ready · " + humanIdentity(createdWorker, createdRuntime, created) + "\n\nWorkspace: " + displayValue(created.CWD) + "\nStatus: " + titleCase(created.State) + "\n\nMessages in this chat now target this session.", nil, nil
+		return "✅ New session ready · " + humanIdentity(createdWorker, createdRuntime, created) + "\n\nWorkspace: " + displayValue(created.CWD) + "\nStatus: " + titleCase(created.State) + "\n\nReply to this message to use this session, or select it with /tgconnect " + created.ID, nil, nil
 	case "command_result_unknown":
-		return "⚠️ " + identity + "\n\nThe command outcome is unknown. Use /status before retrying.", nil, nil
+		return "⚠️ " + identity + "\n\nThe command outcome is unknown. Use /tgstatus before retrying.", nil, nil
 	default:
 		return titleCase(event.Kind) + " · " + identity, nil, nil
 	}
@@ -589,16 +595,32 @@ func findQuestion(questions []protocol.Question, id string) (protocol.Question, 
 }
 
 func helpText() string {
-	return "Commands:\n/start — show this guide\n/help — show this guide\n/instances — list workers and runtimes\n/sessions — list sessions\n/connect <session> — select a session\n/status — show selected session details\n/disconnect — clear the selection\n/new — create a session\n/steer <text> — guide the active turn\n/interrupt — stop the active turn"
+	return "Gateway commands:\n/tgstart — getting started\n/tghelp — show this guide\n/tginstances — list workers and runtimes\n/tgsessions — list sessions\n/tgconnect <session> — select a session\n/tgstatus — show gateway session and queue state\n/tgdisconnect — clear the selection\n/tgnew — create a session\n/tgsteer <text> — guide the active turn\n/tginterrupt — stop the active turn\n/tginput <approval-id> <question-id> <answer> — answer a request (or reply to its message)\n\nCodex commands use their usual names: /status, /model, /compact, /review and more. Use /help for the full list or the bot menu."
+}
+
+func codexHelpText() string {
+	var out strings.Builder
+	out.WriteString("Codex commands for the selected session:\n")
+	for _, command := range telegramcommands.CodexCommands() {
+		fmt.Fprintf(&out, "/%s — %s\n", command.Command, command.Description)
+	}
+	out.WriteString("\nSend a command without arguments to see its options. Terminal-only controls explain how to use the attached CLI. Gateway commands begin with /tg; use /tghelp. Telegram menu names use underscores in place of CLI hyphens.")
+	return out.String()
 }
 func telegramErrorText(code string) string {
 	switch code {
+	case "unknown_command":
+		return "Unknown command. Use /tghelp for gateway controls or /help for Codex commands."
+	case "command_too_long":
+		return "The command arguments are too long. Send fewer than 16,384 bytes."
+	case "input_usage":
+		return "Use /tginput <approval-id> <question-id> <answer>, or reply to the input request message."
 	case "callback_invalid":
 		return "This button is expired, already used, or no longer valid."
 	case "stale_turn":
-		return "The active turn changed or ended. Use /status and try again."
+		return "The active turn changed or ended. Use /tgstatus and try again."
 	case "target_unavailable", "":
-		return "No available target was found. Use /instances or /sessions to choose one."
+		return "No available target was found. Use /tginstances or /tgsessions to choose one."
 	default:
 		return "Request could not be completed: " + humanize(code) + "."
 	}

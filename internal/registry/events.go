@@ -36,6 +36,9 @@ func (s *Store) IngestEvent(ctx context.Context, workerID, connectionID uuid.UUI
 		return fmt.Errorf("registry: begin event ingestion: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	if err := lockAutomaticBindingContext(ctx, tx, workerID, event); err != nil {
+		return err
+	}
 	if err := checkLeaseTx(ctx, tx, workerID, connectionID); err != nil {
 		return err
 	}
@@ -349,7 +352,23 @@ func (s *Store) applyEvent(ctx context.Context, tx pgx.Tx, workerID uuid.UUID, e
 		commandID = &id
 	}
 	if result.Session != nil && target.runtimeCurrent && target.runtimeID != nil {
-		if err := upsertProtocolSession(ctx, tx, workerID, *target.runtimeID, target.sessionID, *result.Session); err != nil {
+		expectedID := target.sessionID
+		forked := expectedID != nil && result.Session.ID != expectedID.String()
+		if forked {
+			if event.Kind != "command_completed" || commandID == nil {
+				return false, nil, ErrEventTarget
+			}
+			var allowed bool
+			if err := tx.QueryRow(ctx, `SELECT operation='codex_command' AND payload #>> '{arguments,codex,name}'='fork'
+                FROM commands WHERE command_id=$1`, *commandID).Scan(&allowed); err != nil {
+				return false, nil, err
+			}
+			if !allowed {
+				return false, nil, ErrEventTarget
+			}
+			expectedID = nil
+		}
+		if err := upsertProtocolSession(ctx, tx, workerID, *target.runtimeID, expectedID, *result.Session); err != nil {
 			return false, nil, err
 		}
 		var parseErr error
@@ -357,7 +376,7 @@ func (s *Store) applyEvent(ctx context.Context, tx pgx.Tx, workerID uuid.UUID, e
 		if parseErr != nil {
 			return false, nil, ErrEventTarget
 		}
-		if commandID != nil && originalTarget.sessionID == nil {
+		if commandID != nil && (originalTarget.sessionID == nil || forked) {
 			if err := bindCommandSession(ctx, tx, *commandID, *target.sessionID); err != nil {
 				return false, nil, err
 			}
@@ -371,7 +390,13 @@ func (s *Store) applyEvent(ctx context.Context, tx pgx.Tx, workerID uuid.UUID, e
 			}
 		}
 	}
-	return notificationRequired(event.Kind) || (event.Kind == "command_completed" && result.Session != nil), commandID, nil
+	notify = notificationRequired(event.Kind) || (event.Kind == "command_completed" && result.Session != nil)
+	if !notify && event.Kind == "command_completed" && result.Text != "" && commandID != nil {
+		if err := tx.QueryRow(ctx, "SELECT operation='codex_command' FROM commands WHERE command_id=$1", *commandID).Scan(&notify); err != nil {
+			return false, nil, err
+		}
+	}
+	return notify, commandID, nil
 }
 
 func sessionTransition(kind string, result protocol.Result) (state, activeTurn, terminalTurn string) {
@@ -516,7 +541,8 @@ func enqueueEventDeliveries(ctx context.Context, tx pgx.Tx, eventID uuid.UUID, e
 		return fmt.Errorf("registry: encode delivery payload: %w", err)
 	}
 	rows, err := tx.Query(ctx, `WITH targets AS (
-        SELECT bot_id, chat_id, message_thread_id FROM telegram_bindings WHERE session_id = $1
+        SELECT bot_id, chat_id, message_thread_id FROM telegram_bindings
+        WHERE session_id = $1 AND $3 <> 'command_completed'
         UNION
         SELECT binding.bot_id, binding.chat_id, binding.message_thread_id
         FROM telegram_bindings AS binding

@@ -99,16 +99,16 @@ func TestControlPlaneWorkerOutboxSurvivesGatewayRestartIntegration(t *testing.T)
 	})
 	runtimeID := agent.manager.Snapshot()[0].ID
 
-	// AT-03: /sessions traverses the actual webhook, Registry delivery and
+	// AT-03: /tgsessions traverses the actual webhook, Registry delivery and
 	// sender renderer; the Telegram result contains every discovered thread.
-	postTelegram(t, gw.server.Client(), gw.server.URL, "secret", 1, "/sessions "+runtimeID, 0)
+	postTelegram(t, gw.server.Client(), gw.server.URL, "secret", 1, "/tgsessions "+runtimeID, 0)
 	waitControl(t, func() bool { return tg.hasText("Sessions", "Alpha", "Beta", "Gamma") })
 
 	a, b := sessions[0], sessions[1]
 	targetThread := a.ThreadID
 
 	// Selection and a normal Telegram message travel through the actual webhook.
-	postTelegram(t, gw.server.Client(), gw.server.URL, "secret", 2, "/connect "+a.ID, 0)
+	postTelegram(t, gw.server.Client(), gw.server.URL, "secret", 2, "/tgconnect "+a.ID, 0)
 	postTelegram(t, gw.server.Client(), gw.server.URL, "secret", 3, "perform an offline-safe turn", 0)
 	waitControl(t, func() bool {
 		fakeMu.Lock()
@@ -129,6 +129,13 @@ func TestControlPlaneWorkerOutboxSurvivesGatewayRestartIntegration(t *testing.T)
 		return active != ""
 	})
 
+	// Bare /status reaches Codex while work is active; /tgstatus reads gateway
+	// queues. Neither is submitted as a new model turn.
+	postTelegram(t, gw.server.Client(), gw.server.URL, "secret", 9001, "/status", 0)
+	waitControl(t, func() bool { return tg.hasText("Codex session", "Model:", "Reasoning:") })
+	postTelegram(t, gw.server.Client(), gw.server.URL, "secret", 9002, "/tgstatus", 0)
+	waitControl(t, func() bool { return tg.hasText("Queued commands:") })
+
 	// AT-04: changing the Telegram selection changes only the binding. It must
 	// neither interrupt A nor issue another resume/start while A is running.
 	fakeMu.Lock()
@@ -137,7 +144,7 @@ func TestControlPlaneWorkerOutboxSurvivesGatewayRestartIntegration(t *testing.T)
 	beforeInterrupt := countFixtureCalls(f.Calls(), "turn/interrupt")
 	beforeResume := countFixtureCalls(f.Calls(), "thread/resume")
 	fakeMu.Unlock()
-	postTelegram(t, gw.server.Client(), gw.server.URL, "secret", 4, "/connect "+b.ID, 0)
+	postTelegram(t, gw.server.Client(), gw.server.URL, "secret", 4, "/tgconnect "+b.ID, 0)
 	waitControl(t, func() bool { return tg.hasText("Connected to", "Beta") })
 	time.Sleep(250 * time.Millisecond)
 	fakeMu.Lock()
@@ -179,7 +186,7 @@ func TestControlPlaneWorkerOutboxSurvivesGatewayRestartIntegration(t *testing.T)
 	// the exact server request before the click. The click produces only the
 	// durable stale-button UI response and no App Server reply.
 	connected := tg.countText("Connected to")
-	postTelegram(t, gw.server.Client(), gw.server.URL, "secret", 5, "/connect "+a.ID, 0)
+	postTelegram(t, gw.server.Client(), gw.server.URL, "secret", 5, "/tgconnect "+a.ID, 0)
 	waitControl(t, func() bool { return tg.countText("Connected to") > connected })
 	if err := f.Request("item/commandExecution/requestApproval", 91, map[string]any{"threadId": targetThread, "turnId": active, "command": "go test ./...", "availableDecisions": []string{"accept", "decline"}}); err != nil {
 		t.Fatal(err)

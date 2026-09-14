@@ -10,6 +10,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/iaia/telegramgw/internal/telegramcommands"
 )
 
 type TelegramUser struct {
@@ -51,6 +53,18 @@ type SendMessage struct {
 	Text     string            `json:"text"`
 	Keyboard *TelegramKeyboard `json:"reply_markup,omitempty"`
 }
+type ChatAction struct {
+	ChatID  int64  `json:"chat_id"`
+	TopicID int64  `json:"message_thread_id,omitempty"`
+	Action  string `json:"action"`
+}
+
+type BotCommand = telegramcommands.Command
+
+type MenuButton struct {
+	Type string `json:"type"`
+}
+
 type TelegramAPI interface {
 	Send(context.Context, SendMessage) (int64, error)
 	Edit(context.Context, int64, int64, string, *TelegramKeyboard) error
@@ -125,6 +139,44 @@ func (t *TelegramClient) Edit(ctx context.Context, chatID, messageID int64, text
 }
 func (t *TelegramClient) AnswerCallback(ctx context.Context, id, text string) error {
 	return t.call(ctx, "answerCallbackQuery", map[string]any{"callback_query_id": id, "text": text}, nil)
+}
+
+func (t *TelegramClient) SendChatAction(ctx context.Context, action ChatAction) error {
+	return t.call(ctx, "sendChatAction", action, nil)
+}
+
+func (t *TelegramClient) SetMyCommands(ctx context.Context, commands []BotCommand) error {
+	if commands == nil {
+		commands = []BotCommand{}
+	}
+	return t.call(ctx, "setMyCommands", struct {
+		Commands []BotCommand `json:"commands"`
+	}{Commands: commands}, nil)
+}
+
+func (t *TelegramClient) GetMyCommands(ctx context.Context) ([]BotCommand, error) {
+	var commands []BotCommand
+	err := t.call(ctx, "getMyCommands", struct{}{}, &commands)
+	return commands, err
+}
+
+// SetChatMenuButton changes the default menu when chatID is zero, or the menu
+// for one private chat otherwise.
+func (t *TelegramClient) SetChatMenuButton(ctx context.Context, chatID int64, button MenuButton) error {
+	payload := struct {
+		ChatID     int64      `json:"chat_id,omitempty"`
+		MenuButton MenuButton `json:"menu_button"`
+	}{ChatID: chatID, MenuButton: button}
+	return t.call(ctx, "setChatMenuButton", payload, nil)
+}
+
+func (t *TelegramClient) GetChatMenuButton(ctx context.Context, chatID int64) (MenuButton, error) {
+	var button MenuButton
+	payload := struct {
+		ChatID int64 `json:"chat_id,omitempty"`
+	}{ChatID: chatID}
+	err := t.call(ctx, "getChatMenuButton", payload, &button)
+	return button, err
 }
 
 type WebhookInfo struct {

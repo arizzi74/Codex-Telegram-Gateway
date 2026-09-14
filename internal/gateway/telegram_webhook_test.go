@@ -45,20 +45,41 @@ func TestWebhookRejectsActorBeforeProcessing(t *testing.T) {
 }
 
 func TestParseTelegramCommands(t *testing.T) {
-	action, target, text, ignore := parseTelegramText("/connect@mybot session name", "mybot")
+	action, target, text, ignore := parseTelegramText("/tgconnect@mybot session name", "mybot")
 	if action != "connect" || target != "session name" || text != "" || ignore {
 		t.Fatal(action, target, text, ignore)
 	}
-	_, _, _, ignore = parseTelegramText("/new@otherbot", "mybot")
+	_, _, _, ignore = parseTelegramText("/tgnew@otherbot", "mybot")
 	if !ignore {
 		t.Fatal("foreign bot mention processed")
 	}
-	action, _, text, _ = parseTelegramText("/steer keep the files", "bot")
+	action, _, text, _ = parseTelegramText("/tgsteer keep the files", "bot")
 	if action != "steer" || text != "keep the files" {
 		t.Fatal("steer parse")
 	}
 	action, _, text, _ = parseTelegramText("regular prompt", "bot")
 	if action != "text" || text != "regular prompt" {
 		t.Fatal("ordinary message parse")
+	}
+}
+
+func TestCodexAndGatewayNamespaces(t *testing.T) {
+	for _, tc := range []struct{ input, action, target, text string }{
+		{"/tgstatus", "status", "", ""},
+		{"/status", "codex", "status", ""},
+		{"/model@mybot gpt-5.6-sol high", "codex", "model", "gpt-5.6-sol high"},
+		{"/debug_config", "codex", "debug-config", ""},
+		{"/debug-config", "codex", "debug-config", ""},
+		{"/tgnew", "new", "", ""},
+		{"/new", "codex", "new", ""},
+		{"/connect old gateway name", "unknown_command", "connect", ""},
+		{"/unknown never becomes a model prompt", "unknown_command", "unknown", ""},
+		{"/start", "help", "", ""},
+		{"/help", "codex", "help", ""},
+	} {
+		action, target, text, ignore := parseTelegramText(tc.input, "mybot")
+		if ignore || action != tc.action || target != tc.target || text != tc.text {
+			t.Fatalf("%q => %q %q %q ignore=%v", tc.input, action, target, text, ignore)
+		}
 	}
 }

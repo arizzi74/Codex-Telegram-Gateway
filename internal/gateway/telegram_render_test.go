@@ -109,6 +109,20 @@ func testSender(store *renderStoreFake, redactor *auth.Redactor) *Sender {
 	return NewSender(store, nil, slog.New(slog.NewTextHandler(io.Discard, nil)), SenderOptions{BotID: "bot", OwnerID: 42, Redactor: redactor})
 }
 
+func TestCodexCommandOutputAndForkReplyRouting(t *testing.T) {
+	store := renderFixture()
+	row := eventRow(t, "command_completed", protocol.Result{Text: "Model: sample\nContext: 123 tokens"}, testSessionID.String())
+	text, _, err := testSender(store, nil).render(context.Background(), row)
+	if err != nil || !strings.Contains(text, "Model: sample\nContext: 123 tokens") || strings.Contains(text, "Command completed.") {
+		t.Fatalf("Codex output: %q %v", text, err)
+	}
+	row = eventRow(t, "command_completed", protocol.Result{Session: &store.sessions[1]}, testSessionID.String())
+	session, turn, approval := deliveryRoute(row)
+	if session != testOtherSess.String() || turn != "" || approval != "" {
+		t.Fatalf("fork response routed to source: %s %s %s", session, turn, approval)
+	}
+}
+
 func uiRow(t *testing.T, response registry.AcceptResult) registry.Delivery {
 	t.Helper()
 	payload, err := json.Marshal(response)
@@ -224,7 +238,7 @@ func TestRenderStatusSelectedDisconnectAndHelp(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, command := range []string{"/start", "/help", "/instances", "/sessions", "/connect", "/status", "/disconnect", "/new", "/steer", "/interrupt"} {
+	for _, command := range []string{"/tgstart", "/tghelp", "/tginstances", "/tgsessions", "/tgconnect", "/tgstatus", "/tgdisconnect", "/tgnew", "/tgsteer", "/tginterrupt"} {
 		if !strings.Contains(help, command) {
 			t.Fatalf("help omits %s", command)
 		}
@@ -304,7 +318,7 @@ func TestRenderFinalFailuresDegradedAndNewSession(t *testing.T) {
 	}
 	createdSession := store.sessions[0]
 	created, _, err := sender.render(context.Background(), eventRow(t, "command_completed", protocol.Result{Session: &createdSession}, ""))
-	if err != nil || !strings.Contains(created, "New session ready · MacBook / Primary / auth-fix") || !strings.Contains(created, "now target this session") {
+	if err != nil || !strings.Contains(created, "New session ready · MacBook / Primary / auth-fix") || !strings.Contains(created, "Reply to this message to use this session") {
 		t.Fatal(created, err)
 	}
 }

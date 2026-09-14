@@ -2,6 +2,7 @@ package registry
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
@@ -114,24 +115,83 @@ func setSessionState(ctx context.Context, tx pgx.Tx, sessionID uuid.UUID, state,
 }
 
 // bindCommandSession transfers the immutable command's Telegram context to a
-// newly returned session. It is only used for new_session, whose command target
-// intentionally has no session ID.
+// newly returned session only while the selection revision captured at accept
+// time is still current. This prevents a late new/fork result from undoing a
+// subsequent selection or disconnect.
 func bindCommandSession(ctx context.Context, tx pgx.Tx, commandID, sessionID uuid.UUID) error {
-	ct, err := tx.Exec(ctx, `INSERT INTO telegram_bindings
-        (bot_id, user_id, chat_id, message_thread_id, session_id, selected_at)
-        SELECT telegram_bot_id, telegram_user_id, telegram_chat_id,
-               COALESCE(telegram_message_thread_id, 0), $2, now()
-        FROM commands
-        WHERE command_id = $1 AND session_id IS NULL
-          AND telegram_bot_id IS NOT NULL AND telegram_user_id IS NOT NULL AND telegram_chat_id IS NOT NULL
-        ON CONFLICT (bot_id, user_id, chat_id, message_thread_id) DO UPDATE
-        SET session_id = EXCLUDED.session_id, selected_at = EXCLUDED.selected_at`, commandID, sessionID)
+	var (
+		botID                   *string
+		userID, chatID, topicID *int64
+		sourceSession           *uuid.UUID
+		operation               string
+		payload                 []byte
+	)
+	err := tx.QueryRow(ctx, `SELECT telegram_bot_id, telegram_user_id,
+        telegram_chat_id, telegram_message_thread_id, session_id, operation, payload
+        FROM commands WHERE command_id=$1`, commandID).
+		Scan(&botID, &userID, &chatID, &topicID, &sourceSession, &operation, &payload)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ErrEventTarget
+	}
 	if err != nil {
+		return fmt.Errorf("registry: read automatic Telegram binding command: %w", err)
+	}
+	// Local commands have no Telegram selection to update.
+	if botID == nil || userID == nil || chatID == nil {
+		return nil
+	}
+	var command protocol.Command
+	if err := json.Unmarshal(payload, &command); err != nil {
+		return fmt.Errorf("registry: decode automatic Telegram binding command: %w", err)
+	}
+	if command.Arguments.SelectionRevision == nil {
+		// Commands accepted before the revision migration conservatively do not
+		// change a selection when their result arrives after an upgrade.
+		return nil
+	}
+	isFork := operation == string(protocol.CodexCommand) && command.Arguments.Codex != nil && command.Arguments.Codex.Name == "fork"
+	if operation != string(protocol.NewSession) && !isFork {
+		return ErrEventTarget
+	}
+	topic := int64(0)
+	if topicID != nil {
+		topic = *topicID
+	}
+	in := IncomingUpdate{BotID: *botID, UserID: *userID, ChatID: *chatID, TopicID: topic}
+	current, err := selectionRevision(ctx, tx, in)
+	if err != nil {
+		return err
+	}
+	if current != *command.Arguments.SelectionRevision {
+		return nil
+	}
+	if isFork {
+		if sourceSession == nil {
+			return ErrEventTarget
+		}
+		var matches bool
+		// Match the same exact-topic-then-default selection priority used when
+		// the fork command was accepted.
+		if err := tx.QueryRow(ctx, `SELECT COALESCE((SELECT session_id=$5 FROM telegram_bindings
+            WHERE bot_id=$1 AND user_id=$2 AND chat_id=$3
+              AND (message_thread_id=$4 OR ($4 > 0 AND message_thread_id=0))
+            ORDER BY (message_thread_id=$4) DESC LIMIT 1), FALSE)`,
+			*botID, *userID, *chatID, topic, *sourceSession).Scan(&matches); err != nil {
+			return fmt.Errorf("registry: verify fork source selection: %w", err)
+		}
+		if !matches {
+			return nil
+		}
+	}
+	if _, err := tx.Exec(ctx, `INSERT INTO telegram_bindings
+        (bot_id, user_id, chat_id, message_thread_id, session_id, selected_at)
+        VALUES ($1,$2,$3,$4,$5,now())
+        ON CONFLICT (bot_id, user_id, chat_id, message_thread_id) DO UPDATE
+		SET session_id = EXCLUDED.session_id, selected_at = EXCLUDED.selected_at`,
+		*botID, *userID, *chatID, topic, sessionID); err != nil {
 		return fmt.Errorf("registry: bind returned session: %w", err)
 	}
-	// A local/non-Telegram new-session command legitimately has no binding.
-	_ = ct
-	return nil
+	return bumpSelectionRevision(ctx, tx, in)
 }
 
 // SessionSnapshot returns the normalized session registry state for worker

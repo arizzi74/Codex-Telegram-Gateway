@@ -173,6 +173,9 @@ func deliveryRoute(row registry.Delivery) (sessionID, turnID, approvalID string)
 	var result protocol.Result
 	if json.Unmarshal(event.Data, &result) == nil {
 		turnID = result.TurnID
+		if result.Session != nil {
+			sessionID = result.Session.ID
+		}
 	}
 	return
 }

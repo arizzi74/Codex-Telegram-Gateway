@@ -13,6 +13,7 @@ import (
 	"github.com/iaia/telegramgw/internal/auth"
 	"github.com/iaia/telegramgw/internal/config"
 	"github.com/iaia/telegramgw/internal/registry"
+	"github.com/iaia/telegramgw/internal/telegramcommands"
 )
 
 type TelegramRegistry interface {
@@ -142,20 +143,25 @@ func parseTelegramText(text, botName string) (action, target, prompt string, ign
 	if hasMention && !strings.EqualFold(strings.TrimPrefix(botName, "@"), mention) {
 		return "", "", "", true
 	}
-	switch strings.ToLower(name) {
-	case "start", "help":
+	name = strings.ToLower(name)
+	switch name {
+	case "start", "tgstart", "tghelp":
 		return "help", "", "", false
-	case "instances":
+	case "tginstances":
 		return "instances", "", "", false
-	case "sessions", "connect", "status", "new":
-		return strings.ToLower(name), tail, "", false
-	case "disconnect":
+	case "tgsessions", "tgconnect", "tgstatus", "tgnew":
+		return strings.TrimPrefix(name, "tg"), tail, "", false
+	case "tgdisconnect":
 		return "disconnect", "", "", false
-	case "steer":
+	case "tgsteer":
 		return "steer", "", tail, false
-	case "interrupt":
+	case "tginterrupt":
 		return "interrupt", "", "", false
-	default:
-		return "help", "", "", false
+	case "tginput":
+		return "input_command", "", tail, false
 	}
+	if canonical, ok := telegramcommands.Canonical(name); ok {
+		return "codex", canonical, tail, false
+	}
+	return "unknown_command", name, "", false
 }

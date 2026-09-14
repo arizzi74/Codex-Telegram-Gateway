@@ -291,10 +291,16 @@ func TestIngestEventHistoricalReplayRuntimeFailureAndNewSessionBindingIntegratio
 		t.Fatal(err)
 	}
 	commandID, returnedSession := uuid.New(), uuid.New()
+	revision := uint64(0)
+	createdAt := time.Now().UTC()
+	commandPayload, _ := json.Marshal(protocol.Command{
+		ID: commandID.String(), WorkerID: env.worker.String(), RuntimeID: env.runtime.String(), RuntimeGeneration: 1,
+		Operation: protocol.NewSession, Arguments: protocol.Arguments{SelectionRevision: &revision}, CreatedAt: createdAt, ExpiresAt: createdAt.Add(time.Hour),
+	})
 	if _, err := env.store.pool.Exec(ctx, `INSERT INTO commands
         (command_id, source, worker_id, runtime_id, runtime_generation, operation, payload, status,
          telegram_bot_id, telegram_user_id, telegram_chat_id, telegram_message_thread_id)
-        VALUES ($1,'telegram',$2,$3,1,'new_session','{}'::jsonb,'pending','bot',77,88,0)`, commandID, env.worker, env.runtime); err != nil {
+		VALUES ($1,'telegram',$2,$3,1,'new_session',$4,'pending','bot',77,88,0)`, commandID, env.worker, env.runtime, commandPayload); err != nil {
 		t.Fatal(err)
 	}
 	returned := protocol.Session{ID: returnedSession.String(), WorkerID: env.worker.String(), RuntimeID: env.runtime.String(), ThreadID: "thread-new", State: "running", Loaded: true, UpdatedAt: time.Now().UTC()}
