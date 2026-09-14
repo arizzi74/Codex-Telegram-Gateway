@@ -130,3 +130,26 @@ func TestSplitTextPreservesUnicode(t *testing.T) {
 		}
 	}
 }
+
+func TestTelegramClientDeletesOnlyTheRequestedMessage(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/botfake-token/deleteMessage" {
+			t.Errorf("unexpected API method: %s", r.URL.Path)
+		}
+		var body map[string]int64
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Error(err)
+		}
+		if len(body) != 2 || body["chat_id"] != -123 || body["message_id"] != 456 {
+			t.Errorf("wrong deletion target: %v", body)
+		}
+		w.Write([]byte(`{"ok":true,"result":true}`))
+	}))
+	defer server.Close()
+	client := NewTelegramClient("fake-token")
+	client.endpoint = server.URL
+	client.http = server.Client()
+	if err := client.DeleteMessage(context.Background(), -123, 456); err != nil {
+		t.Fatal(err)
+	}
+}

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -50,6 +51,19 @@ func NewSender(store DeliveryStore, api TelegramAPI, logger *slog.Logger, option
 	return &Sender{store: store, api: api, log: logger, options: option}
 }
 func (s *Sender) Run(ctx context.Context) error {
+	// Deletion retries have their own loop so a slow cleanup request cannot
+	// delay delivery of a final answer or an approval request.
+	var cleanup sync.WaitGroup
+	if store, ok := s.store.(TelegramProgressStore); ok {
+		if api, ok := s.api.(TelegramDeleteAPI); ok {
+			cleanup.Add(1)
+			go func() {
+				defer cleanup.Done()
+				s.runDeletions(ctx, store, api)
+			}()
+		}
+	}
+	defer cleanup.Wait()
 	ticker := time.NewTicker(200 * time.Millisecond)
 	defer ticker.Stop()
 	for {
@@ -71,14 +85,7 @@ func (s *Sender) flush(ctx context.Context) error {
 	}
 	for _, row := range rows {
 		if err := s.sendDelivery(ctx, row); err != nil {
-			delay := time.Second << min(max(row.Attempt-1, 0), 6)
-			if delay > time.Minute {
-				delay = time.Minute
-			}
-			var telegram *TelegramError
-			if errors.As(err, &telegram) && telegram.RetryAfter > 0 {
-				delay = telegram.RetryAfter
-			}
+			delay := telegramRetryDelay(row.Attempt, err)
 			if retryErr := s.store.RetryDelivery(ctx, row.ID, delay, "Telegram delivery deferred"); retryErr != nil {
 				return retryErr
 			}
@@ -89,6 +96,9 @@ func (s *Sender) flush(ctx context.Context) error {
 }
 
 func (s *Sender) sendDelivery(ctx context.Context, row registry.Delivery) error {
+	if skip, err := s.skipProgress(ctx, row); err != nil || skip {
+		return err
+	}
 	checkpoints, err := s.store.DeliveryChunks(ctx, row.ID)
 	if err != nil {
 		return err
@@ -106,7 +116,7 @@ func (s *Sender) sendDelivery(ctx context.Context, row registry.Delivery) error 
 		parts := SplitText(text, 4000)
 		messages := make([]json.RawMessage, 0, len(parts))
 		for index, part := range parts {
-			message := SendMessage{ChatID: row.ChatID, TopicID: row.TopicID, Text: part}
+			message := SendMessage{ChatID: row.ChatID, TopicID: row.TopicID, Text: part, DisableNotification: row.Kind == "agent_progress_message"}
 			// Put controls after their complete explanation.
 			if index == len(parts)-1 {
 				message.Keyboard = keyboard
@@ -126,6 +136,9 @@ func (s *Sender) sendDelivery(ctx context.Context, row registry.Delivery) error 
 	for _, chunk := range checkpoints {
 		if chunk.Sent {
 			continue
+		}
+		if skip, err := s.skipProgress(ctx, row); err != nil || skip {
+			return err
 		}
 		if err := s.store.ExtendDelivery(ctx, row.ID); err != nil {
 			return err
@@ -148,6 +161,15 @@ func (s *Sender) sendDelivery(ctx context.Context, row registry.Delivery) error 
 		}
 	}
 	return nil
+}
+
+func telegramRetryDelay(attempt int, err error) time.Duration {
+	delay := min(time.Second<<min(max(attempt-1, 0), 6), time.Minute)
+	var telegram *TelegramError
+	if errors.As(err, &telegram) && telegram.RetryAfter > 0 {
+		delay = telegram.RetryAfter
+	}
+	return delay
 }
 
 func deliveryRoute(row registry.Delivery) (sessionID, turnID, approvalID string) {

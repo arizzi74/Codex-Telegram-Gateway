@@ -48,10 +48,11 @@ type TelegramKeyboard struct {
 	Rows [][]TelegramButton `json:"inline_keyboard"`
 }
 type SendMessage struct {
-	ChatID   int64             `json:"chat_id"`
-	TopicID  int64             `json:"message_thread_id,omitempty"`
-	Text     string            `json:"text"`
-	Keyboard *TelegramKeyboard `json:"reply_markup,omitempty"`
+	ChatID              int64             `json:"chat_id"`
+	TopicID             int64             `json:"message_thread_id,omitempty"`
+	Text                string            `json:"text"`
+	Keyboard            *TelegramKeyboard `json:"reply_markup,omitempty"`
+	DisableNotification bool              `json:"disable_notification,omitempty"`
 }
 type ChatAction struct {
 	ChatID  int64  `json:"chat_id"`
@@ -137,6 +138,14 @@ func (t *TelegramClient) Edit(ctx context.Context, chatID, messageID int64, text
 	}
 	return t.call(ctx, "editMessageText", payload, nil)
 }
+
+func (t *TelegramClient) DeleteMessage(ctx context.Context, chatID, messageID int64) error {
+	return t.call(ctx, "deleteMessage", struct {
+		ChatID    int64 `json:"chat_id"`
+		MessageID int64 `json:"message_id"`
+	}{ChatID: chatID, MessageID: messageID}, nil)
+}
+
 func (t *TelegramClient) AnswerCallback(ctx context.Context, id, text string) error {
 	return t.call(ctx, "answerCallbackQuery", map[string]any{"callback_query_id": id, "text": text}, nil)
 }
