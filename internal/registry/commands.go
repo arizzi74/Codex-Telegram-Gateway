@@ -750,6 +750,15 @@ func bindingMatches(ctx context.Context, tx pgx.Tx, in IncomingUpdate, sessionID
 }
 
 func queueUIResponse(ctx context.Context, tx pgx.Tx, in IncomingUpdate, result AcceptResult) error {
+	if result.View == "queued" && result.CommandID != "" {
+		var prompt bool
+		if err := tx.QueryRow(ctx, `SELECT operation='start_turn' FROM commands WHERE command_id=$1`, result.CommandID).Scan(&prompt); err != nil {
+			return fmt.Errorf("registry: inspect queued response: %w", err)
+		}
+		if prompt {
+			return nil
+		}
+	}
 	payload, err := json.Marshal(result)
 	if err != nil {
 		return err

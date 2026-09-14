@@ -19,4 +19,5 @@ var Files = []string{
 	"004_delivery_state.sql",
 	"005_input_answer_routing.sql",
 	"006_telegram_selection_revisions.sql",
+	"007_telegram_ephemeral_progress.sql",
 }

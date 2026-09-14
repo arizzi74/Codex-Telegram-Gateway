@@ -74,6 +74,9 @@ func (s *Store) MarkDeliverySent(ctx context.Context, id string, messageID int64
 	if err = tx.QueryRow(ctx, `UPDATE telegram_deliveries SET status='sent', sent_at=now(), telegram_message_id=$2, last_error=NULL WHERE delivery_id=$1 AND status='sending' RETURNING bot_id,chat_id`, deliveryID, messageID).Scan(&bot, &chat); err != nil {
 		return err
 	}
+	if err := checkpointTelegramProgress(ctx, tx, deliveryID, -1, messageID); err != nil {
+		return err
+	}
 	if sessionID != "" {
 		sid, err := uuid.Parse(sessionID)
 		if err != nil {
@@ -163,6 +166,9 @@ func (s *Store) MarkDeliveryChunkSent(ctx context.Context, id string, index int,
 		return err
 	}
 	if _, err = tx.Exec(ctx, `UPDATE telegram_delivery_chunks SET status='sent',telegram_message_id=$3,sent_at=now() WHERE delivery_id=$1 AND chunk_index=$2 AND status='pending'`, deliveryID, index, messageID); err != nil {
+		return err
+	}
+	if err := checkpointTelegramProgress(ctx, tx, deliveryID, index, messageID); err != nil {
 		return err
 	}
 	questionID := ""

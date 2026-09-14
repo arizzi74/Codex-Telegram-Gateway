@@ -340,6 +340,9 @@ func (s *Store) applyEvent(ctx context.Context, tx pgx.Tx, workerID uuid.UUID, e
 	if err := json.Unmarshal(event.Data, &result); err != nil {
 		return false, nil, fmt.Errorf("registry: decode event result: %w", err)
 	}
+	if event.Kind == "agent_progress_message" && (target.runtimeID == nil || target.sessionID == nil || strings.TrimSpace(result.TurnID) == "" || strings.TrimSpace(result.Text) == "") {
+		return false, nil, ErrEventTarget
+	}
 	originalTarget := target
 	if result.CommandID != "" {
 		id, err := uuid.Parse(result.CommandID)
@@ -432,7 +435,7 @@ func sessionTransition(kind string, result protocol.Result) (state, activeTurn, 
 
 func notificationRequired(kind string) bool {
 	switch kind {
-	case "turn_completed", "approval_requested", "user_input_requested", "turn_failed", "runtime_failed", "runtime_degraded", "command_failed", "command_result_unknown":
+	case "agent_progress_message", "turn_completed", "turn_interrupted", "approval_requested", "user_input_requested", "turn_failed", "runtime_failed", "runtime_degraded", "command_failed", "command_result_unknown":
 		return true
 	default:
 		return false
@@ -445,7 +448,7 @@ func updateCommandOutcome(ctx context.Context, tx pgx.Tx, commandID, workerID uu
 	}
 	status := ""
 	switch event.Kind {
-	case "turn_started", "turn_completed", "command_completed":
+	case "turn_started", "turn_completed", "turn_interrupted", "command_completed":
 		status = "completed"
 	case "turn_failed", "command_failed":
 		status = "failed"
@@ -551,7 +554,15 @@ func enqueueEventDeliveries(ctx context.Context, tx pgx.Tx, eventID uuid.UUID, e
         UNION
         SELECT telegram_bot_id, telegram_chat_id, COALESCE(telegram_message_thread_id, 0)
         FROM commands WHERE command_id = $4 AND telegram_bot_id IS NOT NULL AND telegram_chat_id IS NOT NULL
-    ) SELECT bot_id, chat_id, message_thread_id FROM targets`, sessionID, runtimeID, event.Kind, commandID)
+        UNION
+        SELECT delivery.bot_id, delivery.chat_id, delivery.message_thread_id
+        FROM telegram_deliveries delivery JOIN events progress ON progress.event_id=delivery.event_id
+        WHERE delivery.kind='agent_progress_message' AND progress.runtime_id=$2
+          AND progress.runtime_generation=$5
+          AND (($3 IN ('turn_completed','turn_failed','turn_interrupted') AND progress.session_id=$1
+                AND progress.payload->>'turn_id'=$6)
+               OR $3='runtime_failed')
+    ) SELECT bot_id, chat_id, message_thread_id FROM targets`, sessionID, runtimeID, event.Kind, commandID, int64(event.RuntimeGeneration), eventTurnID(event))
 	if err != nil {
 		return fmt.Errorf("registry: find notification targets: %w", err)
 	}
