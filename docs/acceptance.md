@@ -16,7 +16,7 @@ using a shared test schema.
 | --- | --- | --- | --- |
 | AT-01 Worker registration | Verified | `internal/gateway:TestAT01RegistrationAT02CredentialRejection` connects over TLS WSS with an enrolled token and checks online state plus OS, architecture, version, and hostname in PostgreSQL. The current deployed worker is also enrolled and connected. | None; repeat the live enrollment check after a topology change. |
 | AT-02 Invalid Worker credential | Verified | The same test rejects an invalid bearer token before metadata is recorded; `TestWorkerHelloCannotClaimAnotherIdentity` also rejects a valid token paired with another worker ID. | None for automated acceptance. |
-| AT-03 Discover sessions | Verified | `internal/worker:TestControlPlaneWorkerOutboxSurvivesGatewayRestartIntegration` starts the fake App Server with three threads, waits for all three in `registry.SessionSnapshot`, posts actual `/sessions <runtime-id>` through the webhook, and verifies the Telegram UI contains Alpha, Beta, and Gamma. `TestRuntimeDiscoverySubscribesOnlyLoadedWorkspaceThreadsOnce` covers loaded-thread reconciliation. | None. |
+| AT-03 Discover sessions | Verified | `internal/worker:TestControlPlaneWorkerOutboxSurvivesGatewayRestartIntegration` starts the fake App Server with three threads, waits for all three in `registry.SessionSnapshot`, posts actual `/tgsessions <runtime-id>` through the webhook, and verifies the Telegram UI contains Alpha, Beta, and Gamma. `TestRuntimeDiscoverySubscribesOnlyLoadedWorkspaceThreadsOnce` covers loaded-thread reconciliation. | None. |
 | AT-04 Select session without affecting execution | Verified | The control-plane integration test starts A, selects B through Telegram, then verifies A retains its active turn and no additional `turn/start`, `turn/interrupt`, or `thread/resume` RPC occurs. | None. |
 | AT-05 Deterministic queued routing | Verified | `internal/registry:TestAcceptTelegramRoutingPriorityAndFrozenCommandIntegration` accepts a command, changes selection, then verifies the persisted command retains its original session and thread. The `commands_preserve_routing` trigger enforces this in the database. | None for the persistence invariant. |
 | AT-06 Reply routing | Verified | The same routing integration test records a bot-message route for A, changes selection, and verifies a reply goes to A. Multi-question reply addressing is also covered by `TestAcceptTelegramMultiQuestionReplyRoutingIntegration`. | None for the routing invariant. |
@@ -81,3 +81,41 @@ using a shared test schema.
 - [x] Local terminal smoke: fresh directory reaches Ready on the owned shared
   server and exits cleanly; resuming a thread held by another app reports its
   active-writer conflict. No model turn was submitted during these smoke checks.
+
+
+## Telegram command update (2026-09-14)
+
+Gateway commands now use the `/tg` namespace. Unprefixed commands are typed
+Codex client actions, with terminal-only commands documented in
+[Telegram commands](telegram-commands.md). The bot menu contains both groups.
+
+Verification includes:
+
+- The full control-plane integration sends `/status` during an active turn and
+  `/tgstatus` through the actual webhook, worker transport and Telegram sender.
+- Registry tests prove slash targets stay frozen, results reach only their
+  requesting chat, fork results preserve source ownership, and delayed new/fork
+  results cannot overwrite a later selection or disconnect.
+- Typing tests cover the Bot API payload, four-second refresh, reconstruction
+  from durable state, active-turn completion and waiting for user input.
+- Worker tests preserve active-turn correlation through review/init and through
+  read-only commands during a turn; invalid syntax is a definite failure.
+- Live Codex 0.154.0 checks verified read-only model/configuration/rate limits,
+  skills/hooks/plugins, and isolated thread model/effort, plan, sandbox,
+  background-terminal, MCP and committed installed-app operations.
+- A catalog exceeding 8 MiB no longer tears down the local adapter; direct
+  JSONL and private WebSocket framing share a bounded 32 MiB ceiling. Gateway
+  WSS limits are unchanged. Plugin output is filtered and bounded.
+- An isolated two-server smoke proved a saved cold thread can be forked while
+  the source is writer-locked in another server. No live model turn was sent.
+
+The reported production rejection was a separate Codex process holding the
+selected thread's writer lock. It now yields actionable `session_busy`
+instructions, including `/fork` and `/tgnew`, instead of a generic protocol error.
+
+Deployment verification: version 0.2.0 gateway and worker services are active,
+HTTPS health/readiness return 200, the unauthenticated admin session API returns
+401, the webhook reports zero pending updates and no error, and Telegram
+`getMyCommands` confirms all 69 registered commands. Installed binaries match
+the verified static stripped release outputs. The local CI job passes race
+checks with PostgreSQL, vet/format, all ten cross-builds and checksums.

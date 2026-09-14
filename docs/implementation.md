@@ -47,3 +47,12 @@ with a synthetic authenticator; production contains no fabricated passkey.
 CLI sharing is the user's explicit extension to direct app-server stdio:
 [ADR 0008](adr/0008-shared-local-cli.md) records the private Unix socket and
 stdio byte-proxy/WebSocket framing bridge. Codex itself has no public listener.
+
+
+## 2026-09-14 command update
+
+Added `/tg` gateway names, typed Codex slash commands, a published bot menu,
+transient typing indicators and precise writer-lock diagnostics. `/status`
+includes selected-session recorded context usage. New/fork completion compares
+selection revisions before automatic selection, preserving later user choices.
+See [Telegram commands](telegram-commands.md) for syntax and terminal-only limits.

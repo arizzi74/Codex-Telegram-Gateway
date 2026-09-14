@@ -17,13 +17,25 @@ processes and support local terminal attachment.
 
 The bot authorizes only the numeric `WLID` in the supplied private `.botsecrets`.
 Changing a Telegram username does not grant access. To use the bot, send
-`/start`, then `/instances` or `/sessions` and select a session. Use `/new` to
-create a session on a worker runtime. `/connect` changes the selected session;
-ordinary messages submit turns to the selection frozen when each message is
-accepted. Replies to earlier bot messages retain that session's routing.
+`/tgstart`, then `/tginstances` or `/tgsessions` and select a session.
+All gateway commands begin with `/tg`: `/tgconnect`, `/tgstatus`, `/tgnew`,
+`/tgdisconnect`, `/tgsteer`, `/tginterrupt`, and `/tginput`. Telegram's initial
+`/start` button remains an alias for `/tgstart`.
 
-Other commands: `/status`, `/disconnect`, `/steer TEXT`, and `/interrupt`.
+Unprefixed commands control Codex: `/status` shows the selected session's model,
+reasoning, recorded context/token usage and limits; `/model`, `/compact`,
+`/review`, `/fork`, `/rename`, and the other commands appear in the bot menu.
+Use `/help` for Codex commands and `/tghelp` for gateway controls. Terminal-only
+commands explain how to use the attached CLI. The bot shows “typing…” while
+Codex is preparing a response and stops when a reply or an input request arrives.
+See [Telegram commands](docs/telegram-commands.md) for syntax and supported actions.
+
+Ordinary messages submit turns to the selection frozen when each message is
+accepted. Replies to earlier bot messages retain that session's routing.
 Approval and input buttons refer to the exact pending request and expire.
+If a saved session is open in another independent Codex process, close it there
+before sending a turn, use `/fork` to branch its saved conversation, or `/tgnew`
+to start fresh. Merely selecting a session does not take its writer lock.
 
 To enroll the first admin passkey, run this locally:
 
@@ -70,8 +82,8 @@ PostgreSQL integration tests create and remove isolated schemas.
 go test ./...
 TEST_DATABASE_URL='postgres:///telegramgw_test?host=/var/run/postgresql&user=TEST_USER' go test -race ./... -timeout=90s
 make lint
-make build VERSION=0.1.0
-make release VERSION=0.1.0
+make build VERSION=0.2.0
+make release VERSION=0.2.0
 ```
 
 `bin/` contains local executables. `dist/` contains stripped `CGO_ENABLED=0`

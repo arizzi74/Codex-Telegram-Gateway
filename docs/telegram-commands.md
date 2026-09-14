@@ -1,0 +1,98 @@
+# Telegram commands
+
+Gateway commands begin with `/tg`. Unprefixed commands belong to Codex.
+The initial Telegram `/start` button is an alias for `/tgstart`.
+All commands are registered in the bot menu. Telegram requires underscores in
+menu names, so `/debug_config` is the menu spelling of `/debug-config`; both work.
+
+## Gateway controls
+
+| Command | Action |
+| --- | --- |
+| `/tgstart`, `/tghelp` | Show gateway help. |
+| `/tginstances` | List workers and their runtimes. |
+| `/tgsessions [runtime]` | List sessions and selection buttons. |
+| `/tgconnect NAME_OR_ID` | Select a session without starting a turn. |
+| `/tgstatus [session]` | Show gateway connectivity, queued commands and approvals. |
+| `/tgdisconnect` | Clear the selection. |
+| `/tgnew [runtime]` | Create a session in the runtime's configured workspace. |
+| `/tgsteer TEXT` | Guide the exact active turn. |
+| `/tginterrupt` | Interrupt the exact active turn. |
+| `/tginput APPROVAL_ID QUESTION_ID ANSWER` | Answer an input request; replying to its message is easier. |
+
+## Codex controls
+
+These run against the selected session and keep its immutable worker, runtime,
+generation and thread target. Unknown slash commands produce help instead of
+becoming model prompts.
+
+| Command | Telegram behavior |
+| --- | --- |
+| `/status` | Session model, reasoning, workspace, recorded context and token counts, configuration defaults and account limits. Historical counters and policies are labeled as recorded values. |
+| `/usage` | Account usage and rate limits reported by Codex. |
+| `/model [MODEL [EFFORT]]` | List available models or update the session model. |
+| `/reasoning [EFFORT]` | Inspect or change reasoning effort. |
+| `/permissions [read-only\|workspace-write]` | Inspect defaults or change session sandbox settings. |
+| `/approvals [POLICY]` | Inspect or change session approval policy. |
+| `/fast [status\|on\|off]` | Inspect the configured tier or change the session tier when supported. |
+| `/plan on\|off` | Enable or disable planning mode for subsequent turns. |
+| `/personality [friendly\|pragmatic\|none]` | List styles or update the session's response style. |
+| `/compact` | Request context compaction. |
+| `/review [INSTRUCTIONS]` | Start a code-review turn. |
+| `/init` | Ask Codex to prepare project instructions using its initialization prompt. |
+| `/rename NAME` | Rename the session. |
+| `/fork` | Branch the saved conversation into a new session. |
+| `/new`, `/clear` | Create a new session in the selected session's workspace. |
+| `/resume [NAME_OR_ID]`, `/agent`, `/subagents` | Choose a saved session; execution resumes when its next turn is submitted. |
+| `/goal [OBJECTIVE\|pause\|resume\|clear\|complete\|blocked]` | Inspect or update the persistent goal. |
+| `/diff` | Show tracked changes and an untracked-file summary in the allowed workspace. |
+| `/mcp [verbose]` | List MCP server status and tool counts. |
+| `/apps`, `/skills`, `/plugins [SEARCH]`, `/hooks` | Inspect the corresponding Codex catalog. |
+| `/memories [MODE]` | Show memory options or set the thread's memory mode. |
+| `/ps` | List this session's background terminals. |
+| `/stop`, `/clean` | Stop its background terminals. |
+| `/copy` | Return the last assistant response as text. |
+| `/archive` | Archive the session. |
+| `/debug_config` | Show selected configuration diagnostics without secrets. |
+| `/quit`, `/exit` | Leave the Telegram selection; the supervised runtime stays available. |
+| `/help` | List Codex commands and guidance. |
+
+Commands that require a terminal picker, desktop integration, local credentials,
+or an interactive confirmation show instructions for the attached CLI. This
+includes `/keymap`, `/vim`, `/raw`, `/statusline`, `/title`, `/theme`, `/pets`,
+`/app`, `/ide`, `/import`, `/logout`, `/feedback`, `/experimental`, `/side`,
+`/btw`, `/mention`, `/approve`, `/delete`, `/rollout`, and Windows sandbox setup.
+They remain discoverable in the menu. Telegram does not emulate a terminal UI.
+
+The implementation uses typed app-server operations; Codex slash commands are
+client actions, not prompt text. See the official
+[Codex command reference](https://learn.chatgpt.com/docs/developer-commands?surface=cli)
+and [app-server protocol](https://learn.chatgpt.com/docs/app-server).
+
+## Existing session held by another Codex process
+
+Selecting a saved chat does not transfer ownership from another Codex app.
+If its writer lock is held elsewhere, the next turn reports `session_busy`
+with recovery instructions. Close that other client before retrying, use
+`/fork` to branch the saved conversation, or `/tgnew` to begin fresh.
+The gateway never silently redirects a failed command to a different chat.
+
+## Menu and typing indicator
+
+Publish or inspect the menu locally:
+
+```sh
+sudo /usr/local/sbin/codex-gateway-admin menu set
+sudo /usr/local/sbin/codex-gateway-admin menu status
+```
+
+Typing is transient and refreshed every four seconds while accepted work waits
+for Codex. It is reconstructed from durable command/turn state after a gateway
+restart. It stops on completion, failure, expiry, disconnection, or a pending
+approval/input request. Telegram can retain the last indicator briefly after
+refreshing stops. API failures do not fail the underlying command.
+
+Replies retain their originating session even if selection changes. A delayed
+new/fork completion cannot replace a later selection or undo a disconnect.
+Command output is delivered to the requesting chat; session lifecycle events
+retain the gateway's normal subscriptions.
