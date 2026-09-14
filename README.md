@@ -5,21 +5,51 @@ Codex sessions through an allowlisted Telegram bot. The gateway includes a
 passkey-authenticated admin console. Workers supervise private Codex app-server
 processes and support local terminal attachment.
 
-## Installed on this host
+## Components
 
-- Admin console: **https://gateway.example.com/admin/**
-- Gateway service: `sudo systemctl status codex-gateway`
-- Worker service: `systemctl --user status codex-worker`
-- Worker diagnostics: `codex-worker status` and `codex-worker doctor`
-- Gateway configuration: `/etc/codex-gateway/gateway.json`
-- Worker configuration: `~/.config/codex-worker/config.json`
-- Allowed workspace: `/home/USERNAME/projects/telegramgw`
+- **Gateway:** receives Telegram updates, manages worker connections, and serves
+  the passkey-authenticated admin console.
+- **Registry:** stores routing, commands, events, approvals, and Telegram
+  delivery state in PostgreSQL.
+- **Worker:** runs on a development machine, supervises Codex app servers, and
+  executes commands within configured workspace roots.
+- **Local helper:** opens a terminal interface against a private app-server
+  socket or starts an independent local runtime.
 
-The worker uses the local account's sudo policy for authorized administration.
-Its service permits privilege elevation and writes to system configuration;
-the public gateway retains its separate service restrictions.
+## Configuration and startup
 
-The bot authorizes only the numeric `WLID` in the supplied private `.botsecrets`.
+Use the [example configuration](examples/) as a starting point. Set the gateway's
+public HTTPS URL, database environment variable, and Telegram webhook secret
+environment variable for your deployment. Configure each worker with its gateway
+WebSocket URL, enrollment credential, state-file location, allowed workspaces,
+and runtime profiles.
+
+Create a private `.botsecrets` file containing `BOTNAME`, `BOTTOKEN`, `WLNAME`,
+and `WLID`, then reference its location in the gateway configuration. Keep real
+credentials and deployment configuration outside Git.
+
+Run the gateway and worker with their respective configuration files:
+
+```sh
+codex-gateway --config /path/to/gateway.json serve
+codex-worker --config /path/to/worker.json run
+```
+
+The gateway process needs the database and webhook-secret environment variables
+named in its configuration. The worker needs a private enrollment-token file
+and access to the Codex executable. Use `codex-worker status` and
+`codex-worker doctor` to inspect the worker and its runtime compatibility.
+When using a custom configuration file, pass the same `--config` option to
+diagnostics and terminal attachment commands.
+
+[Service and proxy templates](deploy/) are provided for Linux systemd, macOS
+launchd, and nginx. Customize their paths, service accounts, permissions, and
+TLS settings before installing them. Choose worker permissions to match the
+operations you authorize Codex to perform.
+
+## Telegram commands
+
+The bot authorizes only the numeric `WLID` in its private `.botsecrets` file.
 Changing a Telegram username does not grant access. To use the bot, send
 `/tgstart`, then `/tginstances` or `/tgsessions` and select a session.
 All gateway commands begin with `/tg`: `/tgconnect`, `/tgstatus`, `/tgnew`,
@@ -45,13 +75,17 @@ If a saved session is open in another independent Codex process, close it there
 before sending a turn, use `/fork` to branch its saved conversation, or `/tgnew`
 to start fresh. Merely selecting a session does not take its writer lock.
 
-To enroll the first admin passkey, run this locally:
+## Admin console
+
+To enroll the first administrator, run this with the gateway's configuration
+and database environment available:
 
 ```sh
-sudo /usr/local/sbin/codex-gateway-admin admin bootstrap
+codex-gateway --config /path/to/gateway.json admin bootstrap
 ```
 
-Open the admin console and enter the one-time token under **First
+Open `/admin/` on your gateway's public HTTPS URL, such as
+`https://gateway.example.com/admin/`, and enter the one-time token under **First
 administrator?**. Register your passkey, sign in, and add a spare passkey.
 The token expires in 15 minutes. The console manages worker enrollment,
 credential rotation, revocation, and operational inventory.
@@ -73,8 +107,11 @@ codex-local start
 codex-local attach --socket /absolute/private/app.sock THREAD_ID
 ```
 
-`codex-local start` creates a new session when the directory has no history.
-The helper owns its app-server and proxy until the terminal exits. A session
+Use `codex-worker attach` to share a worker-managed session with Telegram.
+Closing the attached terminal leaves the worker and its app server running.
+
+`codex-local start` owns an independent app server and proxy until the terminal
+exits, and creates a new session when the directory has no history. A session
 already open in another independent Codex app must be closed there before it
 can be resumed on a new server; Codex enforces the active-writer lock.
 The terminal can share a worker-owned thread through the worker's private
@@ -88,11 +125,14 @@ PostgreSQL integration tests create and remove isolated schemas.
 
 ```sh
 go test ./...
-TEST_DATABASE_URL='postgres:///telegramgw_test?host=/var/run/postgresql&user=TEST_USER' go test -race ./... -timeout=90s
+TEST_DATABASE_URL='postgres://TEST_USER:TEST_PASSWORD@localhost:5432/telegramgw_test?sslmode=disable' go test -race ./... -timeout=90s
 make lint
-make build VERSION=0.2.0
-make release VERSION=0.2.0
+make build VERSION=0.2.1
+make release VERSION=0.2.1
 ```
+
+Replace the test database placeholders with credentials for an isolated local
+test database. The example connection disables TLS for local testing.
 
 `bin/` contains local executables. `dist/` contains stripped `CGO_ENABLED=0`
 executables, release archives, and SHA-256 checksums for Linux amd64/arm64
@@ -120,5 +160,7 @@ replayed. Telegram itself has no send idempotency key: a process crash between
 an accepted send and its database checkpoint can produce a duplicate message.
 Completed chunks are checkpointed and retries use the original rendered text.
 
-Secrets, local configuration, state databases, and build products are excluded
-from Git. Never commit `.botsecrets` or enrollment tokens.
+The repository ignores `.botsecrets`, environment files, local configuration
+overrides, state databases, and build products. Keep enrollment-token files and
+other private configuration outside the repository or add explicit ignore rules
+for their locations before creating them.
