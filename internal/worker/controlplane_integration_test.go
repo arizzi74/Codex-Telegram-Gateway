@@ -129,8 +129,33 @@ func TestControlPlaneWorkerOutboxSurvivesGatewayRestartIntegration(t *testing.T)
 		return active != ""
 	})
 
+	fakeMu.Lock()
+	f := fake
+	fakeMu.Unlock()
+	// User-visible Codex commentary appears while the turn is still running.
+	// These message IDs must survive a gateway restart so they can be removed
+	// only after the permanent final answer has actually reached Telegram.
+	progressTexts := []string{"Checking the gateway command routing now.", "The command routing is verified; checking delivery next."}
+	var progressIDs []int64
+	for i, text := range progressTexts {
+		if err := f.Emit("item/completed", map[string]any{"threadId": targetThread, "turnId": active, "item": map[string]any{"id": "commentary-" + string(rune('a'+i)), "type": "agentMessage", "status": "completed", "phase": "commentary", "text": text}}); err != nil {
+			t.Fatal(err)
+		}
+		waitControl(t, func() bool { return tg.countText(text) == 1 })
+		progressIDs = append(progressIDs, tg.messageID(text))
+	}
+	if currentActive(t, local, runtimeID, targetThread) != active {
+		t.Fatal("commentary ended the running turn")
+	}
+	if tg.deletedCount() != 0 {
+		t.Fatal("commentary was removed before the final answer")
+	}
+	if tg.countText("Queued for") != 0 {
+		t.Fatal("normal prompt produced an unwanted queued acknowledgment")
+	}
 	// Bare /status reaches Codex while work is active; /tgstatus reads gateway
-	// queues. Neither is submitted as a new model turn.
+	// queues. Neither is submitted as a new model turn. Explicit controls may
+	// acknowledge their command, so the prompt-only check runs before them.
 	postTelegram(t, gw.server.Client(), gw.server.URL, "secret", 9001, "/status", 0)
 	waitControl(t, func() bool { return tg.hasText("Codex session", "Model:", "Reasoning:") })
 	postTelegram(t, gw.server.Client(), gw.server.URL, "secret", 9002, "/tgstatus", 0)
@@ -138,12 +163,9 @@ func TestControlPlaneWorkerOutboxSurvivesGatewayRestartIntegration(t *testing.T)
 
 	// AT-04: changing the Telegram selection changes only the binding. It must
 	// neither interrupt A nor issue another resume/start while A is running.
-	fakeMu.Lock()
-	f := fake
 	beforeStart := countFixtureCalls(f.Calls(), "turn/start")
 	beforeInterrupt := countFixtureCalls(f.Calls(), "turn/interrupt")
 	beforeResume := countFixtureCalls(f.Calls(), "thread/resume")
-	fakeMu.Unlock()
 	postTelegram(t, gw.server.Client(), gw.server.URL, "secret", 4, "/tgconnect "+b.ID, 0)
 	waitControl(t, func() bool { return tg.hasText("Connected to", "Beta") })
 	time.Sleep(250 * time.Millisecond)
@@ -217,7 +239,7 @@ func TestControlPlaneWorkerOutboxSurvivesGatewayRestartIntegration(t *testing.T)
 	if active == "" {
 		t.Fatal("fixture did not return a turn id")
 	}
-	if err := f.Emit("item/completed", map[string]any{"threadId": targetThread, "turnId": active, "item": map[string]any{"type": "agentMessage", "status": "completed", "text": "final emitted while gateway was offline"}}); err != nil {
+	if err := f.Emit("item/completed", map[string]any{"threadId": targetThread, "turnId": active, "item": map[string]any{"id": "final-answer", "type": "agentMessage", "status": "completed", "phase": "final_answer", "text": "final emitted while gateway was offline"}}); err != nil {
 		t.Fatal(err)
 	}
 	if err := f.Emit("turn/completed", map[string]any{"threadId": targetThread, "turnId": active, "status": "completed"}); err != nil {
@@ -229,22 +251,27 @@ func TestControlPlaneWorkerOutboxSurvivesGatewayRestartIntegration(t *testing.T)
 			return false
 		}
 		for _, event := range events {
-			if event.Kind == "final_agent_message" {
+			if event.Kind == "turn_completed" {
 				return true
 			}
 		}
 		return false
 	})
+	if tg.deletedCount() != 0 {
+		t.Fatal("commentary was removed before the offline final answer was delivered")
+	}
 
 	gw = startControlGateway(t, store, tg, log)
 	slot.set(gw)
 	defer gw.close()
 	waitControl(t, func() bool { return len(gw.hub.ConnectedWorkers()) == 1 })
 	waitControl(t, func() bool { return tg.countText("final emitted while gateway was offline") == 1 })
+	waitControl(t, func() bool { return tg.deletedCount() == len(progressIDs) })
 	time.Sleep(500 * time.Millisecond)
 	if got := tg.countText("final emitted while gateway was offline"); got != 1 {
 		t.Fatalf("final delivery duplicated after replay: %d", got)
 	}
+	tg.assertProgressCleanup(t, progressIDs, "final emitted while gateway was offline")
 	// Closing the fixture transport is the same failure signal an app-server
 	// process exit provides. Supervisor restart advances generation but retains
 	// the stable persisted session identities discovered from the new client.
@@ -364,7 +391,15 @@ func dialTestServer(slot *gatewaySlot) func(config.WorkerConfig, *Store, *slog.L
 type telegramRecorder struct {
 	mu       sync.Mutex
 	messages []gateway.SendMessage
+	actions  []telegramRecordedAction
 	next     int64
+}
+
+type telegramRecordedAction struct {
+	kind      string
+	chatID    int64
+	messageID int64
+	text      string
 }
 
 func (t *telegramRecorder) Send(_ context.Context, m gateway.SendMessage) (int64, error) {
@@ -372,7 +407,70 @@ func (t *telegramRecorder) Send(_ context.Context, m gateway.SendMessage) (int64
 	defer t.mu.Unlock()
 	t.next++
 	t.messages = append(t.messages, m)
+	t.actions = append(t.actions, telegramRecordedAction{kind: "send", chatID: m.ChatID, messageID: t.next, text: m.Text})
 	return t.next, nil
+}
+
+func (t *telegramRecorder) DeleteMessage(_ context.Context, chatID, messageID int64) error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.actions = append(t.actions, telegramRecordedAction{kind: "delete", chatID: chatID, messageID: messageID})
+	return nil
+}
+
+func (t *telegramRecorder) messageID(text string) int64 {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	for _, action := range t.actions {
+		if action.kind == "send" && strings.Contains(action.text, text) {
+			return action.messageID
+		}
+	}
+	return 0
+}
+
+func (t *telegramRecorder) deletedCount() int {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	count := 0
+	for _, action := range t.actions {
+		if action.kind == "delete" {
+			count++
+		}
+	}
+	return count
+}
+
+func (t *telegramRecorder) assertProgressCleanup(test *testing.T, progressIDs []int64, finalText string) {
+	test.Helper()
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	expected := make(map[int64]bool, len(progressIDs))
+	for _, id := range progressIDs {
+		if id == 0 {
+			test.Fatal("commentary message ID was not recorded")
+		}
+		expected[id] = true
+	}
+	finalDelivered := false
+	for _, action := range t.actions {
+		if action.kind == "send" && strings.Contains(action.text, finalText) {
+			finalDelivered = true
+		}
+		if action.kind != "delete" {
+			continue
+		}
+		if !finalDelivered {
+			test.Fatalf("message %d deleted before the final answer was sent", action.messageID)
+		}
+		if action.chatID != 9 || !expected[action.messageID] {
+			test.Fatalf("unexpected or duplicate message deletion: chat=%d message=%d", action.chatID, action.messageID)
+		}
+		delete(expected, action.messageID)
+	}
+	if len(expected) != 0 {
+		test.Fatalf("commentary messages were not deleted after final delivery: %v", expected)
+	}
 }
 func (t *telegramRecorder) Edit(context.Context, int64, int64, string, *gateway.TelegramKeyboard) error {
 	return nil
