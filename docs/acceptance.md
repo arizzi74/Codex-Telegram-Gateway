@@ -36,12 +36,18 @@ installed unit and repository template now set `NoNewPrivileges=no` and
 manager reloaded the unit, a new transient service with the same settings ran
 `sudo -n id -u` successfully and returned `0`.
 
-Activation of version 0.2.1 is scheduled through the user service manager after
-all worker turns finish. The existing worker process still has `NoNewPrivs: 1`
-because that process flag cannot be cleared; the restart applies the changed
-settings to its replacement and Codex children. Version 0.2.0 remains running
-until the maintenance job applies the verified release. Completion and the
-replacement worker's reconnection have not yet been observed.
+The scheduled maintenance job completed successfully on 2026-09-14 at 08:49
+CEST after the active turns finished. Gateway and worker report version 0.2.1;
+all three installed binaries match the verified release. The replacement worker
+is connected with no unacknowledged events, and its generation-7 Codex runtime
+is running. Both processes report `NoNewPrivs: 0`, and `sudo -n true` succeeds
+from a new worker-hosted command.
+
+Post-deployment checks confirm HTTPS health/readiness and admin HTML return
+200, the unauthenticated admin session endpoint returns 401, the Telegram menu
+still contains all 69 commands, and the webhook has no pending updates or error.
+The live registry is receiving temporary progress message checkpoints; cleanup
+of the verification turn remains gated on delivery of that turn's final answer.
 
 ## AT-01 through AT-20
 

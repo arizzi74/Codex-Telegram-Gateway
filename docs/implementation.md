@@ -73,10 +73,9 @@ set `NoNewPrivileges=no` and `ProtectSystem=no`, retaining `PrivateTmp=yes` and
 transient service launched by the user service manager with the worker settings
 successfully ran `sudo -n id -u` and returned `0`.
 
-The running worker and its existing children retain `NoNewPrivs: 1` until they
-exit. Maintenance is scheduled through the user service manager, outside the
-worker's process group, to wait for all turns to finish and then activate the
-verified 0.2.1 release with:
+Maintenance completed through the user service manager, outside the worker's
+process group, after all turns finished. It activated the verified 0.2.1 release
+with:
 
 ```sh
 /home/USERNAME/projects/telegramgw/scripts/deploy-host-update.sh --wait
@@ -85,6 +84,7 @@ verified 0.2.1 release with:
 The helper verifies release checksums and waits up to ten minutes for running
 or waiting turns to finish. It installs the release, restarts the gateway and
 worker, and verifies reconnection. `--check` performs a read-only preflight.
-The maintenance job can use `sudo` because the user service manager does not
-carry the old worker's `NoNewPrivs` flag. Activation and the replacement worker's
-reconnection remain pending observation.
+The replacement worker and Codex runtime both report `NoNewPrivs: 0`; sudo
+works from new worker-hosted commands. Gateway and worker are running version
+0.2.1 with matching release checksums, a connected worker, acknowledged events,
+healthy HTTPS endpoints, and the 69-command Telegram menu intact.
