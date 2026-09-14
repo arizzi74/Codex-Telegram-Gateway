@@ -273,7 +273,7 @@ func (s *sessionActor) ensureCodexThreadLoaded(ctx context.Context, client *code
 
 func (s *sessionActor) markSpecialTurn(turnID string) {
 	s.session.ActiveTurnID, s.session.State, s.session.Loaded = turnID, "running", true
-	s.text.Reset()
+	s.resetMessages()
 	s.save()
 }
 

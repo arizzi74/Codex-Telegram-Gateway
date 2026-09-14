@@ -16,14 +16,17 @@ import (
 type Event struct {
 	// Kind is a stable worker-facing name. Worker code must switch on Kind,
 	// never on the evolving app-server Method.
-	Kind      string
-	Method    string
-	Params    json.RawMessage
-	Raw       json.RawMessage
-	ThreadID  string
-	TurnID    string
-	ItemID    string
-	ItemType  string
+	Kind     string
+	Method   string
+	Params   json.RawMessage
+	Raw      json.RawMessage
+	ThreadID string
+	TurnID   string
+	ItemID   string
+	ItemType string
+	// Phase distinguishes user-visible commentary from the terminal answer.
+	// An empty phase remains valid for older servers and model providers.
+	Phase     string
 	State     string
 	Text      string
 	Thread    *Thread
@@ -85,6 +88,7 @@ func newEvent(method string, params json.RawMessage) Event {
 			Status string `json:"status"`
 			Text   string `json:"text"`
 			Type   string `json:"type"`
+			Phase  string `json:"phase"`
 		} `json:"item"`
 		RequestID json.RawMessage `json:"requestId"`
 	}
@@ -93,7 +97,11 @@ func newEvent(method string, params json.RawMessage) Event {
 		event.Text = first(value.Delta, value.Text, value.Item.Text)
 		event.ItemType = value.Item.Type
 		if method == "item/completed" && value.Item.Type == "agentMessage" {
-			event.Kind = "final_agent_message"
+			event.Kind = "agent_message_completed"
+			event.Phase = value.Item.Phase
+			// Only this user-visible item's text is projected. Top-level payload
+			// additions must not override it with unrelated internal content.
+			event.Text = value.Item.Text
 		}
 		if method == "turn/completed" {
 			switch event.State {

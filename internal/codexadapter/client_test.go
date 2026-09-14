@@ -392,12 +392,41 @@ func TestSchemaStatusAndCompletionProjections(t *testing.T) {
 		t.Fatalf("thread status event = %#v", status)
 	}
 	final := newEvent("item/completed", json.RawMessage(`{"threadId":"thr_1","turnId":"turn_1","item":{"id":"item_1","type":"agentMessage","status":"completed","text":"done"}}`))
-	if final.Kind != "final_agent_message" || final.ItemType != "agentMessage" || final.Text != "done" {
+	if final.Kind != "agent_message_completed" || final.ItemType != "agentMessage" || final.Text != "done" || final.Phase != "" {
 		t.Fatalf("final item = %#v", final)
 	}
 	failed := newEvent("turn/completed", json.RawMessage(`{"threadId":"thr_1","turn":{"id":"turn_1","status":"failed"}}`))
 	if failed.Kind != "turn_failed" || failed.State != "failed" {
 		t.Fatalf("failed turn = %#v", failed)
+	}
+}
+
+func TestCompletedAgentMessagesProjectVisibleTextAndPhase(t *testing.T) {
+	for _, phase := range []any{"commentary", "final_answer", nil} {
+		payload, err := json.Marshal(map[string]any{
+			"threadId": "thread-1", "turnId": "turn-1", "text": "unrelated payload text",
+			"item": map[string]any{"id": "item-1", "type": "agentMessage", "phase": phase, "text": "visible text"},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		event := newEvent("item/completed", payload)
+		wantPhase, _ := phase.(string)
+		if event.Kind != "agent_message_completed" || event.Phase != wantPhase || event.Text != "visible text" || event.ItemID != "item-1" {
+			t.Fatalf("phase %v projected as %#v", phase, event)
+		}
+	}
+	for _, kind := range []string{"reasoning", "commandExecution", "mcpToolCall"} {
+		payload, err := json.Marshal(map[string]any{
+			"threadId": "thread-1", "turnId": "turn-1",
+			"item": map[string]any{"id": "item-private", "type": kind, "phase": "commentary", "text": "internal content"},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if event := newEvent("item/completed", payload); event.Kind != "item_completed" || event.Phase != "" {
+			t.Fatalf("internal %s projected as visible agent message: %#v", kind, event)
+		}
 	}
 }
 

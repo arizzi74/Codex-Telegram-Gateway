@@ -468,7 +468,9 @@ type sessionActor struct {
 	pending                         map[string]pendingRequest
 	activeCommand                   *protocol.Command
 	awaitingTurnStart               bool
-	text                            strings.Builder
+	finalText                       string
+	legacyFinalText                 string
+	hasFinalAnswer                  bool
 }
 
 func (s *sessionActor) runtimeEvents() chan actorEvent     { return s.eventQueue }
@@ -499,7 +501,7 @@ func (s *sessionActor) run() {
 				s.pending = map[string]pendingRequest{}
 				s.activeCommand = nil
 				s.awaitingTurnStart = false
-				s.text.Reset()
+				s.resetMessages()
 				for _, c := range s.queue {
 					_, err := s.agent.reject(c, protocol.StaleRuntime, "Runtime restarted before execution.")
 					s.agent.report(err)
@@ -610,7 +612,7 @@ func (s *sessionActor) command(req actorCommand) {
 			s.session.ActiveTurnID = result.TurnID
 			s.session.State, s.session.Loaded = "running", true
 			s.activeCommand = &c
-			s.text.Reset()
+			s.resetMessages()
 			s.save()
 			if result.TurnID != "" {
 				kind = "turn_started"
@@ -717,7 +719,7 @@ func (s *sessionActor) start(c protocol.Command) {
 	s.session.ActiveTurnID = turn.ID
 	s.session.State = "running"
 	s.activeCommand = &c
-	s.text.Reset()
+	s.resetMessages()
 	s.save()
 	_, err = s.agent.record(c, CommandCompleted, &protocol.Result{CommandID: c.ID, TurnID: turn.ID, State: "running"}, "turn_started")
 	s.agent.report(err)
@@ -765,6 +767,12 @@ func (s *sessionActor) save() {
 	s.agent.report(err)
 }
 
+func (s *sessionActor) resetMessages() {
+	s.finalText = ""
+	s.legacyFinalText = ""
+	s.hasFinalAnswer = false
+}
+
 func (s *sessionActor) event(event codexadapter.Event) {
 	switch event.Kind {
 	case "turn_started":
@@ -772,7 +780,7 @@ func (s *sessionActor) event(event codexadapter.Event) {
 			return
 		}
 		if s.session.ActiveTurnID != event.TurnID {
-			s.text.Reset()
+			s.resetMessages()
 		}
 		s.session.ActiveTurnID = event.TurnID
 		s.session.State = "running"
@@ -789,30 +797,50 @@ func (s *sessionActor) event(event codexadapter.Event) {
 		} else {
 			s.agent.report(s.agent.emit(s.runtime, s.session.ID, "turn_started", result))
 		}
-	case "agent_message_delta":
-		if event.TurnID == s.session.ActiveTurnID && s.text.Len() < 256<<10 {
-			s.text.WriteString(event.Text)
+	case "agent_message_completed":
+		if event.TurnID == "" || event.TurnID != s.session.ActiveTurnID {
+			return
 		}
-	case "final_agent_message":
-		if event.TurnID == s.session.ActiveTurnID {
-			s.text.Reset()
-			s.text.WriteString(event.Text)
+		text := s.agent.redactor.Redact(event.Text)
+		switch event.Phase {
+		case "final_answer":
+			s.finalText, s.hasFinalAnswer = text, true
+		case "commentary":
+			// A known interim message also invalidates an earlier phase-unknown
+			// candidate. It must never become the final answer by accident.
+			s.legacyFinalText = ""
+		case "":
+			// Older servers and providers omit phase. Preserve their last
+			// completed message, never a concatenation of streamed deltas.
+			s.legacyFinalText = text
 		}
-		s.agent.report(s.agent.emit(s.runtime, s.session.ID, "final_agent_message", protocol.Result{TurnID: event.TurnID, Text: s.agent.redactor.Redact(event.Text)}))
+		if strings.TrimSpace(text) != "" {
+			result := protocol.Result{TurnID: event.TurnID, Text: text}
+			if s.activeCommand != nil {
+				result.CommandID = s.activeCommand.ID
+			}
+			s.agent.report(s.agent.emit(s.runtime, s.session.ID, "agent_progress_message", result))
+		}
 	case "turn_completed", "turn_failed", "turn_interrupted":
 		if event.TurnID == "" || event.TurnID != s.session.ActiveTurnID {
 			return
 		}
 		kind := event.Kind
 		state := "idle"
-		if event.State == "failed" {
+		if kind == "turn_failed" || event.State == "failed" {
 			kind = "turn_failed"
 			state = "failed"
 		}
 		if event.State == "interrupted" {
 			kind = "turn_interrupted"
 		}
-		result := protocol.Result{TurnID: event.TurnID, State: state, Text: s.agent.redactor.Redact(s.text.String())}
+		result := protocol.Result{TurnID: event.TurnID, State: state}
+		if kind == "turn_completed" {
+			result.Text = s.legacyFinalText
+			if s.hasFinalAnswer {
+				result.Text = s.finalText
+			}
+		}
 		if s.activeCommand != nil {
 			result.CommandID = s.activeCommand.ID
 		}
@@ -821,7 +849,7 @@ func (s *sessionActor) event(event codexadapter.Event) {
 		s.session.State = state
 		s.activeCommand = nil
 		s.awaitingTurnStart = false
-		s.text.Reset()
+		s.resetMessages()
 		s.save()
 		for key := range s.pending {
 			s.resolve(key, "cleared")

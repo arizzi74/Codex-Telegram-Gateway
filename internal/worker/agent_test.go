@@ -264,6 +264,146 @@ func TestAgentCodexStatusDuringActiveTurnPreservesOriginalCommand(t *testing.T) 
 	assertTurnCompletedForCommand(t, a.store, original.ID, turnID)
 }
 
+func TestAgentMessagesEmitCorrelatedRedactedProgressAndOnlyFinalAnswer(t *testing.T) {
+	a, runtime, _, cleanup := testAgent(t)
+	defer cleanup()
+	session, err := a.store.UpsertSession(protocol.Session{RuntimeID: runtime.ID, ThreadID: "thread-messages", CWD: runtime.DefaultCWD, State: "running", Loaded: true, ActiveTurnID: "turn-live"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	command := agentCommand(runtime, session, protocol.StartTurn)
+	actor := &sessionActor{agent: a, runtime: runtime, session: session, activeCommand: &command}
+	secret := "sk-abcdefghijklmnopqrstuvwxyz0123456789-secret"
+	visible := []codexadapter.Event{
+		{Kind: "agent_message_completed", Phase: "commentary", Text: "Starting the checks."},
+		{Kind: "agent_message_completed", Phase: "commentary", Text: "Inspecting " + secret},
+		{Kind: "agent_message_completed", Phase: "final_answer", Text: "Finished; removed " + secret},
+	}
+	for _, event := range visible {
+		event.ThreadID, event.TurnID = session.ThreadID, session.ActiveTurnID
+		actor.event(event)
+	}
+	// Raw reasoning and tools never enter the user-visible progress path.
+	actor.event(codexadapter.Event{Kind: "item_completed", ItemType: "reasoning", TurnID: session.ActiveTurnID, Text: "private reasoning"})
+	actor.event(codexadapter.Event{Kind: "item_completed", ItemType: "commandExecution", TurnID: session.ActiveTurnID, Text: "private tool result"})
+	// Deltas after a completed item cannot concatenate into the final answer.
+	actor.event(codexadapter.Event{Kind: "agent_message_delta", TurnID: session.ActiveTurnID, Text: "unfinished fragment"})
+	actor.event(codexadapter.Event{Kind: "turn_completed", TurnID: session.ActiveTurnID})
+	events, err := a.store.OutboxAfter(0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != len(visible)+1 {
+		t.Fatalf("got %d events, want %d visible messages and one final", len(events), len(visible))
+	}
+	for i, event := range events {
+		var result protocol.Result
+		if err := json.Unmarshal(event.Data, &result); err != nil {
+			t.Fatal(err)
+		}
+		if result.CommandID != command.ID || result.TurnID != session.ActiveTurnID || event.SessionID != session.ID {
+			t.Fatalf("event %d lost command/turn/session identity: %#v %#v", i, event, result)
+		}
+		if strings.Contains(string(event.Data), secret) || strings.Contains(string(event.Data), "private") || strings.Contains(result.Text, "unfinished") {
+			t.Fatalf("event %d contains secret, internal content, or partial text", i)
+		}
+		if i < len(visible) {
+			if event.Kind != "agent_progress_message" || result.Text != a.redactor.Redact(visible[i].Text) {
+				t.Fatalf("progress %d = %#v %#v", i, event, result)
+			}
+		} else if event.Kind != "turn_completed" || result.Text != a.redactor.Redact(visible[len(visible)-1].Text) {
+			t.Fatalf("final = %#v %#v", event, result)
+		}
+	}
+}
+
+func TestAgentFinalAnswerPhaseCompatibilityAndStoppedTurns(t *testing.T) {
+	type message struct{ phase, text string }
+	for _, tc := range []struct {
+		name     string
+		messages []message
+		terminal string
+		want     string
+	}{
+		{name: "commentary only", messages: []message{{"commentary", "Still checking"}}, terminal: "turn_completed"},
+		{name: "legacy last completed only", messages: []message{{"", "First interim"}, {"", "Legacy answer"}}, terminal: "turn_completed", want: "Legacy answer"},
+		{name: "known commentary invalidates legacy", messages: []message{{"", "First interim"}, {"commentary", "Still checking"}}, terminal: "turn_completed"},
+		{name: "explicit final beats legacy", messages: []message{{"final_answer", "Final answer"}, {"", "Later async message"}}, terminal: "turn_completed", want: "Final answer"},
+		{name: "failed commentary", messages: []message{{"commentary", "Still checking"}}, terminal: "turn_failed"},
+		{name: "interrupted legacy", messages: []message{{"", "Incomplete work"}}, terminal: "turn_interrupted"},
+		{name: "failed after candidate", messages: []message{{"final_answer", "Candidate answer"}}, terminal: "turn_failed"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a, runtime, _, cleanup := testAgent(t)
+			defer cleanup()
+			session, err := a.store.UpsertSession(protocol.Session{RuntimeID: runtime.ID, ThreadID: "thread-phases", CWD: runtime.DefaultCWD, State: "running", Loaded: true, ActiveTurnID: "turn-live"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			actor := &sessionActor{agent: a, runtime: runtime, session: session}
+			for _, message := range tc.messages {
+				actor.event(codexadapter.Event{Kind: "agent_message_completed", TurnID: session.ActiveTurnID, Phase: message.phase, Text: message.text})
+			}
+			actor.event(codexadapter.Event{Kind: "turn_completed", TurnID: "turn-stale"})
+			actor.event(codexadapter.Event{Kind: tc.terminal, TurnID: session.ActiveTurnID})
+			events, err := a.store.OutboxAfter(0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(events) != len(tc.messages)+1 {
+				t.Fatalf("unexpected event count %d", len(events))
+			}
+			var result protocol.Result
+			terminal := events[len(events)-1]
+			if err := json.Unmarshal(terminal.Data, &result); err != nil {
+				t.Fatal(err)
+			}
+			if terminal.Kind != tc.terminal || result.Text != tc.want {
+				t.Fatalf("terminal %s text = %q; want %s %q", terminal.Kind, result.Text, tc.terminal, tc.want)
+			}
+			if result.CommandID != "" {
+				t.Fatalf("terminal invented command identity %q", result.CommandID)
+			}
+			if tc.terminal == "turn_failed" && result.State != "failed" {
+				t.Fatalf("failed turn has state %q", result.State)
+			}
+		})
+	}
+}
+
+func TestAgentRejectsStaleProgressAndClearsPreviousTurnAnswer(t *testing.T) {
+	a, runtime, _, cleanup := testAgent(t)
+	defer cleanup()
+	session, err := a.store.UpsertSession(protocol.Session{RuntimeID: runtime.ID, ThreadID: "thread-stale", CWD: runtime.DefaultCWD, State: "running", Loaded: true, ActiveTurnID: "turn-live"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	actor := &sessionActor{agent: a, runtime: runtime, session: session}
+	actor.event(codexadapter.Event{Kind: "agent_message_completed", TurnID: "turn-stale", Phase: "final_answer", Text: "Stale answer"})
+	actor.event(codexadapter.Event{Kind: "agent_message_completed", Phase: "commentary", Text: "Missing turn"})
+	actor.event(codexadapter.Event{Kind: "agent_message_completed", TurnID: session.ActiveTurnID, Phase: "final_answer", Text: "Current answer"})
+	actor.event(codexadapter.Event{Kind: "turn_completed", TurnID: session.ActiveTurnID})
+	actor.event(codexadapter.Event{Kind: "agent_message_completed", TurnID: session.ActiveTurnID, Phase: "commentary", Text: "Late message"})
+	actor.event(codexadapter.Event{Kind: "agent_message_completed", Text: "Idle empty turn"})
+	actor.event(codexadapter.Event{Kind: "turn_started", TurnID: "turn-next"})
+	actor.event(codexadapter.Event{Kind: "agent_message_delta", TurnID: "turn-next", Text: "Partial text"})
+	actor.event(codexadapter.Event{Kind: "turn_completed", TurnID: "turn-next"})
+	events, err := a.store.OutboxAfter(0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 4 {
+		t.Fatalf("got %d events, want current progress, final, next start, next final", len(events))
+	}
+	var result protocol.Result
+	if err := json.Unmarshal(events[len(events)-1].Data, &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.TurnID != "turn-next" || result.Text != "" {
+		t.Fatalf("new turn inherited earlier answer or partial text: %#v", result)
+	}
+}
+
 func TestAgentExecutionErrorRedactsAndBoundsProtocolError(t *testing.T) {
 	a, runtime, _, cleanup := testAgent(t)
 	defer cleanup()
