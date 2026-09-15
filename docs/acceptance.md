@@ -15,7 +15,7 @@ recorded date; PostgreSQL outage evidence applies to the retired backend.
 Version 0.3.0 passes `VERSION=0.3.0 ./scripts/ci.sh`: formatting, vet,
 all Go race tests (including every registry/admin/gateway/worker integration),
 Python migration tests, ten CGO-free cross-builds, and archive/binary checksums.
-All nine final Python migration regressions pass. No database server or test
+All eleven final Python migration/deployment regressions pass. No database server or test
 connection environment is required by CI.
 
 - SQLite tests verify WAL/FULL/foreign-key settings, private file/sidecar modes,
@@ -31,10 +31,16 @@ connection environment is required by CI.
   rows covering SQL NULL versus JSON null, exact large/fractional JSON numbers,
   binary credentials, large Telegram IDs, timestamps, and deferred ownership
   foreign keys. Source row digests were unchanged; the test schema was removed.
-- The deployment helper passed release/service preflight. It preserves the
-  worker and runtime processes, backs up the source, and verifies a fresh worker
-  reconnection after gateway startup. Live cutover is recorded separately once
-  completed.
+- The live cutover completed on 2026-09-15: gateway 0.3.0 uses SQLite, and
+  453 source rows across 20 tables passed content, count, foreign-key, and
+  integrity verification. The database and sidecars are private; WAL is enabled.
+  The old PostgreSQL database, binary, and configuration were retained privately.
+- Post-deployment HTTPS `/healthz`, `/readyz`, and `/admin/` return 200; the
+  unauthenticated admin-session endpoint returns 401. The worker reconnected
+  with all events acknowledged and unchanged worker/runtime PIDs and generation.
+  All 13 sessions, the Telegram binding, and the existing admin credential are
+  preserved. Telegram still has 69 menu entries and zero pending webhook updates
+  or webhook errors. Worker code and running Codex processes needed no restart.
 
 ## Temporary Telegram progress (2026-09-14)
 

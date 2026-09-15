@@ -19,6 +19,14 @@ in incremental steps. The gateway and local worker are deployed on
 
 ## Verification
 
+The gateway was migrated to SQLite and deployed as version 0.3.0 on 2026-09-15.
+The import verified all 453 source rows across 20 tables before startup. Live
+health/readiness, worker reconnection and acknowledgements, unchanged runtime
+PIDs, Telegram menu/webhook, and database integrity checks passed. The worker
+continues running its existing binary and Codex runtime; no worker restart was
+required. Private backups retain the former PostgreSQL state and configuration.
+
+
 Go 1.26.5 linux/arm64 and Codex CLI 0.154.0. The gateway now uses a local
 SQLite file; workers retain their bbolt stores. `VERSION=0.3.0 ./scripts/ci.sh`
 runs formatting, vet, migration tests, race tests, cross-builds, and archive
