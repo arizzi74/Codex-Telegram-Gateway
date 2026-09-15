@@ -133,7 +133,7 @@ def main():
                 source_url = values[0]
         if not source_url:
             raise ValueError('source database configuration is unavailable')
-        pg_environment = {'PATH': '/usr/local/bin:/usr/bin:/bin', 'LANG': 'C.UTF-8',
+        pg_environment = {'PATH': '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin', 'LANG': 'C.UTF-8',
                           'PGDATABASE': source_url, 'PGCONNECT_TIMEOUT': '10'}
         tools = database.parent / ('migration-tools-' + stamp)
         (tools / 'scripts').mkdir(parents=True, mode=0o700)
