@@ -30,7 +30,7 @@ func TestDeliveryFreezesContentAndRecoversOnlyUnsentChunksIntegration(t *testing
 	if err = s.RetryDelivery(ctx, id, time.Second, "test failure"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err = s.pool.Exec(ctx, `UPDATE telegram_deliveries SET next_attempt_at=now()-interval '1 second' WHERE delivery_id=$1`, id); err != nil {
+	if _, err = s.pool.Exec(ctx, `UPDATE telegram_deliveries SET next_attempt_at=(strftime('%Y-%m-%dT%H:%M:%f','now','-1 second') || '000000Z') WHERE delivery_id=$1`, id); err != nil {
 		t.Fatal(err)
 	}
 	rows, err = s.ClaimDeliveries(ctx, 1)
@@ -71,7 +71,7 @@ func TestDeliveryClaimRecoversExpiredSendingLeaseIntegration(t *testing.T) {
 	if err != nil || len(rows) != 1 {
 		t.Fatal(rows, err)
 	}
-	if _, err := s.pool.Exec(ctx, `UPDATE telegram_deliveries SET next_attempt_at=now()-interval '1 second' WHERE delivery_id=$1`, rows[0].ID); err != nil {
+	if _, err := s.pool.Exec(ctx, `UPDATE telegram_deliveries SET next_attempt_at=(strftime('%Y-%m-%dT%H:%M:%f','now','-1 second') || '000000Z') WHERE delivery_id=$1`, rows[0].ID); err != nil {
 		t.Fatal(err)
 	}
 	recovered, err := s.ClaimDeliveries(ctx, 1)

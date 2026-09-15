@@ -88,6 +88,90 @@ func TestIngestEventReplayAndRollbackIntegration(t *testing.T) {
 	}
 }
 
+func TestIngestEventReplayPreservesJSONSemanticsIntegration(t *testing.T) {
+	for _, tc := range []struct {
+		name, stored, replay string
+		equal                bool
+	}{
+		{"object order and whitespace", `{"a":1,"b":[true,null]}`, ` {"b": [true, null], "a": 1} `, true},
+		{"decimal spelling", `{"number":1.00}`, `{"number":1e0}`, true},
+		{"trailing decimal zeroes", `120.000`, `1.2e2`, true},
+		{"negative zero", `-0.00`, `0e20`, true},
+		{"duplicate object key", `{"a":0,"a":2}`, `{"a":2}`, true},
+		{"large exact integer", `9007199254740993`, `900719925474099300e-2`, true},
+		{"large distinct integer", `9007199254740993`, `9007199254740992`, false},
+		{"large exponent", `1e1000000000`, `10e999999999`, true},
+		{"array order", `[1,2]`, `[2,1]`, false},
+		{"null versus absent", `{"a":null}`, `{}`, false},
+		{"number versus text", `1`, `"1"`, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			env := newEventTestEnv(t)
+			ctx := context.Background()
+			event := env.discovery(t)
+			var payload map[string]json.RawMessage
+			if err := json.Unmarshal(event.Data, &payload); err != nil {
+				t.Fatal(err)
+			}
+			payload["extra"] = json.RawMessage(tc.stored)
+			var err error
+			event.Data, err = json.Marshal(payload)
+			if err != nil {
+				t.Fatal(err)
+			}
+			// Imported PostgreSQL event timestamps have microsecond precision.
+			event.OccurredAt = event.OccurredAt.Truncate(time.Microsecond)
+			if err := env.store.IngestEvent(ctx, env.worker, env.connection, event); err != nil {
+				t.Fatal(err)
+			}
+			payload["extra"] = json.RawMessage(tc.replay)
+			event.Data, err = json.Marshal(payload)
+			if err != nil {
+				t.Fatal(err)
+			}
+			event.OccurredAt = event.OccurredAt.Add(123 * time.Nanosecond)
+			err = env.store.IngestEvent(ctx, env.worker, env.connection, event)
+			if tc.equal && err != nil {
+				t.Fatalf("semantically identical replay rejected: %v", err)
+			}
+			if !tc.equal && !errors.Is(err, ErrEventConflict) {
+				t.Fatalf("changed replay = %v, want ErrEventConflict", err)
+			}
+			if watermark, err := env.store.EventWatermark(ctx, env.worker); err != nil || watermark != 1 {
+				t.Fatalf("replay changed watermark to %d: %v", watermark, err)
+			}
+		})
+	}
+}
+
+func TestIngestEventDuplicateJSONKeysMatchPersistedTurnRoutingIntegration(t *testing.T) {
+	env := newEventTestEnv(t)
+	ctx := context.Background()
+	if err := env.store.IngestEvent(ctx, env.worker, env.connection, env.discovery(t)); err != nil {
+		t.Fatal(err)
+	}
+	event := protocol.Event{Seq: 2, ID: uuid.NewString(), WorkerID: env.worker.String(), RuntimeID: env.runtime.String(),
+		RuntimeGeneration: 1, SessionID: env.session.String(), Kind: "turn_started", OccurredAt: time.Now().UTC(),
+		Data: json.RawMessage(`{"turn_id":"stale-turn","turn_id":"active-turn"}`)}
+	if err := env.store.IngestEvent(ctx, env.worker, env.connection, event); err != nil {
+		t.Fatal(err)
+	}
+	// Go applies the last duplicate key. Durable SQL routing and temporary
+	// message cleanup must use the same turn when reading the stored JSON.
+	var activeTurn, persistedTurn string
+	if err := env.store.pool.QueryRow(ctx, `SELECT s.active_turn_id,json_extract(e.payload,'$.turn_id')
+        FROM sessions s JOIN events e ON e.session_id=s.session_id WHERE e.event_id=$1`, event.ID).Scan(&activeTurn, &persistedTurn); err != nil {
+		t.Fatal(err)
+	}
+	if activeTurn != "active-turn" || persistedTurn != activeTurn {
+		t.Fatalf("Go session routing and SQL event routing diverged: active=%q persisted=%q", activeTurn, persistedTurn)
+	}
+	event.Data = json.RawMessage(`{"turn_id":"active-turn"}`)
+	if err := env.store.IngestEvent(ctx, env.worker, env.connection, event); err != nil {
+		t.Fatalf("semantically identical replay of normalized JSON failed: %v", err)
+	}
+}
+
 func TestIngestEventStaleGenerationAndCrossWorkerIntegration(t *testing.T) {
 	env := newEventTestEnv(t)
 	ctx := context.Background()
@@ -144,7 +228,7 @@ func TestIngestEventCommandOutcomeAndApprovalCleanupIntegration(t *testing.T) {
 	if _, err := env.store.pool.Exec(ctx, `INSERT INTO commands
         (command_id, source, worker_id, runtime_id, runtime_generation, session_id,
          operation, payload, status, telegram_bot_id, telegram_chat_id, telegram_message_thread_id)
-        VALUES ($1,'telegram',$2,$3,1,$4,'start_turn','{}'::jsonb,'pending','bot',123,0)`,
+        VALUES ($1,'telegram',$2,$3,1,$4,'start_turn','{}','pending','bot',123,0)`,
 		commandID, env.worker, env.runtime, env.session); err != nil {
 		t.Fatal(err)
 	}
@@ -166,7 +250,7 @@ func TestIngestEventCommandOutcomeAndApprovalCleanupIntegration(t *testing.T) {
 	if _, err := env.store.pool.Exec(ctx, `INSERT INTO approvals
         (approval_id, worker_id, runtime_id, runtime_generation, session_id,
          codex_request_id, codex_thread_id, approval_type, request_payload, state, requested_at)
-        VALUES ($1,$2,$3,1,$4,'req-1','thread-1','permissions','{}'::jsonb,'pending',now())`,
+        VALUES ($1,$2,$3,1,$4,'req-1','thread-1','permissions','{}','pending',(strftime('%Y-%m-%dT%H:%M:%f','now') || '000000Z'))`,
 		approvalID, env.worker, env.runtime, env.session); err != nil {
 		t.Fatal(err)
 	}
@@ -300,7 +384,7 @@ func TestIngestEventHistoricalReplayRuntimeFailureAndNewSessionBindingIntegratio
 	if _, err := env.store.pool.Exec(ctx, `INSERT INTO commands
         (command_id, source, worker_id, runtime_id, runtime_generation, operation, payload, status,
          telegram_bot_id, telegram_user_id, telegram_chat_id, telegram_message_thread_id)
-		VALUES ($1,'telegram',$2,$3,1,'new_session',$4,'pending','bot',77,88,0)`, commandID, env.worker, env.runtime, commandPayload); err != nil {
+		VALUES ($1,'telegram',$2,$3,1,'new_session',$4,'pending','bot',77,88,0)`, commandID, env.worker, env.runtime, json.RawMessage(commandPayload)); err != nil {
 		t.Fatal(err)
 	}
 	returned := protocol.Session{ID: returnedSession.String(), WorkerID: env.worker.String(), RuntimeID: env.runtime.String(), ThreadID: "thread-new", State: "running", Loaded: true, UpdatedAt: time.Now().UTC()}

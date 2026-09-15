@@ -101,7 +101,7 @@ func TestTelegramProgressDeletesOnlyAfterAllFinalChunksAndRecoversCleanupIntegra
 	}
 	// A new Store has no memory of sends. Persisted checkpoints and terminal
 	// delivery state must be sufficient to recover every pending deletion.
-	reopened, err := Open(ctx, env.store.pool.Config().ConnString())
+	reopened, err := Open(ctx, env.store.pool.path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -124,7 +124,7 @@ func TestTelegramProgressDeletesOnlyAfterAllFinalChunksAndRecoversCleanupIntegra
 	if more, err := reopened.ClaimTelegramDeletions(ctx, 100); err != nil || len(more) != 0 {
 		t.Fatalf("cleanup ignored retry delay: %v %v", more, err)
 	}
-	if _, err := reopened.pool.Exec(ctx, `UPDATE telegram_progress_messages SET next_attempt_at=now()-interval '1 second' WHERE cleanup_id=$1`, due[0].ID); err != nil {
+	if _, err := reopened.pool.Exec(ctx, `UPDATE telegram_progress_messages SET next_attempt_at=(strftime('%Y-%m-%dT%H:%M:%f','now','-1 second') || '000000Z') WHERE cleanup_id=$1`, due[0].ID); err != nil {
 		t.Fatal(err)
 	}
 	retry, err := reopened.ClaimTelegramDeletions(ctx, 100)
@@ -132,7 +132,7 @@ func TestTelegramProgressDeletesOnlyAfterAllFinalChunksAndRecoversCleanupIntegra
 		t.Fatalf("cleanup retry: %v %v", retry, err)
 	}
 	// A crashed deletion worker's lease is recoverable independently of final sends.
-	if _, err := reopened.pool.Exec(ctx, `UPDATE telegram_progress_messages SET next_attempt_at=now()-interval '1 second' WHERE cleanup_id=$1`, retry[0].ID); err != nil {
+	if _, err := reopened.pool.Exec(ctx, `UPDATE telegram_progress_messages SET next_attempt_at=(strftime('%Y-%m-%dT%H:%M:%f','now','-1 second') || '000000Z') WHERE cleanup_id=$1`, retry[0].ID); err != nil {
 		t.Fatal(err)
 	}
 	recovered, err := reopened.ClaimTelegramDeletions(ctx, 100)

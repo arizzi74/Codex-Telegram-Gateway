@@ -1,16 +1,20 @@
 package registry
 
 import (
+	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
+	"math/big"
+	"reflect"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/iaia/telegramgw/internal/protocol"
-	"github.com/jackc/pgx/v5"
 )
 
 var (
@@ -31,14 +35,19 @@ func (s *Store) IngestEvent(ctx context.Context, workerID, connectionID uuid.UUI
 	if err := validateEvent(workerID, connectionID, event); err != nil {
 		return err
 	}
-	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
+	// JSONB and Go both use the final occurrence of a duplicate object key.
+	// Normalize before persistence so SQLite JSON paths read the same values
+	// as the normalized Go projections used to apply this event.
+	data, err := normalizeEventJSON(event.Data)
+	if err != nil {
+		return fmt.Errorf("registry: normalize event payload: %w", err)
+	}
+	event.Data = data
+	tx, err := s.pool.BeginTx(ctx, TxOptions{})
 	if err != nil {
 		return fmt.Errorf("registry: begin event ingestion: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	if err := lockAutomaticBindingContext(ctx, tx, workerID, event); err != nil {
-		return err
-	}
 	if err := checkLeaseTx(ctx, tx, workerID, connectionID); err != nil {
 		return err
 	}
@@ -51,8 +60,8 @@ func (s *Store) IngestEvent(ctx context.Context, workerID, connectionID uuid.UUI
 	sequence := int64(event.Seq)
 	var watermark int64
 	err = tx.QueryRow(ctx, `SELECT event_seq FROM worker_event_watermarks
-        WHERE worker_id = $1 FOR UPDATE`, workerID).Scan(&watermark)
-	if errors.Is(err, pgx.ErrNoRows) {
+        WHERE worker_id = $1`, workerID).Scan(&watermark)
+	if errors.Is(err, sql.ErrNoRows) {
 		return ErrWorkerNotFound
 	}
 	if err != nil {
@@ -115,7 +124,7 @@ func (s *Store) IngestEvent(ctx context.Context, workerID, connectionID uuid.UUI
 		}
 	}
 	if _, err := tx.Exec(ctx, `UPDATE worker_event_watermarks
-        SET event_seq = $2, updated_at = now() WHERE worker_id = $1`, workerID, sequence); err != nil {
+        SET event_seq = $2, updated_at = (strftime('%Y-%m-%dT%H:%M:%f','now') || '000000Z') WHERE worker_id = $1`, workerID, sequence); err != nil {
 		return fmt.Errorf("registry: advance event watermark: %w", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -151,12 +160,12 @@ func validateEvent(workerID, connectionID uuid.UUID, event protocol.Event) error
 	return nil
 }
 
-func checkLeaseTx(ctx context.Context, tx pgx.Tx, workerID, connectionID uuid.UUID) error {
+func checkLeaseTx(ctx context.Context, tx *dbTx, workerID, connectionID uuid.UUID) error {
 	var current *uuid.UUID
 	var enabled bool
 	err := tx.QueryRow(ctx, `SELECT connection_id, enabled FROM workers
-        WHERE worker_id = $1 FOR UPDATE`, workerID).Scan(&current, &enabled)
-	if errors.Is(err, pgx.ErrNoRows) {
+        WHERE worker_id = $1`, workerID).Scan(&current, &enabled)
+	if errors.Is(err, sql.ErrNoRows) {
 		return ErrConnectionFenced
 	}
 	if err != nil {
@@ -168,28 +177,124 @@ func checkLeaseTx(ctx context.Context, tx pgx.Tx, workerID, connectionID uuid.UU
 	return nil
 }
 
-func verifyEventReplay(ctx context.Context, tx pgx.Tx, workerID uuid.UUID, sequence int64, event protocol.Event) error {
+func verifyEventReplay(ctx context.Context, tx *dbTx, workerID uuid.UUID, sequence int64, event protocol.Event) error {
 	eventID, _ := uuid.Parse(event.ID)
-	var matching bool
-	err := tx.QueryRow(ctx, `SELECT EXISTS (
-        SELECT 1 FROM events WHERE worker_id = $1 AND event_seq = $2
-          AND event_id = $3 AND kind = $4 AND payload = $5::jsonb
-          AND runtime_id IS NOT DISTINCT FROM $6
-          AND runtime_generation IS NOT DISTINCT FROM $7
-          AND session_id IS NOT DISTINCT FROM $8
-          AND occurred_at = $9
-    )`, workerID, sequence, eventID, event.Kind, event.Data,
-		nullUUID(event.RuntimeID), nullGeneration(event), nullUUID(event.SessionID), event.OccurredAt).Scan(&matching)
+	var payload json.RawMessage
+	var occurredAt time.Time
+	err := tx.QueryRow(ctx, `SELECT payload, occurred_at FROM events
+        WHERE worker_id = $1 AND event_seq = $2 AND event_id = $3 AND kind = $4
+          AND runtime_id IS $5 AND runtime_generation IS $6 AND session_id IS $7`,
+		workerID, sequence, eventID, event.Kind, nullUUID(event.RuntimeID),
+		nullGeneration(event), nullUUID(event.SessionID)).Scan(&payload, &occurredAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrEventConflict
+	}
 	if err != nil {
 		return fmt.Errorf("registry: verify replay: %w", err)
 	}
-	if !matching {
+	// Earlier PostgreSQL releases stored timestamps at microsecond precision.
+	// Keep replay compatibility for migrated events, including worker retries
+	// whose original payload contains more precise timestamps.
+	if !occurredAt.Truncate(time.Microsecond).Equal(event.OccurredAt.Truncate(time.Microsecond)) ||
+		!equalEventJSON(payload, event.Data) {
 		return ErrEventConflict
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("registry: commit replay: %w", err)
 	}
 	return nil
+}
+
+func normalizeEventJSON(raw json.RawMessage) (json.RawMessage, error) {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber()
+	var value any
+	if err := decoder.Decode(&value); err != nil {
+		return nil, err
+	}
+	return json.Marshal(value)
+}
+
+// equalEventJSON preserves the semantic equality previously supplied by JSONB:
+// object key order, whitespace, duplicate keys (last wins), and equivalent
+// decimal number spellings do not turn a valid durable replay into a conflict.
+// UseNumber avoids losing precision for event sequence numbers and other IDs.
+func equalEventJSON(left, right []byte) bool {
+	if !json.Valid(left) || !json.Valid(right) {
+		return false
+	}
+	decode := func(raw []byte) (any, error) {
+		decoder := json.NewDecoder(bytes.NewReader(raw))
+		decoder.UseNumber()
+		var value any
+		err := decoder.Decode(&value)
+		return value, err
+	}
+	a, err := decode(left)
+	if err != nil {
+		return false
+	}
+	b, err := decode(right)
+	return err == nil && equalJSONValue(a, b)
+}
+
+func equalJSONValue(left, right any) bool {
+	switch a := left.(type) {
+	case json.Number:
+		b, ok := right.(json.Number)
+		return ok && normalizedJSONNumber(a) == normalizedJSONNumber(b)
+	case map[string]any:
+		b, ok := right.(map[string]any)
+		if !ok || len(a) != len(b) {
+			return false
+		}
+		for key, value := range a {
+			other, ok := b[key]
+			if !ok || !equalJSONValue(value, other) {
+				return false
+			}
+		}
+		return true
+	case []any:
+		b, ok := right.([]any)
+		if !ok || len(a) != len(b) {
+			return false
+		}
+		for i, value := range a {
+			if !equalJSONValue(value, b[i]) {
+				return false
+			}
+		}
+		return true
+	default:
+		return reflect.DeepEqual(left, right)
+	}
+}
+
+// Normalize the decimal coefficient and exponent without expanding exponents.
+// This remains bounded by input size even for values such as 1e1000000000.
+func normalizedJSONNumber(number json.Number) string {
+	raw := string(number)
+	sign := ""
+	if strings.HasPrefix(raw, "-") {
+		sign, raw = "-", raw[1:]
+	}
+	var exponent big.Int
+	if index := strings.IndexAny(raw, "eE"); index >= 0 {
+		exponent.SetString(raw[index+1:], 10) // The JSON decoder validated the number.
+		raw = raw[:index]
+	}
+	if index := strings.IndexByte(raw, '.'); index >= 0 {
+		exponent.Sub(&exponent, big.NewInt(int64(len(raw)-index-1)))
+		raw = raw[:index] + raw[index+1:]
+	}
+	raw = strings.TrimLeft(raw, "0")
+	if raw == "" {
+		return "0"
+	}
+	coefficient := strings.TrimRight(raw, "0")
+	exponent.Add(&exponent, big.NewInt(int64(len(raw)-len(coefficient))))
+	return sign + coefficient + "e" + exponent.String()
 }
 
 type eventTarget struct {
@@ -201,15 +306,15 @@ type eventTarget struct {
 	runtimeFuture     bool
 }
 
-func resolveEventTarget(ctx context.Context, tx pgx.Tx, workerID uuid.UUID, event protocol.Event) (eventTarget, error) {
+func resolveEventTarget(ctx context.Context, tx *dbTx, workerID uuid.UUID, event protocol.Event) (eventTarget, error) {
 	target := eventTarget{}
 	if event.RuntimeID != "" {
 		id, _ := uuid.Parse(event.RuntimeID)
 		target.runtimeID = &id
 		var generation int64
 		err := tx.QueryRow(ctx, `SELECT generation FROM runtimes
-            WHERE runtime_id = $1 AND worker_id = $2 FOR UPDATE`, id, workerID).Scan(&generation)
-		if errors.Is(err, pgx.ErrNoRows) {
+            WHERE runtime_id = $1 AND worker_id = $2`, id, workerID).Scan(&generation)
+		if errors.Is(err, sql.ErrNoRows) {
 			return eventTarget{}, ErrEventTarget
 		}
 		if err != nil {
@@ -234,8 +339,8 @@ func resolveEventTarget(ctx context.Context, tx pgx.Tx, workerID uuid.UUID, even
 		if event.Kind != "session_discovered" {
 			var owner, runtime uuid.UUID
 			err := tx.QueryRow(ctx, `SELECT worker_id, runtime_id FROM sessions
-                WHERE session_id = $1 FOR UPDATE`, id).Scan(&owner, &runtime)
-			if errors.Is(err, pgx.ErrNoRows) || owner != workerID || target.runtimeID == nil || runtime != *target.runtimeID {
+                WHERE session_id = $1`, id).Scan(&owner, &runtime)
+			if errors.Is(err, sql.ErrNoRows) || owner != workerID || target.runtimeID == nil || runtime != *target.runtimeID {
 				return eventTarget{}, ErrEventTarget
 			}
 			if err != nil {
@@ -261,7 +366,7 @@ func nullGeneration(event protocol.Event) any {
 	return int64(event.RuntimeGeneration)
 }
 
-func (s *Store) applyEvent(ctx context.Context, tx pgx.Tx, workerID uuid.UUID, event protocol.Event, target eventTarget) (notify bool, commandID *uuid.UUID, err error) {
+func (s *Store) applyEvent(ctx context.Context, tx *dbTx, workerID uuid.UUID, event protocol.Event, target eventTarget) (notify bool, commandID *uuid.UUID, err error) {
 	// Older generation events remain in events for audit and may resolve their
 	// own immutable command, but may not overwrite current runtime/session or
 	// approval state.
@@ -272,22 +377,22 @@ func (s *Store) applyEvent(ctx context.Context, tx pgx.Tx, workerID uuid.UUID, e
 		if target.runtimeCurrent || target.runtimeFuture {
 			state := map[string]string{"runtime_started": "running", "runtime_stopped": "stopped", "runtime_failed": "failed", "runtime_degraded": "degraded"}[event.Kind]
 			if _, err := tx.Exec(ctx, `UPDATE runtimes
-                SET generation = $3, state = $4, last_seen_at = now(),
-                    started_at = CASE WHEN $4 = 'running' THEN now() ELSE started_at END,
-                    stopped_at = CASE WHEN $4 IN ('stopped', 'failed') THEN now() ELSE stopped_at END
+                SET generation = $3, state = $4, last_seen_at = (strftime('%Y-%m-%dT%H:%M:%f','now') || '000000Z'),
+                    started_at = CASE WHEN $4 = 'running' THEN (strftime('%Y-%m-%dT%H:%M:%f','now') || '000000Z') ELSE started_at END,
+                    stopped_at = CASE WHEN $4 IN ('stopped', 'failed') THEN (strftime('%Y-%m-%dT%H:%M:%f','now') || '000000Z') ELSE stopped_at END
                 WHERE runtime_id = $1 AND worker_id = $2 AND generation <= $3`,
 				*target.runtimeID, workerID, int64(event.RuntimeGeneration), state); err != nil {
 				return false, nil, fmt.Errorf("registry: apply runtime event: %w", err)
 			}
 			if event.Kind == "runtime_started" {
-				if _, err := tx.Exec(ctx, `UPDATE approvals SET state = 'cleared', resolved_at = now(), resolution = $3
+				if _, err := tx.Exec(ctx, `UPDATE approvals SET state = 'cleared', resolved_at = (strftime('%Y-%m-%dT%H:%M:%f','now') || '000000Z'), resolution = $3
                     WHERE worker_id = $1 AND runtime_id = $2 AND state = 'pending' AND runtime_generation < $4`,
 					workerID, *target.runtimeID, event.Data, int64(event.RuntimeGeneration)); err != nil {
 					return false, nil, fmt.Errorf("registry: clear replaced approvals: %w", err)
 				}
 			}
 			if event.Kind == "runtime_failed" {
-				if _, err := tx.Exec(ctx, `UPDATE approvals SET state = 'cleared', resolved_at = now(), resolution = $3
+				if _, err := tx.Exec(ctx, `UPDATE approvals SET state = 'cleared', resolved_at = (strftime('%Y-%m-%dT%H:%M:%f','now') || '000000Z'), resolution = $3
                     WHERE worker_id = $1 AND runtime_id = $2 AND state = 'pending' AND runtime_generation <= $4`,
 					workerID, *target.runtimeID, event.Data, int64(event.RuntimeGeneration)); err != nil {
 					return false, nil, fmt.Errorf("registry: clear failed runtime approvals: %w", err)
@@ -362,7 +467,7 @@ func (s *Store) applyEvent(ctx context.Context, tx pgx.Tx, workerID uuid.UUID, e
 				return false, nil, ErrEventTarget
 			}
 			var allowed bool
-			if err := tx.QueryRow(ctx, `SELECT operation='codex_command' AND payload #>> '{arguments,codex,name}'='fork'
+			if err := tx.QueryRow(ctx, `SELECT operation='codex_command' AND json_extract(payload, '$.arguments.codex.name')='fork'
                 FROM commands WHERE command_id=$1`, *commandID).Scan(&allowed); err != nil {
 				return false, nil, err
 			}
@@ -442,7 +547,7 @@ func notificationRequired(kind string) bool {
 	}
 }
 
-func updateCommandOutcome(ctx context.Context, tx pgx.Tx, commandID, workerID uuid.UUID, event protocol.Event, target eventTarget, result protocol.Result) error {
+func updateCommandOutcome(ctx context.Context, tx *dbTx, commandID, workerID uuid.UUID, event protocol.Event, target eventTarget, result protocol.Result) error {
 	if target.runtimeID == nil {
 		return ErrEventTarget
 	}
@@ -459,7 +564,7 @@ func updateCommandOutcome(ctx context.Context, tx pgx.Tx, commandID, workerID uu
 		var matching bool
 		err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM commands
             WHERE command_id = $1 AND worker_id = $2 AND runtime_id = $3
-              AND runtime_generation = $4 AND session_id IS NOT DISTINCT FROM $5)`,
+              AND runtime_generation = $4 AND session_id IS $5)`,
 			commandID, workerID, *target.runtimeID, int64(event.RuntimeGeneration), target.sessionID).Scan(&matching)
 		if err != nil {
 			return fmt.Errorf("registry: verify command event target: %w", err)
@@ -473,10 +578,10 @@ func updateCommandOutcome(ctx context.Context, tx pgx.Tx, commandID, workerID uu
 	if result.Error != nil {
 		errorCode, errorMessage = &result.Error.Code, &result.Error.Message
 	}
-	ct, err := tx.Exec(ctx, `UPDATE commands SET status = $2, completed_at = now(),
+	ct, err := tx.Exec(ctx, `UPDATE commands SET status = $2, completed_at = (strftime('%Y-%m-%dT%H:%M:%f','now') || '000000Z'),
         error_code = $3, error_message = $4
         WHERE command_id = $1 AND worker_id = $5 AND runtime_id = $6
-          AND runtime_generation = $7 AND session_id IS NOT DISTINCT FROM $8`,
+          AND runtime_generation = $7 AND session_id IS $8`,
 		commandID, status, errorCode, errorMessage, workerID, *target.runtimeID,
 		int64(event.RuntimeGeneration), target.sessionID)
 	if err != nil {
@@ -488,7 +593,7 @@ func updateCommandOutcome(ctx context.Context, tx pgx.Tx, commandID, workerID uu
 	return nil
 }
 
-func applyApproval(ctx context.Context, tx pgx.Tx, workerID, runtimeID, sessionID uuid.UUID, generation int64, event protocol.Event, approval protocol.Approval) error {
+func applyApproval(ctx context.Context, tx *dbTx, workerID, runtimeID, sessionID uuid.UUID, generation int64, event protocol.Event, approval protocol.Approval) error {
 	id, err := uuid.Parse(approval.ID)
 	if err != nil || approval.RequestID == "" || approval.ThreadID == "" {
 		return ErrEventTarget
@@ -526,7 +631,7 @@ func applyApproval(ctx context.Context, tx pgx.Tx, workerID, runtimeID, sessionI
 	if !validApprovalState(state) {
 		return ErrEventTarget
 	}
-	ct, err := tx.Exec(ctx, `UPDATE approvals SET state = $2, resolved_at = now(), resolution = $3
+	ct, err := tx.Exec(ctx, `UPDATE approvals SET state = $2, resolved_at = (strftime('%Y-%m-%dT%H:%M:%f','now') || '000000Z'), resolution = $3
         WHERE approval_id = $1 AND worker_id = $4 AND runtime_id = $5
           AND runtime_generation = $6 AND session_id = $7`, id, state, event.Data, workerID, runtimeID, generation, sessionID)
 	if err != nil {
@@ -538,7 +643,7 @@ func applyApproval(ctx context.Context, tx pgx.Tx, workerID, runtimeID, sessionI
 	return nil
 }
 
-func enqueueEventDeliveries(ctx context.Context, tx pgx.Tx, eventID uuid.UUID, event protocol.Event, sessionID, runtimeID, commandID *uuid.UUID) error {
+func enqueueEventDeliveries(ctx context.Context, tx *dbTx, eventID uuid.UUID, event protocol.Event, sessionID, runtimeID, commandID *uuid.UUID) error {
 	payload, err := json.Marshal(event)
 	if err != nil {
 		return fmt.Errorf("registry: encode delivery payload: %w", err)
@@ -560,7 +665,7 @@ func enqueueEventDeliveries(ctx context.Context, tx pgx.Tx, eventID uuid.UUID, e
         WHERE delivery.kind='agent_progress_message' AND progress.runtime_id=$2
           AND progress.runtime_generation=$5
           AND (($3 IN ('turn_completed','turn_failed','turn_interrupted') AND progress.session_id=$1
-                AND progress.payload->>'turn_id'=$6)
+                AND json_extract(progress.payload, '$.turn_id')=$6)
                OR $3='runtime_failed')
     ) SELECT bot_id, chat_id, message_thread_id FROM targets`, sessionID, runtimeID, event.Kind, commandID, int64(event.RuntimeGeneration), eventTurnID(event))
 	if err != nil {
@@ -588,7 +693,7 @@ func enqueueEventDeliveries(ctx context.Context, tx pgx.Tx, eventID uuid.UUID, e
 	for _, target := range targets {
 		if _, err := tx.Exec(ctx, `INSERT INTO telegram_deliveries
             (delivery_id, event_id, bot_id, chat_id, message_thread_id, kind, payload)
-	            VALUES ($1,$2,$3,$4,$5,$6,$7)`, uuid.New(), eventID, target.botID, target.chatID, target.topicID, event.Kind, payload); err != nil {
+	            VALUES ($1,$2,$3,$4,$5,$6,$7)`, uuid.New(), eventID, target.botID, target.chatID, target.topicID, event.Kind, string(payload)); err != nil {
 			return fmt.Errorf("registry: enqueue event delivery: %w", err)
 		}
 	}

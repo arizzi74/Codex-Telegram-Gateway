@@ -7,9 +7,9 @@ import (
 	"testing"
 	"time"
 
+	"database/sql"
 	"github.com/google/uuid"
 	"github.com/iaia/telegramgw/internal/protocol"
-	"github.com/jackc/pgx/v5"
 )
 
 func TestAutomaticSelectionBindingUsesCapturedRevisionIntegration(t *testing.T) {
@@ -96,46 +96,74 @@ func TestAutomaticSelectionBindingUsesCapturedRevisionIntegration(t *testing.T) 
 	}
 }
 
-func TestLockAutomaticBindingContextIntegration(t *testing.T) {
+func TestConcurrentSelectionTransactionsObserveCommittedRevisionIntegration(t *testing.T) {
 	env := newEventTestEnv(t)
-	revision := uint64(0)
-	commandID := insertAutomaticBindingCommand(t, env, protocol.NewSession, uuid.Nil, &revision)
-	resultData, err := json.Marshal(protocol.Result{CommandID: commandID.String(), Session: &protocol.Session{ID: uuid.NewString()}})
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := env.store.IngestEvent(ctx, env.worker, env.connection, env.discovery(t)); err != nil {
+		t.Fatal(err)
+	}
+	otherSession := uuid.New()
+	insertRouteSession(t, env, otherSession, "thread-second-selection", "")
+	second, err := Open(ctx, env.store.pool.path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	event := protocol.Event{Kind: "command_completed", RuntimeID: env.runtime.String(), RuntimeGeneration: 1, Data: resultData}
-
-	first, err := env.store.pool.Begin(context.Background())
+	defer second.Close()
+	first, err := env.store.pool.Begin(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer first.Rollback(context.Background())
-	if err := lockAutomaticBindingContext(context.Background(), first, env.worker, event); err != nil {
+	selection := IncomingUpdate{BotID: "bot", UserID: 10, ChatID: 20, TopicID: 7}
+	if err := setBinding(ctx, first, selection, env.session); err != nil {
 		t.Fatal(err)
 	}
 
-	second, err := env.store.pool.Begin(context.Background())
-	if err != nil {
+	// A different Store simulates another process opening the same file. Its
+	// transaction must wait before reading the revision, avoiding a stale
+	// read followed by SQLITE_BUSY when upgrading to a writer.
+	started := make(chan struct{})
+	type outcome struct {
+		revision uint64
+		err      error
+	}
+	finished := make(chan outcome, 1)
+	go func() {
+		close(started)
+		tx, err := second.pool.Begin(ctx)
+		if err != nil {
+			finished <- outcome{err: err}
+			return
+		}
+		defer tx.Rollback(context.Background())
+		revision, err := selectionRevision(ctx, tx, selection)
+		if err == nil {
+			err = setBinding(ctx, tx, selection, otherSession)
+		}
+		if err == nil {
+			err = tx.Commit(ctx)
+		}
+		finished <- outcome{revision: revision, err: err}
+	}()
+	<-started
+	select {
+	case result := <-finished:
+		t.Fatalf("second writer did not wait for first transaction: %+v", result)
+	case <-time.After(50 * time.Millisecond):
+	}
+	if err := first.Commit(ctx); err != nil {
 		t.Fatal(err)
 	}
-	defer second.Rollback(context.Background())
-	selection := IncomingUpdate{BotID: "bot", UserID: 10, ChatID: 20, TopicID: 7}
-	var acquired bool
-	if err := second.QueryRow(context.Background(), "SELECT pg_try_advisory_xact_lock(hashtextextended($1, 0))", telegramContextKey(selection)).Scan(&acquired); err != nil {
-		t.Fatal(err)
+	result := <-finished
+	if result.err != nil || result.revision != 1 {
+		t.Fatalf("second writer read revision %d, want committed revision 1: %v", result.revision, result.err)
 	}
-	if acquired {
-		t.Fatal("automatic binding helper did not hold the Telegram context lock")
+	if got := testSelectionRevision(t, env.store, selection); got != 2 {
+		t.Fatalf("serialized selections advanced revision to %d, want 2", got)
 	}
-	if err := first.Commit(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	if err := second.QueryRow(context.Background(), "SELECT pg_try_advisory_xact_lock(hashtextextended($1, 0))", telegramContextKey(selection)).Scan(&acquired); err != nil {
-		t.Fatal(err)
-	}
-	if !acquired {
-		t.Fatal("Telegram context lock was not released with the event transaction")
+	if got := testSelectedSession(t, env.store, selection); got != otherSession {
+		t.Fatalf("second committed selection = %s, want %s", got, otherSession)
 	}
 }
 
@@ -211,8 +239,8 @@ func insertAutomaticBindingCommand(t *testing.T, env eventTestEnv, operation pro
         (command_id, source, worker_id, runtime_id, runtime_generation, session_id,
          operation, payload, status, telegram_bot_id, telegram_user_id,
          telegram_chat_id, telegram_message_thread_id, expires_at)
-        VALUES ($1,'telegram',$2,$3,1,$4,$5,$6,'pending','bot',10,20,7,now()+interval '1 hour')`,
-		id, env.worker, env.runtime, dbSession, string(operation), payload); err != nil {
+        VALUES ($1,'telegram',$2,$3,1,$4,$5,$6,'pending','bot',10,20,7,(strftime('%Y-%m-%dT%H:%M:%f','now','+1 hour') || '000000Z'))`,
+		id, env.worker, env.runtime, dbSession, string(operation), json.RawMessage(payload)); err != nil {
 		t.Fatal(err)
 	}
 	return id
@@ -247,7 +275,7 @@ func findTestSelectedSession(t *testing.T, store *Store, in IncomingUpdate) (uui
 	var id uuid.UUID
 	err := store.pool.QueryRow(context.Background(), `SELECT session_id FROM telegram_bindings
         WHERE bot_id=$1 AND user_id=$2 AND chat_id=$3 AND message_thread_id=$4`, in.BotID, in.UserID, in.ChatID, in.TopicID).Scan(&id)
-	if errors.Is(err, pgx.ErrNoRows) {
+	if errors.Is(err, sql.ErrNoRows) {
 		return uuid.Nil, false
 	}
 	if err != nil {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"crypto/subtle"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,7 +13,6 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/iaia/telegramgw/internal/protocol"
-	"github.com/jackc/pgx/v5"
 )
 
 // Runtime is the runtime snapshot carried in a worker hello or heartbeat.
@@ -46,8 +46,8 @@ func (s *Store) BindConnection(ctx context.Context, workerID, connectionID uuid.
 		return errors.New("registry: worker and connection IDs are required")
 	}
 	ct, err := s.pool.Exec(ctx, `UPDATE workers
-        SET connection_id = $2, connected_at = now(), last_seen_at = now(),
-            connectivity = 'online', updated_at = now()
+        SET connection_id = $2, connected_at = (strftime('%Y-%m-%dT%H:%M:%f','now') || '000000Z'), last_seen_at = (strftime('%Y-%m-%dT%H:%M:%f','now') || '000000Z'),
+            connectivity = 'online', updated_at = (strftime('%Y-%m-%dT%H:%M:%f','now') || '000000Z')
         WHERE worker_id = $1 AND enabled = TRUE`, workerID, connectionID)
 	if err != nil {
 		return fmt.Errorf("registry: bind connection: %w", err)
@@ -77,7 +77,7 @@ func (s *Store) RegisterConnection(ctx context.Context, token string, connection
 		runtimes = append(runtimes, runtime)
 	}
 	digest := sha256Token(token)
-	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
+	tx, err := s.pool.BeginTx(ctx, TxOptions{})
 	if err != nil {
 		return Worker{}, fmt.Errorf("registry: begin connection registration: %w", err)
 	}
@@ -92,8 +92,8 @@ func (s *Store) RegisterConnection(ctx context.Context, token string, connection
 	var storedHash []byte
 	var enabled bool
 	err = tx.QueryRow(ctx, `SELECT auth_token_hash, enabled FROM workers
-        WHERE worker_id = $1 FOR UPDATE`, workerID).Scan(&storedHash, &enabled)
-	if errors.Is(err, pgx.ErrNoRows) {
+        WHERE worker_id = $1`, workerID).Scan(&storedHash, &enabled)
+	if errors.Is(err, sql.ErrNoRows) {
 		return Worker{}, ErrInvalidToken
 	}
 	if err != nil {
@@ -106,16 +106,16 @@ func (s *Store) RegisterConnection(ctx context.Context, token string, connection
 	err = tx.QueryRow(ctx, `UPDATE workers
         SET name = $2, hostname = NULLIF($3, ''), os = $4, arch = $5,
             worker_version = NULLIF($6, ''), connection_id = $7,
-            connected_at = now(), last_seen_at = now(), connectivity = 'online',
-            heartbeat_metadata = $8, updated_at = now()
+            connected_at = (strftime('%Y-%m-%dT%H:%M:%f','now') || '000000Z'), last_seen_at = (strftime('%Y-%m-%dT%H:%M:%f','now') || '000000Z'), connectivity = 'online',
+            heartbeat_metadata = $8, updated_at = (strftime('%Y-%m-%dT%H:%M:%f','now') || '000000Z')
         WHERE worker_id = $1
         RETURNING worker_id, name, COALESCE(hostname, ''), os, arch,
                   COALESCE(worker_version, ''), enabled, connectivity,
                   connection_id, connected_at, last_seen_at, heartbeat_metadata,
                   created_at, updated_at`,
 		workerID, hello.WorkerName, hello.Hostname, hello.OS, hello.Arch,
-		hello.WorkerVersion, connectionID, helloMetadata).Scan(workerScanTargets(&worker)...)
-	if errors.Is(err, pgx.ErrNoRows) {
+		hello.WorkerVersion, connectionID, string(helloMetadata)).Scan(workerScanTargets(&worker)...)
+	if errors.Is(err, sql.ErrNoRows) {
 		return Worker{}, ErrInvalidToken
 	}
 	if err != nil {
@@ -138,7 +138,7 @@ func (s *Store) CheckConnection(ctx context.Context, workerID, connectionID uuid
 	var current bool
 	err := s.pool.QueryRow(ctx, `SELECT COALESCE(enabled AND connection_id = $2, FALSE)
         FROM workers WHERE worker_id = $1`, workerID, connectionID).Scan(&current)
-	if errors.Is(err, pgx.ErrNoRows) {
+	if errors.Is(err, sql.ErrNoRows) {
 		return ErrConnectionFenced
 	}
 	if err != nil {
@@ -156,7 +156,7 @@ func (s *Store) CheckConnection(ctx context.Context, workerID, connectionID uuid
 func (s *Store) Disconnect(ctx context.Context, workerID, connectionID uuid.UUID) error {
 	ct, err := s.pool.Exec(ctx, `UPDATE workers
         SET connectivity = 'unreachable', connection_id = NULL, connected_at = NULL,
-            updated_at = now()
+            updated_at = (strftime('%Y-%m-%dT%H:%M:%f','now') || '000000Z')
         WHERE worker_id = $1 AND connection_id = $2`, workerID, connectionID)
 	if err != nil {
 		return fmt.Errorf("registry: disconnect worker: %w", err)
@@ -175,9 +175,9 @@ func (s *Store) MarkUnreachable(ctx context.Context, threshold time.Duration) (i
 		return 0, errors.New("registry: unreachable threshold must be positive")
 	}
 	ct, err := s.pool.Exec(ctx, `UPDATE workers
-        SET connectivity = 'unreachable', updated_at = now()
+        SET connectivity = 'unreachable', updated_at = (strftime('%Y-%m-%dT%H:%M:%f','now') || '000000Z')
         WHERE enabled = TRUE AND connectivity = 'online'
-          AND last_seen_at < now() - $1::interval`, threshold.String())
+          AND last_seen_at < $1`, time.Now().UTC().Add(-threshold))
 	if err != nil {
 		return 0, fmt.Errorf("registry: mark unreachable workers: %w", err)
 	}
@@ -202,14 +202,14 @@ func (s *Store) RecordHeartbeat(ctx context.Context, heartbeat Heartbeat) error 
 			return err
 		}
 	}
-	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
+	tx, err := s.pool.BeginTx(ctx, TxOptions{})
 	if err != nil {
 		return fmt.Errorf("registry: begin heartbeat: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 	ct, err := tx.Exec(ctx, `UPDATE workers
-        SET last_seen_at = now(), connectivity = 'online', heartbeat_metadata = $3,
-            updated_at = now()
+        SET last_seen_at = (strftime('%Y-%m-%dT%H:%M:%f','now') || '000000Z'), connectivity = 'online', heartbeat_metadata = $3,
+            updated_at = (strftime('%Y-%m-%dT%H:%M:%f','now') || '000000Z')
         WHERE worker_id = $1 AND connection_id = $2 AND enabled = TRUE`,
 		heartbeat.WorkerID, heartbeat.ConnectionID, heartbeat.Metadata)
 	if err != nil {
@@ -229,7 +229,7 @@ func (s *Store) RecordHeartbeat(ctx context.Context, heartbeat Heartbeat) error 
 	return nil
 }
 
-func upsertRuntime(ctx context.Context, tx pgx.Tx, workerID uuid.UUID, runtime Runtime) error {
+func upsertRuntime(ctx context.Context, tx *dbTx, workerID uuid.UUID, runtime Runtime) error {
 	metadata := runtime.Metadata
 	if len(metadata) == 0 {
 		metadata = json.RawMessage(`{}`)
@@ -238,19 +238,19 @@ func upsertRuntime(ctx context.Context, tx pgx.Tx, workerID uuid.UUID, runtime R
         (runtime_id, worker_id, profile_id, name, generation, pid, state,
          codex_version, default_cwd, started_at, stopped_at, last_seen_at, metadata)
         VALUES ($1, $2, $3, $4, $5, $6, $7, NULLIF($8, ''), NULLIF($9, ''),
-            CASE WHEN $7 IN ('starting', 'running', 'degraded') THEN now() END,
-            CASE WHEN $7 = 'stopped' THEN now() END, now(), $10)
+            CASE WHEN $7 IN ('starting', 'running', 'degraded') THEN (strftime('%Y-%m-%dT%H:%M:%f','now') || '000000Z') END,
+            CASE WHEN $7 = 'stopped' THEN (strftime('%Y-%m-%dT%H:%M:%f','now') || '000000Z') END, (strftime('%Y-%m-%dT%H:%M:%f','now') || '000000Z'), $10)
         ON CONFLICT (runtime_id) DO UPDATE SET
             profile_id = EXCLUDED.profile_id, name = EXCLUDED.name,
             generation = EXCLUDED.generation, pid = EXCLUDED.pid,
             state = EXCLUDED.state, codex_version = EXCLUDED.codex_version,
             default_cwd = EXCLUDED.default_cwd,
             started_at = CASE WHEN EXCLUDED.generation > runtimes.generation
-                AND EXCLUDED.state IN ('starting', 'running', 'degraded') THEN now()
+                AND EXCLUDED.state IN ('starting', 'running', 'degraded') THEN (strftime('%Y-%m-%dT%H:%M:%f','now') || '000000Z')
                 ELSE runtimes.started_at END,
-            stopped_at = CASE WHEN EXCLUDED.state = 'stopped' THEN now()
+            stopped_at = CASE WHEN EXCLUDED.state = 'stopped' THEN (strftime('%Y-%m-%dT%H:%M:%f','now') || '000000Z')
                 ELSE runtimes.stopped_at END,
-            last_seen_at = now(), metadata = EXCLUDED.metadata
+            last_seen_at = (strftime('%Y-%m-%dT%H:%M:%f','now') || '000000Z'), metadata = EXCLUDED.metadata
         WHERE runtimes.worker_id = EXCLUDED.worker_id
           AND EXCLUDED.generation >= runtimes.generation`,
 		runtime.ID, workerID, runtime.ProfileID, runtime.Name, runtime.Generation,
@@ -315,7 +315,7 @@ func validRuntimeState(state string) bool {
 func (s *Store) EventWatermark(ctx context.Context, workerID uuid.UUID) (int64, error) {
 	var watermark int64
 	err := s.pool.QueryRow(ctx, "SELECT event_seq FROM worker_event_watermarks WHERE worker_id = $1", workerID).Scan(&watermark)
-	if errors.Is(err, pgx.ErrNoRows) {
+	if errors.Is(err, sql.ErrNoRows) {
 		return 0, ErrWorkerNotFound
 	}
 	if err != nil {
@@ -334,7 +334,7 @@ func (s *Store) AdvanceEventWatermark(ctx context.Context, workerID, connectionI
 		return errors.New("registry: invalid event watermark")
 	}
 	ct, err := s.pool.Exec(ctx, `UPDATE worker_event_watermarks AS watermark
-        SET event_seq = GREATEST(watermark.event_seq, $3), updated_at = now()
+        SET event_seq = max(watermark.event_seq, $3), updated_at = (strftime('%Y-%m-%dT%H:%M:%f','now') || '000000Z')
         WHERE watermark.worker_id = $1
           AND EXISTS (
               SELECT 1 FROM workers

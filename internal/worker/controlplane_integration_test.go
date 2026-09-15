@@ -9,7 +9,6 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -25,7 +24,6 @@ import (
 	"github.com/iaia/telegramgw/internal/gateway"
 	"github.com/iaia/telegramgw/internal/protocol"
 	"github.com/iaia/telegramgw/internal/registry"
-	"github.com/jackc/pgx/v5"
 )
 
 // This test runs the real registry, websocket hub, dispatcher, sender, worker
@@ -528,37 +526,14 @@ func (readinessFail) Ping(context.Context) error { return errors.New("database u
 
 func controlPlaneRegistry(t *testing.T) *registry.Store {
 	t.Helper()
-	base := os.Getenv("TEST_DATABASE_URL")
-	if base == "" {
-		t.Skip("TEST_DATABASE_URL is not set")
-	}
 	ctx := context.Background()
-	admin, err := pgx.Connect(ctx, base)
+	store, err := registry.Open(ctx, filepath.Join(t.TempDir(), "gateway.db"))
 	if err != nil {
-		t.Fatal(err)
-	}
-	schema := "controlplane_" + strings.ReplaceAll(uuid.NewString(), "-", "")
-	if _, err = admin.Exec(ctx, "CREATE SCHEMA "+schema); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		_, _ = admin.Exec(context.Background(), "DROP SCHEMA "+schema+" CASCADE")
-		admin.Close(context.Background())
-	})
-	u, err := url.Parse(base)
-	if err != nil {
-		t.Fatal(err)
-	}
-	q := u.Query()
-	q.Set("search_path", schema)
-	u.RawQuery = q.Encode()
-	store, err := registry.Open(ctx, u.String())
-	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("open isolated SQLite store: %v", err)
 	}
 	t.Cleanup(store.Close)
-	if err = store.Migrate(ctx); err != nil {
-		t.Fatal(err)
+	if err := store.Migrate(ctx); err != nil {
+		t.Fatalf("migrate isolated SQLite store: %v", err)
 	}
 	return store
 }

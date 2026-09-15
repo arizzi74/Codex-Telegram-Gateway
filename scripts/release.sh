@@ -19,7 +19,9 @@ for target in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64; do
     package_dir=$(mktemp -d)
     cp "dist/${artifact}" "${package_dir}/${binary}"
     cp README.md LICENSE "${package_dir}/"
-    cp -R examples deploy "${package_dir}/"
+    cp -R examples deploy migrations "${package_dir}/"
+    mkdir -p "${package_dir}/scripts"
+    cp scripts/migrate-postgres-to-sqlite.py "${package_dir}/scripts/"
     (cd "$package_dir" && checksum "$binary" > SHA256SUMS)
     tar -czf "dist/${artifact}.tar.gz" -C "$package_dir" .
     # mktemp creates a dedicated temporary staging directory owned by this script.

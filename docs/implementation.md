@@ -19,9 +19,10 @@ in incremental steps. The gateway and local worker are deployed on
 
 ## Verification
 
-Go 1.26.5 linux/arm64 and Codex CLI 0.154.0. PostgreSQL 14 runs locally.
-`TEST_DATABASE_URL=... VERSION=0.1.0 ./scripts/ci.sh` passes formatting, vet,
-race tests, cross-builds and archive checksum verification. See
+Go 1.26.5 linux/arm64 and Codex CLI 0.154.0. The gateway now uses a local
+SQLite file; workers retain their bbolt stores. `VERSION=0.3.0 ./scripts/ci.sh`
+runs formatting, vet, migration tests, race tests, cross-builds, and archive
+checksum verification without a database server. See
 [the acceptance ledger](acceptance.md) for named tests and their limits.
 
 The gateway enforces the numeric Telegram identity configured for the bot;
@@ -33,8 +34,7 @@ identities.
 The private shared transport and terminal helper were exercised with the
 installed Codex version. No model turns were submitted by live smoke tests.
 
-The local CI job was run; the hosted workflow has not been triggered because
-this local repository has no remote. Darwin executables were cross-built with
+The GitHub Actions workflow runs the same local CI job on pushes and pull requests. Darwin executables were cross-built with
 CGO disabled; the LaunchAgent was not run on a Darwin host.
 
 ## Owner setup

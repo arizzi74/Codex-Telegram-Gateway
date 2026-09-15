@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"crypto/subtle"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -16,8 +17,6 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/iaia/telegramgw/migrations"
-	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 var (
@@ -32,18 +31,15 @@ var (
 
 // Store is safe for concurrent use. The caller owns its lifecycle.
 type Store struct {
-	pool *pgxpool.Pool
+	pool *dbPool
 }
 
-// Open creates a Store backed by url. It does not run migrations or contact
-// PostgreSQL; use Migrate and Ping during gateway startup/readiness checks.
-func Open(ctx context.Context, url string) (*Store, error) {
-	if strings.TrimSpace(url) == "" {
-		return nil, errors.New("registry: database URL is required")
-	}
-	pool, err := pgxpool.New(ctx, url)
+// Open creates or opens a private SQLite database file and configures durable
+// WAL transactions. Migrate must be called before using a new database.
+func Open(ctx context.Context, path string) (*Store, error) {
+	pool, err := openSQLite(ctx, path)
 	if err != nil {
-		return nil, fmt.Errorf("registry: open pool: %w", err)
+		return nil, err
 	}
 	return &Store{pool: pool}, nil
 }
@@ -55,7 +51,7 @@ func (s *Store) Close() {
 	}
 }
 
-// Ping verifies that PostgreSQL is reachable.
+// Ping verifies that SQLite is reachable.
 func (s *Store) Ping(ctx context.Context) error {
 	if s == nil || s.pool == nil {
 		return errors.New("registry: store is closed")
@@ -66,26 +62,23 @@ func (s *Store) Ping(ctx context.Context) error {
 	return nil
 }
 
-// Migrate applies embedded migrations exactly once. The transaction advisory
-// lock serializes concurrent gateway starts against the same database.
+// Migrate applies embedded migrations exactly once. An IMMEDIATE transaction
+// serializes concurrent gateway starts against the same database file.
 func (s *Store) Migrate(ctx context.Context) error {
 	if s == nil || s.pool == nil {
 		return errors.New("registry: store is closed")
 	}
-	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
+	tx, err := s.pool.BeginTx(ctx, TxOptions{})
 	if err != nil {
 		return fmt.Errorf("registry: begin migration: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	if _, err := tx.Exec(ctx, "SELECT pg_advisory_xact_lock(731902841)"); err != nil {
-		return fmt.Errorf("registry: lock migrations: %w", err)
-	}
 	// The migration table is needed before discovering prior versions.
 	if _, err := tx.Exec(ctx, `CREATE TABLE IF NOT EXISTS schema_migrations (
-        version BIGINT PRIMARY KEY,
-        checksum BYTEA NOT NULL,
-        applied_at TIMESTAMPTZ NOT NULL DEFAULT now()
-    )`); err != nil {
+        version INTEGER NOT NULL PRIMARY KEY,
+        checksum BLOB NOT NULL,
+        applied_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f', 'now') || '000000Z')
+    ) STRICT`); err != nil {
 		return fmt.Errorf("registry: create migration ledger: %w", err)
 	}
 	rows, err := tx.Query(ctx, "SELECT version, checksum FROM schema_migrations")
@@ -110,6 +103,22 @@ func (s *Store) Migrate(ctx context.Context) error {
 
 	files := append([]string(nil), migrations.Files...)
 	sort.Strings(files)
+	known := make(map[int64]bool, len(files))
+	for _, file := range files {
+		version, err := migrationVersion(file)
+		if err != nil {
+			return err
+		}
+		if known[version] {
+			return fmt.Errorf("registry: duplicate migration version %d", version)
+		}
+		known[version] = true
+	}
+	for version := range applied {
+		if !known[version] {
+			return fmt.Errorf("registry: unknown applied migration version %d", version)
+		}
+	}
 	for _, file := range files {
 		version, err := migrationVersion(file)
 		if err != nil {
@@ -304,7 +313,7 @@ func workerScanTargets(w *Worker) []any {
 func (s *Store) RevokeWorker(ctx context.Context, workerID uuid.UUID) error {
 	ct, err := s.pool.Exec(ctx, `UPDATE workers
         SET enabled = FALSE, connectivity = 'disabled', connection_id = NULL,
-            connected_at = NULL, updated_at = now()
+            connected_at = NULL, updated_at = (strftime('%Y-%m-%dT%H:%M:%f', 'now') || '000000Z')
         WHERE worker_id = $1`, workerID)
 	if err != nil {
 		return fmt.Errorf("registry: revoke worker: %w", err)
@@ -324,7 +333,7 @@ func (s *Store) RotateWorkerToken(ctx context.Context, workerID uuid.UUID, token
 	ct, err := s.pool.Exec(ctx, `UPDATE workers
         SET auth_token_hash = $2, connection_id = NULL, connected_at = NULL,
             connectivity = CASE WHEN enabled THEN 'offline' ELSE 'disabled' END,
-            updated_at = now()
+            updated_at = (strftime('%Y-%m-%dT%H:%M:%f', 'now') || '000000Z')
         WHERE worker_id = $1`, workerID, tokenHash)
 	if err != nil {
 		return fmt.Errorf("registry: rotate worker token: %w", err)
@@ -348,7 +357,7 @@ func (s *Store) AuthenticateWorker(ctx context.Context, token string) (Worker, e
         COALESCE(worker_version, ''), enabled, connectivity, connection_id,
         connected_at, last_seen_at, heartbeat_metadata, created_at, updated_at
         FROM workers WHERE auth_token_hash = $1 AND enabled = TRUE`, digest[:]).Scan(append([]any{&storedHash}, workerScanTargets(&worker)...)...)
-	if errors.Is(err, pgx.ErrNoRows) {
+	if errors.Is(err, sql.ErrNoRows) {
 		return Worker{}, ErrInvalidToken
 	}
 	if err != nil {

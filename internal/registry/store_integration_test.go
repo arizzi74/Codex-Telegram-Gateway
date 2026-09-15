@@ -5,55 +5,26 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
-	"net/url"
-	"os"
-	"strings"
+	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/iaia/telegramgw/internal/protocol"
-	"github.com/jackc/pgx/v5"
 )
 
-// These tests create and drop only a randomly named schema inside the database
-// named by TEST_DATABASE_URL. They never create or drop a database.
+// Each integration test uses a private SQLite file, so database-backed tests
+// always run and never touch the installed gateway database.
 func integrationStore(t *testing.T) *Store {
 	t.Helper()
-	baseURL := os.Getenv("TEST_DATABASE_URL")
-	if baseURL == "" {
-		t.Skip("TEST_DATABASE_URL is not set")
-	}
 	ctx := context.Background()
-	admin, err := pgx.Connect(ctx, baseURL)
+	store, err := Open(ctx, filepath.Join(t.TempDir(), "gateway.db"))
 	if err != nil {
-		t.Fatalf("connect TEST_DATABASE_URL: %v", err)
-	}
-	schema := "registry_test_" + strings.ReplaceAll(uuid.NewString(), "-", "")
-	if _, err := admin.Exec(ctx, "CREATE SCHEMA "+schema); err != nil {
-		admin.Close(ctx)
-		t.Fatalf("create isolated test schema: %v", err)
-	}
-	t.Cleanup(func() {
-		if _, err := admin.Exec(context.Background(), "DROP SCHEMA "+schema+" CASCADE"); err != nil {
-			t.Errorf("drop isolated test schema %s: %v", schema, err)
-		}
-		admin.Close(context.Background())
-	})
-	parsed, err := url.Parse(baseURL)
-	if err != nil {
-		t.Fatalf("parse TEST_DATABASE_URL: %v", err)
-	}
-	query := parsed.Query()
-	query.Set("search_path", schema)
-	parsed.RawQuery = query.Encode()
-	store, err := Open(ctx, parsed.String())
-	if err != nil {
-		t.Fatalf("open store: %v", err)
+		t.Fatalf("open isolated SQLite store: %v", err)
 	}
 	t.Cleanup(store.Close)
 	if err := store.Migrate(ctx); err != nil {
-		t.Fatalf("migrate schema: %v", err)
+		t.Fatalf("migrate isolated SQLite store: %v", err)
 	}
 	return store
 }
@@ -209,7 +180,7 @@ func TestCommandRoutingIsImmutableIntegration(t *testing.T) {
 	commandID := uuid.New()
 	if _, err := store.pool.Exec(ctx, `INSERT INTO commands
         (command_id, source, worker_id, runtime_id, runtime_generation, operation, payload, status)
-        VALUES ($1, 'telegram', $2, $3, 1, 'start_turn', '{}'::jsonb, 'pending')`, commandID, worker.ID, runtimeID); err != nil {
+        VALUES ($1, 'telegram', $2, $3, 1, 'start_turn', '{}', 'pending')`, commandID, worker.ID, runtimeID); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := store.pool.Exec(ctx, "UPDATE commands SET runtime_generation = 2 WHERE command_id = $1", commandID); err == nil {
@@ -240,7 +211,7 @@ func TestMarkUnreachableIntegration(t *testing.T) {
 	if err := store.BindConnection(ctx, worker.ID, uuid.New()); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.pool.Exec(ctx, "UPDATE workers SET last_seen_at = now() - interval '10 minutes' WHERE worker_id = $1", worker.ID); err != nil {
+	if _, err := store.pool.Exec(ctx, "UPDATE workers SET last_seen_at = (strftime('%Y-%m-%dT%H:%M:%f','now','-10 minutes') || '000000Z') WHERE worker_id = $1", worker.ID); err != nil {
 		t.Fatal(err)
 	}
 	n, err := store.MarkUnreachable(ctx, time.Second)

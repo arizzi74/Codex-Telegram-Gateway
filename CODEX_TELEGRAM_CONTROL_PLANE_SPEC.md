@@ -1,13 +1,13 @@
 # Codex Telegram Control Plane
 ## Gateway, Registry, and Cross-Platform Worker — Implementation Specification
 
-**Status:** Draft v1.0  
-**Intended implementer:** Codex / software engineering agent  
-**Primary language:** Go  
-**Target gateway OS:** Linux  
-**Target worker OS/architectures:** Linux amd64, Linux arm64, macOS amd64, macOS arm64  
-**Transport:** HTTPS/WSS between workers and Gateway; local stdio JSON-RPC between Worker and Codex App Server  
-**Database:** PostgreSQL on Gateway; bbolt or equivalent pure-Go embedded durable store on Worker  
+**Status:** Draft v1.0
+**Intended implementer:** Codex / software engineering agent
+**Primary language:** Go
+**Target gateway OS:** Linux
+**Target worker OS/architectures:** Linux amd64, Linux arm64, macOS amd64, macOS arm64
+**Transport:** HTTPS/WSS between workers and Gateway; local stdio JSON-RPC between Worker and Codex App Server
+**Database:** SQLite on Gateway; bbolt or equivalent pure-Go embedded durable store on Worker
 **Last updated:** 2026-09-13
 
 ---
@@ -28,7 +28,7 @@ The system consists of:
 2. **Registry**
    - Logical service implemented inside the Gateway for v1.
    - Persists Workers, Codex runtimes, sessions, Telegram bindings, commands, events, pending approvals, and delivery state.
-   - Uses PostgreSQL.
+   - Uses SQLite.
    - Must support deterministic routing and recovery after Gateway restart.
 
 3. **Worker**
@@ -96,7 +96,7 @@ Suggested external dependencies:
 
 ```text
 github.com/coder/websocket       # Worker <-> Gateway WebSocket
-github.com/jackc/pgx/v5          # PostgreSQL
+modernc.org/sqlite              # pure-Go SQLite
 go.etcd.io/bbolt                 # Worker durable ledger/outbox
 github.com/google/uuid           # UUID generation, optional
 ```
@@ -184,7 +184,7 @@ Telegram ---------->| Telegram Webhook          |
                                   |
                                   v
                          +----------------+
-                         | PostgreSQL     |
+                         | SQLite     |
                          +----------------+
 
                     authenticated outbound WSS
@@ -1170,30 +1170,30 @@ The Worker MUST preserve Class A events until acknowledged.
 
 # 14. Gateway Registry Database
 
-Use PostgreSQL.
+Use SQLite.
 
 Use UUID primary keys.
 
-Use `TIMESTAMPTZ`.
+Store timestamps as fixed-width UTC RFC3339 text with nine fractional digits.
 
-Use JSONB only for protocol payloads/extensions, not as a replacement for core relational columns.
+Store validated JSON text only for protocol payloads/extensions, not as a replacement for core relational columns. The executable schema is `migrations/001_registry.sql`; the examples below describe the relational model.
 
 ## 14.1 workers
 
 ```sql
 CREATE TABLE workers (
-    worker_id UUID PRIMARY KEY,
+    worker_id TEXT PRIMARY KEY,
     name TEXT NOT NULL,
     hostname TEXT,
     os TEXT NOT NULL,
     arch TEXT NOT NULL,
     worker_version TEXT,
-    auth_token_hash BYTEA NOT NULL,
-    enabled BOOLEAN NOT NULL DEFAULT TRUE,
+    auth_token_hash BLOB NOT NULL,
+    enabled INTEGER NOT NULL DEFAULT TRUE,
     connectivity TEXT NOT NULL DEFAULT 'offline',
-    last_seen_at TIMESTAMPTZ,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    last_seen_at TEXT,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f','now') || '000000Z'),
+    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f','now') || '000000Z')
 );
 ```
 
@@ -1210,19 +1210,19 @@ disabled
 
 ```sql
 CREATE TABLE runtimes (
-    runtime_id UUID PRIMARY KEY,
-    worker_id UUID NOT NULL REFERENCES workers(worker_id),
+    runtime_id TEXT PRIMARY KEY,
+    worker_id TEXT NOT NULL REFERENCES workers(worker_id),
     profile_id TEXT NOT NULL,
     name TEXT NOT NULL,
-    generation BIGINT NOT NULL DEFAULT 0,
-    pid BIGINT,
+    generation INTEGER NOT NULL DEFAULT 0,
+    pid INTEGER,
     state TEXT NOT NULL,
     codex_version TEXT,
     default_cwd TEXT,
-    started_at TIMESTAMPTZ,
-    stopped_at TIMESTAMPTZ,
-    last_seen_at TIMESTAMPTZ,
-    metadata JSONB NOT NULL DEFAULT '{}',
+    started_at TEXT,
+    stopped_at TEXT,
+    last_seen_at TEXT,
+    metadata TEXT NOT NULL DEFAULT '{}',
     UNIQUE(worker_id, profile_id)
 );
 ```
@@ -1241,9 +1241,9 @@ failed
 
 ```sql
 CREATE TABLE sessions (
-    session_id UUID PRIMARY KEY,
-    worker_id UUID NOT NULL REFERENCES workers(worker_id),
-    runtime_id UUID NOT NULL REFERENCES runtimes(runtime_id),
+    session_id TEXT PRIMARY KEY,
+    worker_id TEXT NOT NULL REFERENCES workers(worker_id),
+    runtime_id TEXT NOT NULL REFERENCES runtimes(runtime_id),
     codex_thread_id TEXT NOT NULL,
     codex_session_id TEXT,
     name TEXT,
@@ -1253,12 +1253,12 @@ CREATE TABLE sessions (
     git_root TEXT,
     state TEXT NOT NULL,
     active_turn_id TEXT,
-    loaded BOOLEAN NOT NULL DEFAULT FALSE,
-    archived BOOLEAN NOT NULL DEFAULT FALSE,
-    discovered_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    last_activity_at TIMESTAMPTZ,
-    last_reconciled_at TIMESTAMPTZ,
-    metadata JSONB NOT NULL DEFAULT '{}',
+    loaded INTEGER NOT NULL DEFAULT FALSE,
+    archived INTEGER NOT NULL DEFAULT FALSE,
+    discovered_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f','now') || '000000Z'),
+    last_activity_at TEXT,
+    last_reconciled_at TEXT,
+    metadata TEXT NOT NULL DEFAULT '{}',
     UNIQUE(runtime_id, codex_thread_id)
 );
 ```
@@ -1282,16 +1282,16 @@ Connectivity is NOT a Session state.
 ```sql
 CREATE TABLE telegram_bindings (
     bot_id TEXT NOT NULL,
-    user_id BIGINT NOT NULL,
-    chat_id BIGINT NOT NULL,
-    message_thread_id BIGINT,
-    session_id UUID NOT NULL REFERENCES sessions(session_id),
-    selected_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    user_id INTEGER NOT NULL,
+    chat_id INTEGER NOT NULL,
+    message_thread_id INTEGER,
+    session_id TEXT NOT NULL REFERENCES sessions(session_id),
+    selected_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f','now') || '000000Z'),
     PRIMARY KEY (bot_id, user_id, chat_id, message_thread_id)
 );
 ```
 
-Because PostgreSQL treats NULL specially in uniqueness, implement the nullable topic key using either:
+Because SQLite treats NULL specially in uniqueness, implement the nullable topic key using either:
 
 - `message_thread_id BIGINT NOT NULL DEFAULT 0`, or
 - an expression-based unique index with `COALESCE`.
@@ -1307,11 +1307,11 @@ message_thread_id = 0 means no topic
 ```sql
 CREATE TABLE telegram_updates (
     bot_id TEXT NOT NULL,
-    update_id BIGINT NOT NULL,
-    user_id BIGINT,
-    chat_id BIGINT,
-    received_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    raw JSONB NOT NULL,
+    update_id INTEGER NOT NULL,
+    user_id INTEGER,
+    chat_id INTEGER,
+    received_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f','now') || '000000Z'),
+    raw TEXT NOT NULL,
     PRIMARY KEY(bot_id, update_id)
 );
 ```
@@ -1320,26 +1320,26 @@ CREATE TABLE telegram_updates (
 
 ```sql
 CREATE TABLE commands (
-    command_id UUID PRIMARY KEY,
+    command_id TEXT PRIMARY KEY,
     source TEXT NOT NULL,
-    worker_id UUID NOT NULL REFERENCES workers(worker_id),
-    runtime_id UUID NOT NULL REFERENCES runtimes(runtime_id),
-    runtime_generation BIGINT NOT NULL,
-    session_id UUID REFERENCES sessions(session_id),
+    worker_id TEXT NOT NULL REFERENCES workers(worker_id),
+    runtime_id TEXT NOT NULL REFERENCES runtimes(runtime_id),
+    runtime_generation INTEGER NOT NULL,
+    session_id TEXT REFERENCES sessions(session_id),
     operation TEXT NOT NULL,
     expected_turn_id TEXT,
-    payload JSONB NOT NULL,
+    payload TEXT NOT NULL,
     status TEXT NOT NULL,
     telegram_bot_id TEXT,
-    telegram_update_id BIGINT,
-    telegram_user_id BIGINT,
-    telegram_chat_id BIGINT,
-    telegram_message_thread_id BIGINT,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    dispatched_at TIMESTAMPTZ,
-    acknowledged_at TIMESTAMPTZ,
-    completed_at TIMESTAMPTZ,
-    expires_at TIMESTAMPTZ,
+    telegram_update_id INTEGER,
+    telegram_user_id INTEGER,
+    telegram_chat_id INTEGER,
+    telegram_message_thread_id INTEGER,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f','now') || '000000Z'),
+    dispatched_at TEXT,
+    acknowledged_at TEXT,
+    completed_at TEXT,
+    expires_at TEXT,
     error_code TEXT,
     error_message TEXT
 );
@@ -1363,16 +1363,16 @@ Store Class A events long enough for auditing and recovery.
 
 ```sql
 CREATE TABLE events (
-    event_id UUID PRIMARY KEY,
-    worker_id UUID NOT NULL REFERENCES workers(worker_id),
-    runtime_id UUID,
-    runtime_generation BIGINT,
-    session_id UUID,
-    event_seq BIGINT NOT NULL,
+    event_id TEXT PRIMARY KEY,
+    worker_id TEXT NOT NULL REFERENCES workers(worker_id),
+    runtime_id TEXT,
+    runtime_generation INTEGER,
+    session_id TEXT,
+    event_seq INTEGER NOT NULL,
     kind TEXT NOT NULL,
-    payload JSONB NOT NULL,
-    occurred_at TIMESTAMPTZ NOT NULL,
-    received_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    payload TEXT NOT NULL,
+    occurred_at TEXT NOT NULL,
+    received_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f','now') || '000000Z'),
     UNIQUE(worker_id, event_seq)
 );
 ```
@@ -1381,21 +1381,21 @@ CREATE TABLE events (
 
 ```sql
 CREATE TABLE approvals (
-    approval_id UUID PRIMARY KEY,
-    worker_id UUID NOT NULL REFERENCES workers(worker_id),
-    runtime_id UUID NOT NULL REFERENCES runtimes(runtime_id),
-    runtime_generation BIGINT NOT NULL,
-    session_id UUID NOT NULL REFERENCES sessions(session_id),
+    approval_id TEXT PRIMARY KEY,
+    worker_id TEXT NOT NULL REFERENCES workers(worker_id),
+    runtime_id TEXT NOT NULL REFERENCES runtimes(runtime_id),
+    runtime_generation INTEGER NOT NULL,
+    session_id TEXT NOT NULL REFERENCES sessions(session_id),
     codex_request_id TEXT NOT NULL,
     codex_thread_id TEXT NOT NULL,
     codex_turn_id TEXT,
     codex_item_id TEXT,
     approval_type TEXT NOT NULL,
-    request_payload JSONB NOT NULL,
+    request_payload TEXT NOT NULL,
     state TEXT NOT NULL,
-    requested_at TIMESTAMPTZ NOT NULL,
-    resolved_at TIMESTAMPTZ,
-    resolution JSONB,
+    requested_at TEXT NOT NULL,
+    resolved_at TEXT,
+    resolution TEXT,
     UNIQUE(runtime_id, runtime_generation, codex_request_id)
 );
 ```
@@ -1417,13 +1417,13 @@ cleared
 CREATE TABLE telegram_callbacks (
     token TEXT PRIMARY KEY,
     action TEXT NOT NULL,
-    telegram_user_id BIGINT NOT NULL,
-    session_id UUID,
-    command_id UUID,
-    approval_id UUID,
-    payload JSONB NOT NULL DEFAULT '{}',
-    expires_at TIMESTAMPTZ NOT NULL,
-    used_at TIMESTAMPTZ
+    telegram_user_id INTEGER NOT NULL,
+    session_id TEXT,
+    command_id TEXT,
+    approval_id TEXT,
+    payload TEXT NOT NULL DEFAULT '{}',
+    expires_at TEXT NOT NULL,
+    used_at TEXT
 );
 ```
 
@@ -1434,12 +1434,12 @@ Single-use callbacks SHOULD set `used_at` atomically.
 ```sql
 CREATE TABLE bot_message_routes (
     bot_id TEXT NOT NULL,
-    chat_id BIGINT NOT NULL,
-    message_id BIGINT NOT NULL,
-    session_id UUID NOT NULL REFERENCES sessions(session_id),
+    chat_id INTEGER NOT NULL,
+    message_id INTEGER NOT NULL,
+    session_id TEXT NOT NULL REFERENCES sessions(session_id),
     turn_id TEXT,
-    approval_id UUID,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    approval_id TEXT,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f','now') || '000000Z'),
     PRIMARY KEY(bot_id, chat_id, message_id)
 );
 ```
@@ -2277,7 +2277,7 @@ MUST:
 
 - run as non-root,
 - keep Telegram token outside source control,
-- keep PostgreSQL credentials outside source control,
+- keep the SQLite database, its sidecars, and backups outside source control,
 - validate Telegram webhook secret,
 - authorize Telegram numeric user IDs,
 - authenticate each Worker independently,
@@ -2357,7 +2357,7 @@ server:
   public_base_url: https://codex.example.com
 
 database:
-  url_env: CODEX_GATEWAY_DATABASE_URL
+  path: /var/lib/codex-gateway/gateway.db
 
 telegram:
   bot_token_env: CODEX_GATEWAY_TELEGRAM_TOKEN
@@ -2454,7 +2454,7 @@ No DB requirement.
 Returns 200 only if:
 
 ```text
-PostgreSQL reachable
+SQLite reachable
 migrations valid
 Telegram configuration valid enough to operate
 ```
@@ -2580,7 +2580,7 @@ Gateway systemd conceptual unit:
 ```ini
 [Unit]
 Description=Codex Telegram Gateway
-After=network-online.target postgresql.service
+After=network-online.target
 Wants=network-online.target
 
 [Service]
@@ -2766,7 +2766,7 @@ concurrent Telegram updates
 concurrent approvals
 ```
 
-Use PostgreSQL transactions for shared persistent state.
+Use SQLite transactions for shared persistent state.
 
 Do not rely on process-local mutexes for correctness that must survive restart.
 
@@ -3111,7 +3111,7 @@ Worker emits runtime_failed, increments generation on restart, and reconciles pe
 
 ## AT-19 — Gateway database restart
 
-PostgreSQL temporarily unavailable.
+SQLite temporarily unavailable.
 
 Gateway readiness fails.
 
@@ -3144,7 +3144,7 @@ Implement:
 Go monorepo
 configs
 logging
-PostgreSQL migrations
+SQLite migrations
 Worker enrollment
 custom protocol types
 Gateway WSS hub
@@ -3284,15 +3284,15 @@ The implementer MUST follow these unless this specification is revised.
 
 ## Decision 2
 
-**PostgreSQL for central Registry.**
+**SQLite for central Registry.**
 
-Do not use SQLite as the central Registry in production.
+Use a local SQLite file with WAL, FULL synchronization, foreign keys, and immediate write transactions. Do not use a network filesystem.
 
 ## Decision 3
 
 **bbolt/pure-Go embedded store on Worker.**
 
-Do not require PostgreSQL or SQLite on Worker.
+Do not require a database server or SQLite on Worker.
 
 ## Decision 4
 
@@ -3375,7 +3375,7 @@ Create:
 docs/adr/0001-use-go.md
 docs/adr/0002-worker-outbound-wss.md
 docs/adr/0003-codex-stdio-adapter.md
-docs/adr/0004-postgres-registry.md
+docs/adr/0004-sqlite-registry.md
 docs/adr/0005-immutable-command-routing.md
 docs/adr/0006-runtime-generation.md
 ```
@@ -3446,7 +3446,7 @@ Rules:
 2. Start with Phase 1 and do not implement later phases by bypassing earlier abstractions.
 3. Keep Codex App Server wire protocol isolated in internal/codexadapter.
 4. Keep Worker/Gateway wire protocol isolated in internal/protocol.
-5. Create PostgreSQL migrations before writing Registry persistence logic.
+5. Create SQLite migrations before writing Registry persistence logic.
 6. Write tests alongside every phase.
 7. Use a fake Codex App Server for integration tests so tests do not require external credentials.
 8. Do not introduce Redis, Kafka, Kubernetes, a web UI, or direct remote Codex WebSockets.
@@ -3493,7 +3493,7 @@ The Gateway holds the Telegram bot token; Workers do not.
 
 Workers initiate outbound authenticated connections.
 
-Central routing state is durable in PostgreSQL.
+Central routing state is durable in SQLite.
 
 Critical Worker events survive temporary Gateway disconnection.
 

@@ -1,7 +1,7 @@
 [Unit]
 Description=Codex Telegram Gateway
 Documentation=https://github.com/iaia/telegramgw
-After=network-online.target postgresql.service
+After=network-online.target
 Wants=network-online.target
 
 [Service]

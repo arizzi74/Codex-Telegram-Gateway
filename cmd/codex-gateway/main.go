@@ -66,15 +66,11 @@ func run(args []string, logger *slog.Logger) error {
 	if err != nil {
 		return err
 	}
-	databaseURL := os.Getenv(cfg.DatabaseURLEnv)
-	if databaseURL == "" {
-		return errors.New("database URL environment variable is empty")
-	}
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
-	store, err := registry.Open(ctx, databaseURL)
+	store, err := registry.Open(ctx, cfg.DatabasePath)
 	if err != nil {
-		return errors.New("could not open registry; check database URL configuration")
+		return errors.New("could not open registry; check database_path and its directory permissions")
 	}
 	defer store.Close()
 	migrateCtx, done := context.WithTimeout(ctx, 30*time.Second)

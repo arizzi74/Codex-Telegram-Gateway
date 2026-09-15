@@ -21,10 +21,14 @@ install -m 0644 deploy/systemd/codex-gateway.service /etc/systemd/system/
 systemctl daemon-reload && systemctl enable --now codex-gateway
 ```
 
-`secrets.env` supplies the environment variable named by `database_url_env`
-and the webhook secret variable named by `webhook_secret_env`. Do not put the
-Telegram token, bootstrap token, worker token, or PostgreSQL URL in the unit
-file, shell history, or a repository. Inspect service output with:
+`database_path` names the local SQLite file, usually
+`/var/lib/codex-gateway/gateway.db`. Its parent directory must be writable by the
+gateway account so SQLite can create its WAL and shared-memory files. The gateway
+enables WAL, foreign keys, FULL synchronization, and immediate write transactions.
+Use local storage; one gateway service owns the registry.
+
+`secrets.env` supplies the webhook secret variable named by `webhook_secret_env`.
+Keep Telegram, bootstrap, and worker tokens out of unit files, shell history, and Git. Inspect service output with:
 
 ```sh
 journalctl -u codex-gateway -f
@@ -70,19 +74,77 @@ state. For an interactive local attachment to a running session, use
 For an isolated one-off local Codex process, run `codex-local start` from the
 working directory.
 
-## PostgreSQL backup and restore
+## SQLite backup and restore
 
-Back up a consistent compressed database dump using a role with read access:
+Use the SQLite command-line tool's online backup API for a consistent backup of
+an active database, including committed data still in the WAL:
 
 ```sh
-pg_dump --format=custom --file /secure/backups/telegramgw-$(date +%F).dump "$CODEX_GATEWAY_DATABASE_URL"
-pg_restore --list /secure/backups/telegramgw-YYYY-MM-DD.dump
+umask 077
+sqlite3 /var/lib/codex-gateway/gateway.db '.backup /secure/backups/gateway.db'
+sqlite3 /secure/backups/gateway.db 'PRAGMA integrity_check; PRAGMA foreign_key_check;'
 ```
 
-Test restores on a separate database. For an actual restore, stop the gateway,
-restore into the intended database with `pg_restore --clean --if-exists`, check
-ownership and connection settings, then start the gateway and verify `/readyz`.
-Do not restore over a live database while gateway instances are writing it.
+Run as the gateway account or an administrator; protect backups because they
+contain credentials and conversation data. `integrity_check` must return `ok`,
+and `foreign_key_check` must return no rows. Do not copy just a live `.db` file:
+recent committed data can still be in its `-wal` sidecar.
+
+For restore, stop the gateway, preserve the current database and both sidecars,
+and restore the verified backup with mode `0600` and gateway ownership. Remove
+only the old destination's `-wal` and `-shm` files while every connection is
+closed, then start the gateway and verify `/readyz` and worker reconnection.
+Workers keep their local Codex processes and durable outboxes running.
+
+## Switching from PostgreSQL
+
+Version 0.3.0 uses SQLite exclusively. Before switching, build and test the new
+release, retain the old binary/configuration, and make a private PostgreSQL dump.
+Stop every gateway process that can write the source database; workers may stay
+running and buffer events. Keep the old database available for recovery.
+
+The migration helper requires Python 3 with SQLite 3.37+ and `psql`. It uses
+standard PostgreSQL connection settings (`PGDATABASE`, `PGUSER`, `PGHOST`,
+`PGSERVICE`, or a private `.pgpass` file); no PostgreSQL driver is needed by the
+new gateway. Run it as the gateway's service account with read access to the
+source and write access to the destination directory:
+
+```sh
+PGDATABASE=telegramgw python3 scripts/migrate-postgres-to-sqlite.py \
+  --sqlite /var/lib/codex-gateway/gateway.db
+```
+
+The destination must not exist. The helper reads one consistent, read-only
+PostgreSQL snapshot, checks the old migration checksums, converts all registry
+tables, and verifies every table's row count and content digest, foreign keys,
+and SQLite integrity before publishing the new file. Source records and secrets
+are never printed. Legacy PostgreSQL migrations remain in `migrations/postgres/`
+only for verification and migration; they are not linked into the gateway.
+
+Replace `database_url_env` in the gateway configuration with:
+
+```json
+"database_path": "/var/lib/codex-gateway/gateway.db"
+```
+
+Remove the old database URL from the service environment, install the new binary
+and systemd template, reload systemd, and start the gateway. Check `/readyz`, worker
+reconnection, event acknowledgements, and the existing admin login and session
+bindings. There is no need to enroll workers or register passkeys again.
+
+Before the new gateway accepts work, an unsuccessful cutover can restore the old
+binary/configuration and reconnect to the retained PostgreSQL database. After
+SQLite has accepted new work, PostgreSQL is stale: preserve the SQLite database
+and reconcile new records before any rollback. Do not automatically revert and
+silently lose accepted commands or event acknowledgements.
+
+The existing Linux systemd host can use `sudo python3
+scripts/deploy-sqlite-host-update.py --worker-user WORKER_USER --check` for
+preflight, then omit `--check` to perform the verified cutover. It backs up
+configuration, the old binary, and PostgreSQL; it keeps the worker running and
+checks that its runtime PIDs are unchanged after reconnecting. Its paths match
+the systemd template. The older `deploy-host-update.sh` is specific to the
+0.2.1 worker restart and is not used for this database migration.
 
 ## Worker bbolt recovery and ambiguous outcomes
 

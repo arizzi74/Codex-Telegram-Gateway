@@ -141,7 +141,7 @@ func TestAcceptTelegramCommandsCallbacksAndDispatchIntegration(t *testing.T) {
 	if _, err := env.store.pool.Exec(ctx, `INSERT INTO approvals
         (approval_id, worker_id, runtime_id, runtime_generation, session_id, codex_request_id,
          codex_thread_id, approval_type, request_payload, state, requested_at)
-	        VALUES ($1,$2,$3,1,$4,'request-1','thread-1','permissions',$5,'pending',now())`, approvalID, env.worker, env.runtime, env.session, approvalPayload); err != nil {
+	        VALUES ($1,$2,$3,1,$4,'request-1','thread-1','permissions',$5,'pending',(strftime('%Y-%m-%dT%H:%M:%f','now') || '000000Z'))`, approvalID, env.worker, env.runtime, env.session, json.RawMessage(approvalPayload)); err != nil {
 		t.Fatal(err)
 	}
 	token, err := env.store.CreateCallback(ctx, Callback{Action: "approval", BotID: "bot", UserID: 10, ChatID: 20, SessionID: env.session, RuntimeID: env.runtime, Generation: 1, ApprovalID: approvalID, Decision: "grant", ExpiresAt: time.Now().Add(time.Minute)})
@@ -205,7 +205,7 @@ func TestAcceptTelegramCommandsCallbacksAndDispatchIntegration(t *testing.T) {
 	if _, err := env.store.pool.Exec(ctx, `INSERT INTO approvals
         (approval_id, worker_id, runtime_id, runtime_generation, session_id, codex_request_id,
          codex_thread_id, approval_type, request_payload, state, requested_at)
-        VALUES ($1,$2,$3,1,$4,'input-request','thread-1','input',$5,'pending',now())`, inputApprovalID, env.worker, env.runtime, env.session, inputPayload); err != nil {
+        VALUES ($1,$2,$3,1,$4,'input-request','thread-1','input',$5,'pending',(strftime('%Y-%m-%dT%H:%M:%f','now') || '000000Z'))`, inputApprovalID, env.worker, env.runtime, env.session, json.RawMessage(inputPayload)); err != nil {
 		t.Fatal(err)
 	}
 	input := telegramUpdate(env, 6)
@@ -281,7 +281,7 @@ func TestAcceptTelegramMultiQuestionReplyRoutingIntegration(t *testing.T) {
 	if _, err := env.store.pool.Exec(ctx, `INSERT INTO approvals
         (approval_id, worker_id, runtime_id, runtime_generation, session_id, codex_request_id,
          codex_thread_id, codex_turn_id, approval_type, request_payload, state, requested_at)
-        VALUES ($1,$2,$3,1,$4,'multi-input','thread-1','turn-input','input',$5,'pending',now())`, approvalID, env.worker, env.runtime, env.session, payload); err != nil {
+        VALUES ($1,$2,$3,1,$4,'multi-input','thread-1','turn-input','input',$5,'pending',(strftime('%Y-%m-%dT%H:%M:%f','now') || '000000Z'))`, approvalID, env.worker, env.runtime, env.session, json.RawMessage(payload)); err != nil {
 		t.Fatal(err)
 	}
 	if err := env.store.RecordBotInputRoute(ctx, "bot", 20, 901, env.session, "turn-input", approvalID, "first"); err != nil {
@@ -342,14 +342,14 @@ func TestCommandDispatchRecoveryAndExpiryIntegration(t *testing.T) {
 	if err != nil || len(commands) != 0 {
 		t.Fatalf("fresh dispatched command should wait for retry: %#v, %v", commands, err)
 	}
-	if _, err := env.store.pool.Exec(ctx, "UPDATE commands SET dispatched_at=now()-interval '6 seconds' WHERE command_id=$1", commandID); err != nil {
+	if _, err := env.store.pool.Exec(ctx, "UPDATE commands SET dispatched_at=(strftime('%Y-%m-%dT%H:%M:%f','now','-6 seconds') || '000000Z') WHERE command_id=$1", commandID); err != nil {
 		t.Fatal(err)
 	}
 	commands, err = env.store.PendingCommandsForWorker(ctx, env.worker, 10)
 	if err != nil || len(commands) != 1 || commands[0].ID != commandID.String() {
 		t.Fatalf("dispatched retry = %#v, %v", commands, err)
 	}
-	if _, err := env.store.pool.Exec(ctx, "UPDATE commands SET status='completed', completed_at=now() WHERE command_id=$1", commandID); err != nil {
+	if _, err := env.store.pool.Exec(ctx, "UPDATE commands SET status='completed', completed_at=(strftime('%Y-%m-%dT%H:%M:%f','now') || '000000Z') WHERE command_id=$1", commandID); err != nil {
 		t.Fatal(err)
 	}
 	if err := env.store.MarkDispatched(ctx, env.worker, commandID); err != nil {
@@ -366,7 +366,7 @@ func TestCommandDispatchRecoveryAndExpiryIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	expiredID := uuid.MustParse(queued.CommandID)
-	if _, err := env.store.pool.Exec(ctx, "UPDATE commands SET expires_at=now()-interval '1 second' WHERE command_id=$1", expiredID); err != nil {
+	if _, err := env.store.pool.Exec(ctx, "UPDATE commands SET expires_at=(strftime('%Y-%m-%dT%H:%M:%f','now','-1 second') || '000000Z') WHERE command_id=$1", expiredID); err != nil {
 		t.Fatal(err)
 	}
 	if err := env.store.ExpireCommands(ctx); err != nil {

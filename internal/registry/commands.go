@@ -2,6 +2,7 @@ package registry
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,7 +13,6 @@ import (
 	"github.com/google/uuid"
 	"github.com/iaia/telegramgw/internal/protocol"
 	"github.com/iaia/telegramgw/internal/telegramcommands"
-	"github.com/jackc/pgx/v5"
 )
 
 const defaultCommandTTL = time.Hour
@@ -76,7 +76,7 @@ func (s *Store) TelegramSessionStatus(ctx context.Context, sessionID uuid.UUID) 
         (SELECT max(event.occurred_at) FROM events event WHERE event.session_id=session.session_id)
         FROM sessions session WHERE session.session_id=$1 AND session.archived=FALSE`, sessionID).
 		Scan(&status.SessionID, &status.RuntimeID, &status.PendingApprovals, &status.QueuedCommands, &status.LastEventAt)
-	if errors.Is(err, pgx.ErrNoRows) {
+	if errors.Is(err, sql.ErrNoRows) {
 		return SessionStatus{}, ErrTelegramTarget
 	}
 	if err != nil {
@@ -94,7 +94,7 @@ func (s *Store) PendingApproval(ctx context.Context, approvalID uuid.UUID) (prot
 	var raw []byte
 	err := s.pool.QueryRow(ctx, `SELECT request_payload FROM approvals
         WHERE approval_id=$1 AND state='pending' AND response_command_id IS NULL`, approvalID).Scan(&raw)
-	if errors.Is(err, pgx.ErrNoRows) {
+	if errors.Is(err, sql.ErrNoRows) {
 		return protocol.Approval{}, ErrTelegramTarget
 	}
 	if err != nil {
@@ -119,14 +119,11 @@ func (s *Store) AcceptTelegram(ctx context.Context, in IncomingUpdate) (AcceptRe
 	if err := validateIncoming(in); err != nil {
 		return AcceptResult{}, err
 	}
-	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
+	tx, err := s.pool.BeginTx(ctx, TxOptions{})
 	if err != nil {
 		return AcceptResult{}, fmt.Errorf("registry: begin Telegram accept: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	if _, err := tx.Exec(ctx, "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", telegramContextKey(in)); err != nil {
-		return AcceptResult{}, fmt.Errorf("registry: lock Telegram context: %w", err)
-	}
 	raw := in.Raw
 	if len(raw) == 0 {
 		raw = json.RawMessage(`{}`)
@@ -192,11 +189,7 @@ func validateIncoming(in IncomingUpdate) error {
 	return nil
 }
 
-func telegramContextKey(in IncomingUpdate) string {
-	return fmt.Sprintf("%s:%d:%d:%d", in.BotID, in.UserID, in.ChatID, in.TopicID)
-}
-
-func (s *Store) acceptAction(ctx context.Context, tx pgx.Tx, in IncomingUpdate) (AcceptResult, error) {
+func (s *Store) acceptAction(ctx context.Context, tx *dbTx, in IncomingUpdate) (AcceptResult, error) {
 	action := strings.ToLower(strings.TrimSpace(in.Action))
 	switch action {
 	case "unknown_command":
@@ -275,7 +268,7 @@ func (s *Store) acceptAction(ctx context.Context, tx pgx.Tx, in IncomingUpdate) 
 
 // Codex commands share the ordinary frozen routing transaction, but have their
 // own operation so client commands can never become model prompts by accident.
-func (s *Store) acceptCodexCommand(ctx context.Context, tx pgx.Tx, in IncomingUpdate) (AcceptResult, error) {
+func (s *Store) acceptCodexCommand(ctx context.Context, tx *dbTx, in IncomingUpdate) (AcceptResult, error) {
 	if len(in.Text) > 16384 {
 		return AcceptResult{View: "error", ErrorCode: "command_too_long"}, nil
 	}
@@ -326,7 +319,7 @@ func (s *Store) acceptCodexCommand(ctx context.Context, tx pgx.Tx, in IncomingUp
 	return AcceptResult{View: "queued", SessionID: target.sessionID.String(), RuntimeID: target.runtimeID.String(), CommandID: command.ID}, nil
 }
 
-func acceptTextCommand(ctx context.Context, tx pgx.Tx, in IncomingUpdate, operation protocol.Operation) (AcceptResult, error) {
+func acceptTextCommand(ctx context.Context, tx *dbTx, in IncomingUpdate, operation protocol.Operation) (AcceptResult, error) {
 	target, err := resolveRoute(ctx, tx, in)
 	if err != nil {
 		return AcceptResult{}, err
@@ -350,7 +343,7 @@ func acceptTextCommand(ctx context.Context, tx pgx.Tx, in IncomingUpdate, operat
 	return AcceptResult{View: "queued", SessionID: target.sessionID.String(), RuntimeID: target.runtimeID.String(), CommandID: command.ID}, nil
 }
 
-func acceptInput(ctx context.Context, tx pgx.Tx, in IncomingUpdate) (AcceptResult, error) {
+func acceptInput(ctx context.Context, tx *dbTx, in IncomingUpdate) (AcceptResult, error) {
 	id, err := uuid.Parse(in.Target)
 	if err != nil {
 		return AcceptResult{}, ErrTelegramTarget
@@ -360,13 +353,13 @@ func acceptInput(ctx context.Context, tx pgx.Tx, in IncomingUpdate) (AcceptResul
 
 // acceptReplyInput gives a reply to an input request precedence over normal
 // session routing. The route is recorded when the question is delivered.
-func (s *Store) acceptReplyInput(ctx context.Context, tx pgx.Tx, in IncomingUpdate) (AcceptResult, error) {
+func (s *Store) acceptReplyInput(ctx context.Context, tx *dbTx, in IncomingUpdate) (AcceptResult, error) {
 	var approvalID *uuid.UUID
 	var questionID *string
 	err := tx.QueryRow(ctx, `SELECT approval_id, question_id FROM bot_message_routes
         WHERE bot_id=$1 AND chat_id=$2 AND message_id=$3`, in.BotID, in.ChatID, in.ReplyToMessageID).
 		Scan(&approvalID, &questionID)
-	if errors.Is(err, pgx.ErrNoRows) || approvalID == nil {
+	if errors.Is(err, sql.ErrNoRows) || approvalID == nil {
 		return s.acceptAction(ctx, tx, in)
 	}
 	if err != nil {
@@ -379,7 +372,7 @@ func (s *Store) acceptReplyInput(ctx context.Context, tx pgx.Tx, in IncomingUpda
 	return acceptInputApproval(ctx, tx, in, *approvalID, question, false)
 }
 
-func acceptInputApproval(ctx context.Context, tx pgx.Tx, in IncomingUpdate, id uuid.UUID, questionID string, requireBinding bool) (AcceptResult, error) {
+func acceptInputApproval(ctx context.Context, tx *dbTx, in IncomingUpdate, id uuid.UUID, questionID string, requireBinding bool) (AcceptResult, error) {
 	var target routeTarget
 	var requestID, threadID, turnID string
 	var state string
@@ -388,9 +381,9 @@ func acceptInputApproval(ctx context.Context, tx pgx.Tx, in IncomingUpdate, id u
 	err := tx.QueryRow(ctx, `SELECT approval.worker_id, approval.runtime_id, approval.runtime_generation,
         approval.session_id, approval.codex_request_id, approval.codex_thread_id, COALESCE(approval.codex_turn_id,''),
         approval.state, approval.request_payload, approval.response_command_id, approval.input_answers
-        FROM approvals AS approval WHERE approval.approval_id = $1 FOR UPDATE`, id).
+        FROM approvals AS approval WHERE approval.approval_id = $1`, id).
 		Scan(&target.workerID, &target.runtimeID, &target.generation, &target.sessionID, &requestID, &threadID, &turnID, &state, &requestPayload, &claimed, &persistedAnswers)
-	if errors.Is(err, pgx.ErrNoRows) {
+	if errors.Is(err, sql.ErrNoRows) {
 		return AcceptResult{}, ErrTelegramTarget
 	}
 	if err != nil {
@@ -425,7 +418,7 @@ func acceptInputApproval(ctx context.Context, tx pgx.Tx, in IncomingUpdate, id u
 	}
 	target.threadID = threadID
 	if !complete {
-		if _, err := tx.Exec(ctx, "UPDATE approvals SET input_answers=$2 WHERE approval_id=$1", id, answersJSON); err != nil {
+		if _, err := tx.Exec(ctx, "UPDATE approvals SET input_answers=$2 WHERE approval_id=$1", id, string(answersJSON)); err != nil {
 			return AcceptResult{}, fmt.Errorf("registry: persist partial input answers: %w", err)
 		}
 		return AcceptResult{View: "input_pending", SessionID: target.sessionID.String(), RuntimeID: target.runtimeID.String(), ApprovalID: id.String(), QuestionID: nextUnansweredQuestion(approval, answers)}, nil
@@ -435,7 +428,7 @@ func acceptInputApproval(ctx context.Context, tx pgx.Tx, in IncomingUpdate, id u
 		return AcceptResult{}, err
 	}
 	ct, err := tx.Exec(ctx, `UPDATE approvals SET response_command_id=$2
-		, input_answers=$3 WHERE approval_id=$1 AND state='pending' AND response_command_id IS NULL`, id, uuid.MustParse(command.ID), answersJSON)
+		, input_answers=$3 WHERE approval_id=$1 AND state='pending' AND response_command_id IS NULL`, id, uuid.MustParse(command.ID), string(answersJSON))
 	if err != nil {
 		return AcceptResult{}, fmt.Errorf("registry: claim input response: %w", err)
 	}
@@ -445,10 +438,10 @@ func acceptInputApproval(ctx context.Context, tx pgx.Tx, in IncomingUpdate, id u
 	return AcceptResult{View: "queued", SessionID: target.sessionID.String(), RuntimeID: target.runtimeID.String(), CommandID: command.ID, ApprovalID: id.String()}, nil
 }
 
-func inputApprovalCurrent(ctx context.Context, tx pgx.Tx, target routeTarget, turnID string) error {
+func inputApprovalCurrent(ctx context.Context, tx *dbTx, target routeTarget, turnID string) error {
 	var generation int64
 	err := tx.QueryRow(ctx, "SELECT generation FROM runtimes WHERE runtime_id=$1 AND worker_id=$2", target.runtimeID, target.workerID).Scan(&generation)
-	if errors.Is(err, pgx.ErrNoRows) {
+	if errors.Is(err, sql.ErrNoRows) {
 		return ErrTelegramTarget
 	}
 	if err != nil {
@@ -461,8 +454,8 @@ func inputApprovalCurrent(ctx context.Context, tx pgx.Tx, target routeTarget, tu
 		return nil
 	}
 	var activeTurn string
-	err = tx.QueryRow(ctx, "SELECT COALESCE(active_turn_id,'') FROM sessions WHERE session_id=$1 AND runtime_id=$2 FOR UPDATE", target.sessionID, target.runtimeID).Scan(&activeTurn)
-	if errors.Is(err, pgx.ErrNoRows) {
+	err = tx.QueryRow(ctx, "SELECT COALESCE(active_turn_id,'') FROM sessions WHERE session_id=$1 AND runtime_id=$2", target.sessionID, target.runtimeID).Scan(&activeTurn)
+	if errors.Is(err, sql.ErrNoRows) {
 		return ErrTelegramTarget
 	}
 	if err != nil {
@@ -528,7 +521,7 @@ func nextUnansweredQuestion(approval protocol.Approval, answers map[string][]str
 	return ""
 }
 
-func resolveRoute(ctx context.Context, tx pgx.Tx, in IncomingUpdate) (routeTarget, error) {
+func resolveRoute(ctx context.Context, tx *dbTx, in IncomingUpdate) (routeTarget, error) {
 	if in.TopicID > 0 {
 		if target, ok, err := bindingRoute(ctx, tx, in, in.TopicID); err != nil {
 			return routeTarget{}, err
@@ -542,7 +535,7 @@ func resolveRoute(ctx context.Context, tx pgx.Tx, in IncomingUpdate) (routeTarge
 		if err == nil {
 			return sessionRoute(ctx, tx, sessionID)
 		}
-		if !errors.Is(err, pgx.ErrNoRows) {
+		if !errors.Is(err, sql.ErrNoRows) {
 			return routeTarget{}, fmt.Errorf("registry: resolve reply route: %w", err)
 		}
 	}
@@ -556,10 +549,10 @@ func resolveRoute(ctx context.Context, tx pgx.Tx, in IncomingUpdate) (routeTarge
 	return target, nil
 }
 
-func bindingRoute(ctx context.Context, tx pgx.Tx, in IncomingUpdate, topicID int64) (routeTarget, bool, error) {
+func bindingRoute(ctx context.Context, tx *dbTx, in IncomingUpdate, topicID int64) (routeTarget, bool, error) {
 	var sessionID uuid.UUID
 	err := tx.QueryRow(ctx, `SELECT session_id FROM telegram_bindings WHERE bot_id=$1 AND user_id=$2 AND chat_id=$3 AND message_thread_id=$4`, in.BotID, in.UserID, in.ChatID, topicID).Scan(&sessionID)
-	if errors.Is(err, pgx.ErrNoRows) {
+	if errors.Is(err, sql.ErrNoRows) {
 		return routeTarget{}, false, nil
 	}
 	if err != nil {
@@ -569,14 +562,14 @@ func bindingRoute(ctx context.Context, tx pgx.Tx, in IncomingUpdate, topicID int
 	return target, err == nil, err
 }
 
-func sessionRoute(ctx context.Context, tx pgx.Tx, sessionID uuid.UUID) (routeTarget, error) {
+func sessionRoute(ctx context.Context, tx *dbTx, sessionID uuid.UUID) (routeTarget, error) {
 	var target routeTarget
 	err := tx.QueryRow(ctx, `SELECT session.worker_id, session.runtime_id, runtime.generation,
         session.codex_thread_id, COALESCE(session.active_turn_id, '')
         FROM sessions AS session JOIN runtimes AS runtime ON runtime.runtime_id=session.runtime_id
         WHERE session.session_id=$1 AND session.archived=FALSE`, sessionID).
 		Scan(&target.workerID, &target.runtimeID, &target.generation, &target.threadID, &target.activeTurnID)
-	if errors.Is(err, pgx.ErrNoRows) {
+	if errors.Is(err, sql.ErrNoRows) {
 		return routeTarget{}, ErrTelegramTarget
 	}
 	if err != nil {
@@ -586,13 +579,13 @@ func sessionRoute(ctx context.Context, tx pgx.Tx, sessionID uuid.UUID) (routeTar
 	return target, nil
 }
 
-func resolveRuntime(ctx context.Context, tx pgx.Tx, raw string) (routeTarget, error) {
+func resolveRuntime(ctx context.Context, tx *dbTx, raw string) (routeTarget, error) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
 		return routeTarget{}, ErrTelegramTarget
 	}
 	rows, err := tx.Query(ctx, `SELECT runtime_id, worker_id, generation FROM runtimes
-        WHERE runtime_id::text=$1 OR profile_id=$1 OR name=$1`, raw)
+        WHERE runtime_id=$1 OR profile_id=$1 OR name=$1`, raw)
 	if err != nil {
 		return routeTarget{}, fmt.Errorf("registry: resolve runtime: %w", err)
 	}
@@ -614,7 +607,7 @@ func resolveRuntime(ctx context.Context, tx pgx.Tx, raw string) (routeTarget, er
 	return found[0], nil
 }
 
-func resolveOptionalRuntime(ctx context.Context, tx pgx.Tx, raw string) (routeTarget, bool, error) {
+func resolveOptionalRuntime(ctx context.Context, tx *dbTx, raw string) (routeTarget, bool, error) {
 	if strings.TrimSpace(raw) != "" {
 		runtime, err := resolveRuntime(ctx, tx, raw)
 		return runtime, false, err
@@ -644,7 +637,7 @@ func resolveOptionalRuntime(ctx context.Context, tx pgx.Tx, raw string) (routeTa
 	return routeTarget{}, false, ErrTelegramTarget
 }
 
-func resolveSessionLookup(ctx context.Context, tx pgx.Tx, raw string) (routeTarget, error) {
+func resolveSessionLookup(ctx context.Context, tx *dbTx, raw string) (routeTarget, error) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
 		return routeTarget{}, ErrTelegramTarget
@@ -652,7 +645,7 @@ func resolveSessionLookup(ctx context.Context, tx pgx.Tx, raw string) (routeTarg
 	rows, err := tx.Query(ctx, `SELECT session.session_id, session.worker_id, session.runtime_id,
         runtime.generation, session.codex_thread_id, COALESCE(session.active_turn_id,'')
         FROM sessions AS session JOIN runtimes AS runtime ON runtime.runtime_id=session.runtime_id
-        WHERE session.archived=FALSE AND (session.session_id::text=$1 OR session.codex_thread_id=$1 OR session.name=$1)`, raw)
+        WHERE session.archived=FALSE AND (session.session_id=$1 OR session.codex_thread_id=$1 OR session.name=$1)`, raw)
 	if err != nil {
 		return routeTarget{}, fmt.Errorf("registry: look up session: %w", err)
 	}
@@ -674,7 +667,7 @@ func resolveSessionLookup(ctx context.Context, tx pgx.Tx, raw string) (routeTarg
 	return matches[0], nil
 }
 
-func createTelegramCommand(ctx context.Context, tx pgx.Tx, in IncomingUpdate, target routeTarget, operation protocol.Operation, sessionID, expectedTurn string, args protocol.Arguments) (protocol.Command, error) {
+func createTelegramCommand(ctx context.Context, tx *dbTx, in IncomingUpdate, target routeTarget, operation protocol.Operation, sessionID, expectedTurn string, args protocol.Arguments) (protocol.Command, error) {
 	if operation == protocol.NewSession || (operation == protocol.CodexCommand && args.Codex != nil && args.Codex.Name == "fork") {
 		revision, err := selectionRevision(ctx, tx, in)
 		if err != nil {
@@ -712,26 +705,26 @@ func createTelegramCommand(ctx context.Context, tx pgx.Tx, in IncomingUpdate, ta
          telegram_user_id, telegram_chat_id, telegram_message_thread_id, expires_at)
         VALUES ($1,'telegram',$2,$3,$4,$5,$6,NULLIF($7,''),$8,'pending',$9,$10,$11,$12,$13,$14)`,
 		id, target.workerID, target.runtimeID, target.generation, dbSession, string(operation), expectedTurn,
-		payload, in.BotID, in.UpdateID, in.UserID, in.ChatID, in.TopicID, command.ExpiresAt); err != nil {
+		string(payload), in.BotID, in.UpdateID, in.UserID, in.ChatID, in.TopicID, command.ExpiresAt); err != nil {
 		return protocol.Command{}, fmt.Errorf("registry: persist command: %w", err)
 	}
 	return command, nil
 }
 
-func setBinding(ctx context.Context, tx pgx.Tx, in IncomingUpdate, sessionID uuid.UUID) error {
+func setBinding(ctx context.Context, tx *dbTx, in IncomingUpdate, sessionID uuid.UUID) error {
 	if err := bumpSelectionRevision(ctx, tx, in); err != nil {
 		return err
 	}
 	_, err := tx.Exec(ctx, `INSERT INTO telegram_bindings (bot_id,user_id,chat_id,message_thread_id,session_id)
         VALUES ($1,$2,$3,$4,$5) ON CONFLICT (bot_id,user_id,chat_id,message_thread_id)
-        DO UPDATE SET session_id=EXCLUDED.session_id, selected_at=now()`, in.BotID, in.UserID, in.ChatID, in.TopicID, sessionID)
+        DO UPDATE SET session_id=EXCLUDED.session_id, selected_at=(strftime('%Y-%m-%dT%H:%M:%f','now') || '000000Z')`, in.BotID, in.UserID, in.ChatID, in.TopicID, sessionID)
 	if err != nil {
 		return fmt.Errorf("registry: set binding: %w", err)
 	}
 	return nil
 }
 
-func bindingMatches(ctx context.Context, tx pgx.Tx, in IncomingUpdate, sessionID uuid.UUID) (bool, error) {
+func bindingMatches(ctx context.Context, tx *dbTx, in IncomingUpdate, sessionID uuid.UUID) (bool, error) {
 	topics := []int64{in.TopicID}
 	if in.TopicID > 0 {
 		topics = append(topics, 0)
@@ -749,7 +742,7 @@ func bindingMatches(ctx context.Context, tx pgx.Tx, in IncomingUpdate, sessionID
 	return false, nil
 }
 
-func queueUIResponse(ctx context.Context, tx pgx.Tx, in IncomingUpdate, result AcceptResult) error {
+func queueUIResponse(ctx context.Context, tx *dbTx, in IncomingUpdate, result AcceptResult) error {
 	if result.View == "queued" && result.CommandID != "" {
 		var prompt bool
 		if err := tx.QueryRow(ctx, `SELECT operation='start_turn' FROM commands WHERE command_id=$1`, result.CommandID).Scan(&prompt); err != nil {
@@ -765,7 +758,7 @@ func queueUIResponse(ctx context.Context, tx pgx.Tx, in IncomingUpdate, result A
 	}
 	_, err = tx.Exec(ctx, `INSERT INTO telegram_deliveries
         (delivery_id, bot_id, chat_id, message_thread_id, kind, payload)
-        VALUES ($1,$2,$3,$4,'ui_response',$5)`, uuid.New(), in.BotID, in.ChatID, in.TopicID, payload)
+        VALUES ($1,$2,$3,$4,'ui_response',$5)`, uuid.New(), in.BotID, in.ChatID, in.TopicID, string(payload))
 	if err != nil {
 		return fmt.Errorf("registry: queue UI response: %w", err)
 	}
@@ -789,9 +782,9 @@ func (s *Store) pendingCommands(ctx context.Context, workerID *uuid.UUID, limit 
 		return nil, errors.New("registry: invalid command limit")
 	}
 	query := `SELECT payload FROM commands WHERE
-        (status='pending' OR (status='dispatched' AND dispatched_at <= now()-$1::interval))
-        AND (expires_at IS NULL OR expires_at > now())`
-	args := []any{dispatchedCommandRetryAfter.String()}
+        (status='pending' OR (status='dispatched' AND dispatched_at <= $1))
+        AND (expires_at IS NULL OR expires_at > (strftime('%Y-%m-%dT%H:%M:%f','now') || '000000Z'))`
+	args := []any{time.Now().UTC().Add(-dispatchedCommandRetryAfter)}
 	if workerID != nil {
 		query += " AND worker_id=$2"
 		args = append(args, *workerID)
@@ -822,7 +815,7 @@ func (s *Store) pendingCommands(ctx context.Context, workerID *uuid.UUID, limit 
 }
 
 func (s *Store) MarkDispatched(ctx context.Context, workerID, commandID uuid.UUID) error {
-	ct, err := s.pool.Exec(ctx, `UPDATE commands SET status='dispatched', dispatched_at=now()
+	ct, err := s.pool.Exec(ctx, `UPDATE commands SET status='dispatched', dispatched_at=(strftime('%Y-%m-%dT%H:%M:%f','now') || '000000Z')
 		WHERE command_id=$1 AND worker_id=$2 AND status IN ('pending','dispatched')`, commandID, workerID)
 	if err != nil {
 		return fmt.Errorf("registry: mark command dispatched: %w", err)
@@ -838,7 +831,7 @@ func (s *Store) AcknowledgeCommand(ctx context.Context, workerID, connectionID u
 	if err != nil {
 		return ErrEventTarget
 	}
-	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
+	tx, err := s.pool.BeginTx(ctx, TxOptions{})
 	if err != nil {
 		return fmt.Errorf("registry: begin command acknowledgement: %w", err)
 	}
@@ -852,7 +845,7 @@ func (s *Store) AcknowledgeCommand(ctx context.Context, workerID, connectionID u
 	} else if ack.Status != "accepted" && ack.Status != "duplicate" {
 		status, code, message = "failed", ack.Status, "worker rejected command"
 	}
-	ct, err := tx.Exec(ctx, `UPDATE commands SET status=$3, acknowledged_at=now(), error_code=NULLIF($4,''), error_message=NULLIF($5,'')
+	ct, err := tx.Exec(ctx, `UPDATE commands SET status=$3, acknowledged_at=(strftime('%Y-%m-%dT%H:%M:%f','now') || '000000Z'), error_code=NULLIF($4,''), error_message=NULLIF($5,'')
         WHERE command_id=$1 AND worker_id=$2 AND status IN ('pending','dispatched','acknowledged')`, commandID, workerID, status, code, message)
 	if err != nil {
 		return fmt.Errorf("registry: acknowledge command: %w", err)
@@ -860,7 +853,7 @@ func (s *Store) AcknowledgeCommand(ctx context.Context, workerID, connectionID u
 	if ct.RowsAffected() == 0 {
 		var commandStatus string
 		err = tx.QueryRow(ctx, "SELECT status FROM commands WHERE command_id=$1 AND worker_id=$2", commandID, workerID).Scan(&commandStatus)
-		if errors.Is(err, pgx.ErrNoRows) {
+		if errors.Is(err, sql.ErrNoRows) {
 			return ErrEventTarget
 		}
 		if err != nil {
@@ -877,11 +870,11 @@ func (s *Store) AcknowledgeCommand(ctx context.Context, workerID, connectionID u
 }
 
 func commandTerminalNoop(ctx context.Context, db interface {
-	QueryRow(context.Context, string, ...any) pgx.Row
+	QueryRow(context.Context, string, ...any) *dbRow
 }, workerID, commandID uuid.UUID, action string) error {
 	var status string
 	err := db.QueryRow(ctx, "SELECT status FROM commands WHERE command_id=$1 AND worker_id=$2", commandID, workerID).Scan(&status)
-	if errors.Is(err, pgx.ErrNoRows) {
+	if errors.Is(err, sql.ErrNoRows) {
 		return ErrEventTarget
 	}
 	if err != nil {
@@ -914,19 +907,19 @@ func (s *Store) expireCommands(ctx context.Context, limit int) (int, error) {
 	if limit < 1 || limit > 1000 {
 		return 0, errors.New("registry: invalid command expiry limit")
 	}
-	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
+	tx, err := s.pool.BeginTx(ctx, TxOptions{})
 	if err != nil {
 		return 0, fmt.Errorf("registry: begin command expiry: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 	rows, err := tx.Query(ctx, `WITH due AS (
             SELECT command_id FROM commands
-            WHERE status IN ('pending','dispatched') AND expires_at IS NOT NULL AND expires_at <= now()
-            ORDER BY expires_at, created_at FOR UPDATE SKIP LOCKED LIMIT $1
+            WHERE status IN ('pending','dispatched') AND expires_at IS NOT NULL AND expires_at <= (strftime('%Y-%m-%dT%H:%M:%f','now') || '000000Z')
+            ORDER BY expires_at, created_at LIMIT $1
         )
-        UPDATE commands command SET status='expired', completed_at=now(), error_code='expired', error_message='command expired before acknowledgement'
-        FROM due WHERE command.command_id=due.command_id
-        RETURNING command.command_id, command.telegram_bot_id, command.telegram_chat_id, command.telegram_message_thread_id`, limit)
+        UPDATE commands SET status='expired', completed_at=(strftime('%Y-%m-%dT%H:%M:%f','now') || '000000Z'), error_code='expired', error_message='command expired before acknowledgement'
+        WHERE command_id IN (SELECT command_id FROM due)
+        RETURNING command_id, telegram_bot_id, telegram_chat_id, telegram_message_thread_id`, limit)
 	if err != nil {
 		return 0, fmt.Errorf("registry: expire commands: %w", err)
 	}
@@ -965,7 +958,7 @@ func (s *Store) expireCommands(ctx context.Context, limit int) (int, error) {
 		}
 		if _, err := tx.Exec(ctx, `INSERT INTO telegram_deliveries
             (delivery_id, bot_id, chat_id, message_thread_id, kind, payload)
-			VALUES ($1,$2,$3,$4,'ui_response',$5)`, uuid.New(), *command.botID, *command.chatID, topic, payload); err != nil {
+			VALUES ($1,$2,$3,$4,'ui_response',$5)`, uuid.New(), *command.botID, *command.chatID, topic, string(payload)); err != nil {
 			return 0, fmt.Errorf("registry: queue command expiry response: %w", err)
 		}
 	}

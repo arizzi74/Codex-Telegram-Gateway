@@ -1,6 +1,6 @@
 # Codex Telegram control plane
 
-A Go gateway, PostgreSQL registry, and Linux/macOS worker for controlling local
+A Go gateway, embedded SQLite registry, and Linux/macOS worker for controlling local
 Codex sessions through an allowlisted Telegram bot. The gateway includes a
 passkey-authenticated admin console. Workers supervise private Codex app-server
 processes and support local terminal attachment.
@@ -10,7 +10,7 @@ processes and support local terminal attachment.
 - **Gateway:** receives Telegram updates, manages worker connections, and serves
   the passkey-authenticated admin console.
 - **Registry:** stores routing, commands, events, approvals, and Telegram
-  delivery state in PostgreSQL.
+  delivery state in a local SQLite file.
 - **Worker:** runs on a development machine, supervises Codex app servers, and
   executes commands within configured workspace roots.
 - **Local helper:** opens a terminal interface against a private app-server
@@ -19,7 +19,7 @@ processes and support local terminal attachment.
 ## Configuration and startup
 
 Use the [example configuration](examples/) as a starting point. Set the gateway's
-public HTTPS URL, database environment variable, and Telegram webhook secret
+public HTTPS URL, SQLite `database_path`, and Telegram webhook secret
 environment variable for your deployment. Configure each worker with its gateway
 WebSocket URL, enrollment credential, state-file location, allowed workspaces,
 and runtime profiles.
@@ -35,8 +35,10 @@ codex-gateway --config /path/to/gateway.json serve
 codex-worker --config /path/to/worker.json run
 ```
 
-The gateway process needs the database and webhook-secret environment variables
-named in its configuration. The worker needs a private enrollment-token file
+The gateway creates its SQLite database at `database_path`; relative paths are
+resolved against the configuration directory. Use a local disk and a private,
+writable directory. It needs the webhook-secret environment variable named in
+its configuration; no database server or database credentials are required. The worker needs a private enrollment-token file
 and access to the Codex executable. Use `codex-worker status` and
 `codex-worker doctor` to inspect the worker and its runtime compatibility.
 When using a custom configuration file, pass the same `--config` option to
@@ -78,7 +80,7 @@ to start fresh. Merely selecting a session does not take its writer lock.
 ## Admin console
 
 To enroll the first administrator, run this with the gateway's configuration
-and database environment available:
+and access to its SQLite database:
 
 ```sh
 codex-gateway --config /path/to/gateway.json admin bootstrap
@@ -119,26 +121,28 @@ socket. No Codex listener is exposed over the network.
 
 ## Build and test
 
-Requires Go 1.26+, PostgreSQL 14+, and Codex CLI **0.154.0** for live workers.
+Requires Go 1.26+ and Codex CLI **0.154.0** for live workers.
 Unit and integration tests use a fake Codex server and need no model credentials.
-PostgreSQL integration tests create and remove isolated schemas.
+All database integration tests run automatically using isolated temporary SQLite
+files. The pure-Go SQLite driver also works with `CGO_ENABLED=0`.
 
 ```sh
 go test ./...
-TEST_DATABASE_URL='postgres://TEST_USER:TEST_PASSWORD@localhost:5432/telegramgw_test?sslmode=disable' go test -race ./... -timeout=90s
+go test -race ./... -timeout=90s
 make lint
-make build VERSION=0.2.1
-make release VERSION=0.2.1
+make build VERSION=0.3.0
+make release VERSION=0.3.0
 ```
-
-Replace the test database placeholders with credentials for an isolated local
-test database. The example connection disables TLS for local testing.
 
 `bin/` contains local executables. `dist/` contains stripped `CGO_ENABLED=0`
 executables, release archives, and SHA-256 checksums for Linux amd64/arm64
 (gateway, worker, helper) and macOS amd64/arm64 (worker and helper).
-The CI workflow runs tests with PostgreSQL, checks formatting/vet, and builds
+The CI workflow runs the SQLite integration and race tests, checks formatting/vet,
+and builds
 and verifies the release archives. A hosted CI run requires a remote repository.
+
+Existing PostgreSQL installations must use the verified [migration procedure](docs/operations.md#switching-from-postgresql)
+before starting this version. Changing the configuration alone does not transfer data.
 
 ## Design and operations
 

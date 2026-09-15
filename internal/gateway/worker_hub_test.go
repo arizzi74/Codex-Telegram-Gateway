@@ -7,7 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
-	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -17,39 +17,18 @@ import (
 	"github.com/iaia/telegramgw/internal/auth"
 	"github.com/iaia/telegramgw/internal/protocol"
 	"github.com/iaia/telegramgw/internal/registry"
-	"github.com/jackc/pgx/v5"
 )
 
 func testRegistry(t *testing.T) *registry.Store {
 	t.Helper()
-	database := os.Getenv("TEST_DATABASE_URL")
-	if database == "" {
-		t.Skip("TEST_DATABASE_URL required for PostgreSQL acceptance tests")
-	}
 	ctx := context.Background()
-	base, err := pgx.Connect(ctx, database)
+	store, err := registry.Open(ctx, filepath.Join(t.TempDir(), "gateway.db"))
 	if err != nil {
-		t.Fatal(err)
-	}
-	schema := "hub_test_" + strings.ReplaceAll(uuid.NewString(), "-", "")
-	if _, err = base.Exec(ctx, "CREATE SCHEMA "+pgx.Identifier{schema}.Sanitize()); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		base.Exec(context.Background(), "DROP SCHEMA "+pgx.Identifier{schema}.Sanitize()+" CASCADE")
-		base.Close(context.Background())
-	})
-	sep := "?"
-	if strings.Contains(database, "?") {
-		sep = "&"
-	}
-	store, err := registry.Open(ctx, database+sep+"search_path="+schema)
-	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("open isolated SQLite store: %v", err)
 	}
 	t.Cleanup(store.Close)
-	if err = store.Migrate(ctx); err != nil {
-		t.Fatal(err)
+	if err := store.Migrate(ctx); err != nil {
+		t.Fatalf("migrate isolated SQLite store: %v", err)
 	}
 	return store
 }

@@ -28,18 +28,19 @@ type DeliveryChunk struct {
 	Payload json.RawMessage
 }
 
-// ClaimDeliveries leases due rows. A crashed sender's sending lease is made
-// pending again after 30 seconds before new rows are claimed.
+// ClaimDeliveries atomically leases due rows in one UPDATE statement. SQLite
+// serializes concurrent writers, so senders cannot claim the same live lease.
+// A crashed sender's lease becomes eligible again after 30 seconds.
 func (s *Store) ClaimDeliveries(ctx context.Context, limit int) ([]Delivery, error) {
 	if limit < 1 || limit > 100 {
 		return nil, errors.New("registry: invalid delivery claim limit")
 	}
 	rows, err := s.pool.Query(ctx, `WITH claimed AS (
- SELECT delivery_id FROM telegram_deliveries WHERE status IN ('pending','failed','sending') AND next_attempt_at <= now() ORDER BY created_at FOR UPDATE SKIP LOCKED LIMIT $1
+ SELECT delivery_id FROM telegram_deliveries WHERE status IN ('pending','failed','sending') AND next_attempt_at <= (strftime('%Y-%m-%dT%H:%M:%f','now') || '000000Z') ORDER BY created_at LIMIT $1
 )
-UPDATE telegram_deliveries d SET status='sending', attempt_count=d.attempt_count+1, next_attempt_at=now()+interval '30 seconds'
-FROM claimed WHERE d.delivery_id=claimed.delivery_id
-RETURNING d.delivery_id,d.bot_id,d.chat_id,d.message_thread_id,d.kind,d.payload,d.attempt_count`, limit)
+UPDATE telegram_deliveries SET status='sending', attempt_count=attempt_count+1, next_attempt_at=(strftime('%Y-%m-%dT%H:%M:%f','now','+30 seconds') || '000000Z')
+WHERE delivery_id IN (SELECT delivery_id FROM claimed)
+RETURNING delivery_id,bot_id,chat_id,message_thread_id,kind,payload,attempt_count`, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -71,7 +72,7 @@ func (s *Store) MarkDeliverySent(ctx context.Context, id string, messageID int64
 	defer tx.Rollback(ctx)
 	var bot string
 	var chat int64
-	if err = tx.QueryRow(ctx, `UPDATE telegram_deliveries SET status='sent', sent_at=now(), telegram_message_id=$2, last_error=NULL WHERE delivery_id=$1 AND status='sending' RETURNING bot_id,chat_id`, deliveryID, messageID).Scan(&bot, &chat); err != nil {
+	if err = tx.QueryRow(ctx, `UPDATE telegram_deliveries SET status='sent', sent_at=(strftime('%Y-%m-%dT%H:%M:%f','now') || '000000Z'), telegram_message_id=$2, last_error=NULL WHERE delivery_id=$1 AND status='sending' RETURNING bot_id,chat_id`, deliveryID, messageID).Scan(&bot, &chat); err != nil {
 		return err
 	}
 	if err := checkpointTelegramProgress(ctx, tx, deliveryID, -1, messageID); err != nil {
@@ -82,7 +83,7 @@ func (s *Store) MarkDeliverySent(ctx context.Context, id string, messageID int64
 		if err != nil {
 			return err
 		}
-		_, err = tx.Exec(ctx, `INSERT INTO bot_message_routes(bot_id,chat_id,message_id,session_id,turn_id,approval_id) VALUES($1,$2,$3,$4,NULLIF($5,''),NULLIF($6,'')::uuid) ON CONFLICT(bot_id,chat_id,message_id) DO NOTHING`, bot, chat, messageID, sid, turnID, approvalID)
+		_, err = tx.Exec(ctx, `INSERT INTO bot_message_routes(bot_id,chat_id,message_id,session_id,turn_id,approval_id) VALUES($1,$2,$3,$4,NULLIF($5,''),NULLIF($6,'')) ON CONFLICT(bot_id,chat_id,message_id) DO NOTHING`, bot, chat, messageID, sid, turnID, approvalID)
 		if err != nil {
 			return err
 		}
@@ -120,7 +121,7 @@ func (s *Store) PrepareDeliveryChunks(ctx context.Context, id string, messages [
 	}
 	defer tx.Rollback(ctx)
 	var exists bool
-	if err = tx.QueryRow(ctx, `SELECT true FROM telegram_deliveries WHERE delivery_id=$1 AND status='sending' FOR UPDATE`, id).Scan(&exists); err != nil {
+	if err = tx.QueryRow(ctx, `SELECT true FROM telegram_deliveries WHERE delivery_id=$1 AND status='sending'`, id).Scan(&exists); err != nil {
 		return nil, err
 	}
 	var count int
@@ -141,7 +142,7 @@ func (s *Store) PrepareDeliveryChunks(ctx context.Context, id string, messages [
 }
 
 func (s *Store) ExtendDelivery(ctx context.Context, id string) error {
-	tag, err := s.pool.Exec(ctx, `UPDATE telegram_deliveries SET next_attempt_at=now()+interval '30 seconds' WHERE delivery_id=$1 AND status='sending'`, id)
+	tag, err := s.pool.Exec(ctx, `UPDATE telegram_deliveries SET next_attempt_at=(strftime('%Y-%m-%dT%H:%M:%f','now','+30 seconds') || '000000Z') WHERE delivery_id=$1 AND status='sending'`, id)
 	if err == nil && tag.RowsAffected() != 1 {
 		return errors.New("registry: delivery is not leased")
 	}
@@ -162,10 +163,10 @@ func (s *Store) MarkDeliveryChunkSent(ctx context.Context, id string, index int,
 	defer tx.Rollback(ctx)
 	var bot string
 	var chat int64
-	if err = tx.QueryRow(ctx, `SELECT bot_id,chat_id FROM telegram_deliveries WHERE delivery_id=$1 AND status='sending' FOR UPDATE`, deliveryID).Scan(&bot, &chat); err != nil {
+	if err = tx.QueryRow(ctx, `SELECT bot_id,chat_id FROM telegram_deliveries WHERE delivery_id=$1 AND status='sending'`, deliveryID).Scan(&bot, &chat); err != nil {
 		return err
 	}
-	if _, err = tx.Exec(ctx, `UPDATE telegram_delivery_chunks SET status='sent',telegram_message_id=$3,sent_at=now() WHERE delivery_id=$1 AND chunk_index=$2 AND status='pending'`, deliveryID, index, messageID); err != nil {
+	if _, err = tx.Exec(ctx, `UPDATE telegram_delivery_chunks SET status='sent',telegram_message_id=$3,sent_at=(strftime('%Y-%m-%dT%H:%M:%f','now') || '000000Z') WHERE delivery_id=$1 AND chunk_index=$2 AND status='pending'`, deliveryID, index, messageID); err != nil {
 		return err
 	}
 	if err := checkpointTelegramProgress(ctx, tx, deliveryID, index, messageID); err != nil {
@@ -180,7 +181,7 @@ func (s *Store) MarkDeliveryChunkSent(ctx context.Context, id string, index int,
 		if err != nil {
 			return err
 		}
-		if _, err = tx.Exec(ctx, `INSERT INTO bot_message_routes(bot_id,chat_id,message_id,session_id,turn_id,approval_id,question_id) VALUES($1,$2,$3,$4,NULLIF($5,''),NULLIF($6,'')::uuid,NULLIF($7,'')) ON CONFLICT DO NOTHING`, bot, chat, messageID, sid, turnID, approvalID, questionID); err != nil {
+		if _, err = tx.Exec(ctx, `INSERT INTO bot_message_routes(bot_id,chat_id,message_id,session_id,turn_id,approval_id,question_id) VALUES($1,$2,$3,$4,NULLIF($5,''),NULLIF($6,''),NULLIF($7,'')) ON CONFLICT DO NOTHING`, bot, chat, messageID, sid, turnID, approvalID, questionID); err != nil {
 			return err
 		}
 	}
@@ -189,7 +190,7 @@ func (s *Store) MarkDeliveryChunkSent(ctx context.Context, id string, index int,
 		return err
 	}
 	if !pending {
-		_, err = tx.Exec(ctx, `UPDATE telegram_deliveries SET status='sent',sent_at=now(),telegram_message_id=$2,last_error=NULL WHERE delivery_id=$1`, deliveryID, messageID)
+		_, err = tx.Exec(ctx, `UPDATE telegram_deliveries SET status='sent',sent_at=(strftime('%Y-%m-%dT%H:%M:%f','now') || '000000Z'),telegram_message_id=$2,last_error=NULL WHERE delivery_id=$1`, deliveryID, messageID)
 		if err != nil {
 			return err
 		}
@@ -208,6 +209,6 @@ func (s *Store) RetryDelivery(ctx context.Context, id string, retryAfter time.Du
 	if retryAfter > time.Hour {
 		retryAfter = time.Hour
 	}
-	_, err = s.pool.Exec(ctx, `UPDATE telegram_deliveries SET status='failed', next_attempt_at=now()+$2::interval, last_error=$3 WHERE delivery_id=$1 AND status='sending'`, deliveryID, retryAfter.String(), reason)
+	_, err = s.pool.Exec(ctx, `UPDATE telegram_deliveries SET status='failed', next_attempt_at=$2, last_error=$3 WHERE delivery_id=$1 AND status='sending'`, deliveryID, time.Now().UTC().Add(retryAfter), reason)
 	return err
 }

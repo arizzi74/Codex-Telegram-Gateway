@@ -44,7 +44,7 @@ func TestAdminBootstrapCeremonyReplayAndExpiryIntegration(t *testing.T) {
 		t.Fatalf("ceremony replay = %v", err)
 	}
 	expired := newAdminTestCeremony(t, store, ctx, handle)
-	if _, err = store.pool.Exec(ctx, `UPDATE admin_challenges SET expires_at=now()-interval '1 second' WHERE challenge_id=$1`, expired.ID); err != nil {
+	if _, err = store.pool.Exec(ctx, `UPDATE admin_challenges SET expires_at=(strftime('%Y-%m-%dT%H:%M:%f','now','-1 second') || '000000Z') WHERE challenge_id=$1`, expired.ID); err != nil {
 		t.Fatal(err)
 	}
 	if _, err = store.ReadAdminCeremony(ctx, expired.ID, "registration", expired.Binding); !errors.Is(err, ErrAdminCeremonyInvalid) {

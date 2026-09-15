@@ -9,7 +9,6 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/iaia/telegramgw/internal/protocol"
-	"github.com/jackc/pgx/v5"
 )
 
 // TelegramDeletion identifies one already-sent temporary message. Deletion is
@@ -40,7 +39,7 @@ func (s *Store) SuppressProgressDelivery(ctx context.Context, id string) (bool, 
             WHERE terminal.runtime_id=progress.runtime_id
               AND ((terminal.runtime_generation=progress.runtime_generation
                     AND ((terminal.session_id=progress.session_id
-                          AND terminal.payload->>'turn_id'=progress.payload->>'turn_id'
+                          AND json_extract(terminal.payload, '$.turn_id')=json_extract(progress.payload, '$.turn_id')
                           AND terminal.kind IN ('turn_completed','turn_failed','turn_interrupted'))
                          OR terminal.kind IN ('runtime_stopped','runtime_failed')))
                    OR (terminal.kind='runtime_started' AND terminal.runtime_generation>progress.runtime_generation))
@@ -65,12 +64,12 @@ func (s *Store) SkipDelivery(ctx context.Context, id string) error {
 	return err
 }
 
-func checkpointTelegramProgress(ctx context.Context, tx pgx.Tx, deliveryID uuid.UUID, index int, messageID int64) error {
+func checkpointTelegramProgress(ctx context.Context, tx *dbTx, deliveryID uuid.UUID, index int, messageID int64) error {
 	_, err := tx.Exec(ctx, `INSERT INTO telegram_progress_messages
         (cleanup_id,delivery_id,chunk_index,bot_id,chat_id,message_thread_id,telegram_message_id,
          runtime_id,runtime_generation,session_id,turn_id)
         SELECT $1,delivery.delivery_id,$2,delivery.bot_id,delivery.chat_id,delivery.message_thread_id,$3,
-               event.runtime_id,event.runtime_generation,event.session_id,event.payload->>'turn_id'
+               event.runtime_id,event.runtime_generation,event.session_id,json_extract(event.payload, '$.turn_id')
         FROM telegram_deliveries delivery JOIN events event ON event.event_id=delivery.event_id
         WHERE delivery.delivery_id=$4 AND delivery.kind='agent_progress_message'
         ON CONFLICT(delivery_id,chunk_index) DO NOTHING`, uuid.New(), index, messageID, deliveryID)
@@ -91,13 +90,13 @@ func (s *Store) ClaimTelegramDeletions(ctx context.Context, limit int) ([]Telegr
 	}
 	rows, err := s.pool.Query(ctx, `WITH due AS (
         SELECT progress.cleanup_id FROM telegram_progress_messages progress
-        WHERE progress.status IN ('pending','deleting') AND progress.next_attempt_at<=now()
+        WHERE progress.status IN ('pending','deleting') AND progress.next_attempt_at<=(strftime('%Y-%m-%dT%H:%M:%f','now') || '000000Z')
           AND (EXISTS (
             SELECT 1 FROM telegram_deliveries delivery JOIN events terminal ON terminal.event_id=delivery.event_id
             WHERE delivery.status='sent' AND delivery.bot_id=progress.bot_id AND delivery.chat_id=progress.chat_id
               AND delivery.message_thread_id=progress.message_thread_id AND terminal.runtime_id=progress.runtime_id
               AND terminal.runtime_generation=progress.runtime_generation
-              AND ((terminal.session_id=progress.session_id AND terminal.payload->>'turn_id'=progress.turn_id
+              AND ((terminal.session_id=progress.session_id AND json_extract(terminal.payload, '$.turn_id')=progress.turn_id
                     AND terminal.kind IN ('turn_completed','turn_failed','turn_interrupted'))
                    OR terminal.kind='runtime_failed')
           ) OR (NOT EXISTS (
@@ -105,7 +104,7 @@ func (s *Store) ClaimTelegramDeletions(ctx context.Context, limit int) ([]Telegr
             WHERE delivery.bot_id=progress.bot_id AND delivery.chat_id=progress.chat_id
               AND delivery.message_thread_id=progress.message_thread_id AND terminal.runtime_id=progress.runtime_id
               AND terminal.runtime_generation=progress.runtime_generation
-              AND ((terminal.session_id=progress.session_id AND terminal.payload->>'turn_id'=progress.turn_id
+              AND ((terminal.session_id=progress.session_id AND json_extract(terminal.payload, '$.turn_id')=progress.turn_id
                     AND terminal.kind IN ('turn_completed','turn_failed','turn_interrupted'))
                    OR terminal.kind='runtime_failed')
           ) AND (EXISTS (
@@ -117,12 +116,12 @@ func (s *Store) ClaimTelegramDeletions(ctx context.Context, limit int) ([]Telegr
               AND (runtime.generation>progress.runtime_generation
                    OR (runtime.generation=progress.runtime_generation AND runtime.state='stopped'))
           ))))
-        ORDER BY progress.next_attempt_at,progress.cleanup_id FOR UPDATE OF progress SKIP LOCKED LIMIT $1
-    ) UPDATE telegram_progress_messages progress
-      SET status='deleting',attempt_count=progress.attempt_count+1,next_attempt_at=now()+interval '30 seconds'
-      FROM due WHERE progress.cleanup_id=due.cleanup_id
-      RETURNING progress.cleanup_id,progress.bot_id,progress.chat_id,progress.message_thread_id,
-                progress.telegram_message_id,progress.attempt_count`, limit)
+        ORDER BY progress.next_attempt_at,progress.cleanup_id LIMIT $1
+    ) UPDATE telegram_progress_messages
+      SET status='deleting',attempt_count=attempt_count+1,next_attempt_at=(strftime('%Y-%m-%dT%H:%M:%f','now','+30 seconds') || '000000Z')
+      WHERE cleanup_id IN (SELECT cleanup_id FROM due)
+      RETURNING cleanup_id,bot_id,chat_id,message_thread_id,
+                telegram_message_id,attempt_count`, limit)
 	if err != nil {
 		return nil, fmt.Errorf("registry: claim temporary-message deletions: %w", err)
 	}
@@ -142,7 +141,7 @@ func (s *Store) MarkTelegramDeletionDone(ctx context.Context, id string) error {
 	if _, err := uuid.Parse(id); err != nil {
 		return errors.New("registry: invalid deletion ID")
 	}
-	_, err := s.pool.Exec(ctx, `UPDATE telegram_progress_messages SET status='deleted',deleted_at=now(),last_error=NULL
+	_, err := s.pool.Exec(ctx, `UPDATE telegram_progress_messages SET status='deleted',deleted_at=(strftime('%Y-%m-%dT%H:%M:%f','now') || '000000Z'),last_error=NULL
         WHERE cleanup_id=$1 AND status='deleting'`, id)
 	return err
 }
@@ -157,7 +156,7 @@ func (s *Store) RetryTelegramDeletion(ctx context.Context, id string, retryAfter
 	if retryAfter > time.Hour {
 		retryAfter = time.Hour
 	}
-	_, err := s.pool.Exec(ctx, `UPDATE telegram_progress_messages SET status='pending',next_attempt_at=now()+$2::interval,last_error=$3
-        WHERE cleanup_id=$1 AND status='deleting'`, id, retryAfter.String(), reason)
+	_, err := s.pool.Exec(ctx, `UPDATE telegram_progress_messages SET status='pending',next_attempt_at=$2,last_error=$3
+        WHERE cleanup_id=$1 AND status='deleting'`, id, time.Now().UTC().Add(retryAfter), reason)
 	return err
 }

@@ -37,7 +37,7 @@ const (
 type GatewayConfig struct {
 	Listen            string        `json:"listen"`
 	PublicBaseURL     string        `json:"public_base_url"`
-	DatabaseURLEnv    string        `json:"database_url_env"`
+	DatabasePath      string        `json:"database_path"`
 	BotSecretsFile    string        `json:"bot_secrets_file"`
 	WebhookSecretEnv  string        `json:"webhook_secret_env"`
 	AllowedUserIDs    []int64       `json:"allowed_user_ids"`
@@ -97,6 +97,13 @@ func LoadGateway(path string) (GatewayConfig, error) {
 	cfg, err := raw.config()
 	if err != nil {
 		return GatewayConfig{}, err
+	}
+	if !filepath.IsAbs(cfg.DatabasePath) {
+		cfg.DatabasePath = filepath.Join(filepath.Dir(path), cfg.DatabasePath)
+	}
+	cfg.DatabasePath, err = filepath.Abs(cfg.DatabasePath)
+	if err != nil {
+		return GatewayConfig{}, fmt.Errorf("gateway config: database_path: %w", err)
 	}
 	if cfg.BotSecretsFile == "" {
 		cfg.BotSecretsFile = DefaultBotSecretsFile
@@ -212,7 +219,7 @@ func LoadWorker(path string) (WorkerConfig, error) {
 type gatewayJSON struct {
 	Listen            string  `json:"listen"`
 	PublicBaseURL     string  `json:"public_base_url"`
-	DatabaseURLEnv    string  `json:"database_url_env"`
+	DatabasePath      string  `json:"database_path"`
 	BotSecretsFile    string  `json:"bot_secrets_file"`
 	WebhookSecretEnv  string  `json:"webhook_secret_env"`
 	AllowedUserIDs    []int64 `json:"allowed_user_ids"`
@@ -243,7 +250,7 @@ func (r gatewayJSON) config() (GatewayConfig, error) {
 	if heartbeat <= 0 || unreachable <= heartbeat || expiry <= 0 || readHeader <= 0 {
 		return GatewayConfig{}, errors.New("gateway config: durations must be positive and unreachable_after must exceed heartbeat_interval")
 	}
-	cfg := GatewayConfig{Listen: r.Listen, PublicBaseURL: r.PublicBaseURL, DatabaseURLEnv: r.DatabaseURLEnv, BotSecretsFile: r.BotSecretsFile, WebhookSecretEnv: r.WebhookSecretEnv, AllowedUserIDs: r.AllowedUserIDs, AllowedChatIDs: r.AllowedChatIDs, HeartbeatInterval: heartbeat, UnreachableAfter: unreachable, CommandExpiry: expiry, ReadHeaderTimeout: readHeader}
+	cfg := GatewayConfig{Listen: r.Listen, PublicBaseURL: r.PublicBaseURL, DatabasePath: r.DatabasePath, BotSecretsFile: r.BotSecretsFile, WebhookSecretEnv: r.WebhookSecretEnv, AllowedUserIDs: r.AllowedUserIDs, AllowedChatIDs: r.AllowedChatIDs, HeartbeatInterval: heartbeat, UnreachableAfter: unreachable, CommandExpiry: expiry, ReadHeaderTimeout: readHeader}
 	if cfg.Listen == "" {
 		cfg.Listen = DefaultGatewayListen
 	}
@@ -259,8 +266,11 @@ func (r gatewayJSON) config() (GatewayConfig, error) {
 	if err != nil || net.ParseIP(host) == nil || !net.ParseIP(host).IsLoopback() {
 		return GatewayConfig{}, errors.New("gateway config: listen must be a loopback IP and port behind nginx")
 	}
-	if strings.TrimSpace(cfg.DatabaseURLEnv) == "" || strings.TrimSpace(cfg.WebhookSecretEnv) == "" {
-		return GatewayConfig{}, errors.New("gateway config: database_url_env and webhook_secret_env are required")
+	if strings.TrimSpace(cfg.DatabasePath) == "" || strings.TrimSpace(cfg.WebhookSecretEnv) == "" {
+		return GatewayConfig{}, errors.New("gateway config: database_path and webhook_secret_env are required")
+	}
+	if cfg.DatabasePath == ":memory:" || strings.Contains(cfg.DatabasePath, "://") || strings.HasPrefix(cfg.DatabasePath, "file:") {
+		return GatewayConfig{}, errors.New("gateway config: database_path must be a local SQLite file path")
 	}
 	return cfg, nil
 }

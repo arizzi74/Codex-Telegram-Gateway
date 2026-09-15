@@ -108,7 +108,7 @@ the temporary messages for that turn. The final answer remains in the chat.
 Interrupted or failed turns leave their terminal notice and remove their
 progress messages. Progress received after a turn has ended is skipped.
 
-Message IDs and deletion retries are stored in PostgreSQL, so gateway restarts
+Message IDs and deletion retries are stored in SQLite, so gateway restarts
 and temporary Telegram errors do not lose cleanup work or resend the final
 answer. Cleanup follows the original chat/topic and turn even if you change
 the selected session. Telegram's Bot API permits deletion of these outgoing

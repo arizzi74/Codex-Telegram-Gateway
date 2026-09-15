@@ -6,9 +6,35 @@ the stated behavior. **Partial** means useful coverage exists but does not
 prove every part of the acceptance scenario. **Pending** requires a live or CI
 run that has not been recorded here.
 
-The PostgreSQL tests below require `TEST_DATABASE_URL`. They create a fresh
-schema and use migrations, so they exercise the real registry database without
-using a shared test schema.
+Database integration tests now run automatically against fresh temporary SQLite
+files. Historical entries below describe the release and backend tested on their
+recorded date; PostgreSQL outage evidence applies to the retired backend.
+
+## SQLite registry (2026-09-15)
+
+Version 0.3.0 passes `VERSION=0.3.0 ./scripts/ci.sh`: formatting, vet,
+all Go race tests (including every registry/admin/gateway/worker integration),
+Python migration tests, ten CGO-free cross-builds, and archive/binary checksums.
+All nine final Python migration regressions pass. No database server or test
+connection environment is required by CI.
+
+- SQLite tests verify WAL/FULL/foreign-key settings, private file/sidecar modes,
+  timestamp/UUID/JSON/BLOB round trips, immediate writer serialization across
+  Store instances, competing delivery and cleanup claims, rollback/reopen,
+  migration checksums, and immutable command/event constraints.
+- Event replay tests preserve JSON semantic equality, large-number precision,
+  duplicate-key handling, and legacy PostgreSQL timestamp precision.
+- A read-only rehearsal migrated 418 live rows across 20 tables and verified
+  content digests, row counts, foreign keys, and database integrity. Production
+  remained on PostgreSQL during the rehearsal.
+- A separate isolated PostgreSQL test-schema migration preserved 12 synthetic
+  rows covering SQL NULL versus JSON null, exact large/fractional JSON numbers,
+  binary credentials, large Telegram IDs, timestamps, and deferred ownership
+  foreign keys. Source row digests were unchanged; the test schema was removed.
+- The deployment helper passed release/service preflight. It preserves the
+  worker and runtime processes, backs up the source, and verifies a fresh worker
+  reconnection after gateway startup. Live cutover is recorded separately once
+  completed.
 
 ## Temporary Telegram progress (2026-09-14)
 
@@ -53,7 +79,7 @@ of the verification turn remains gated on delivery of that turn's final answer.
 
 | ID | Status | Current evidence | Remaining proof |
 | --- | --- | --- | --- |
-| AT-01 Worker registration | Verified | `internal/gateway:TestAT01RegistrationAT02CredentialRejection` connects over TLS WSS with an enrolled token and checks online state plus OS, architecture, version, and hostname in PostgreSQL. The current deployed worker is also enrolled and connected. | None; repeat the live enrollment check after a topology change. |
+| AT-01 Worker registration | Verified | `internal/gateway:TestAT01RegistrationAT02CredentialRejection` connects over TLS WSS with an enrolled token and checks online state plus OS, architecture, version, and hostname in the registry. The current deployed worker is also enrolled and connected. | None; repeat the live enrollment check after a topology change. |
 | AT-02 Invalid Worker credential | Verified | The same test rejects an invalid bearer token before metadata is recorded; `TestWorkerHelloCannotClaimAnotherIdentity` also rejects a valid token paired with another worker ID. | None for automated acceptance. |
 | AT-03 Discover sessions | Verified | `internal/worker:TestControlPlaneWorkerOutboxSurvivesGatewayRestartIntegration` starts the fake App Server with three threads, waits for all three in `registry.SessionSnapshot`, posts actual `/tgsessions <runtime-id>` through the webhook, and verifies the Telegram UI contains Alpha, Beta, and Gamma. `TestRuntimeDiscoverySubscribesOnlyLoadedWorkspaceThreadsOnce` covers loaded-thread reconciliation. | None. |
 | AT-04 Select session without affecting execution | Verified | The control-plane integration test starts A, selects B through Telegram, then verifies A retains its active turn and no additional `turn/start`, `turn/interrupt`, or `thread/resume` RPC occurs. | None. |
@@ -61,7 +87,7 @@ of the verification turn remains gated on delivery of that turn's final answer.
 | AT-06 Reply routing | Verified | The same routing integration test records a bot-message route for A, changes selection, and verifies a reply goes to A. Multi-question reply addressing is also covered by `TestAcceptTelegramMultiQuestionReplyRoutingIntegration`. | None for the routing invariant. |
 | AT-07 Duplicate Telegram update | Verified | `TestAcceptTelegramRoutingPriorityAndFrozenCommandIntegration` resubmits the same update ID and verifies the duplicate result; `telegram_updates` has the `(bot_id, update_id)` primary key and the accept transaction inserts it first. | None. |
 | AT-08 Duplicate Gateway command delivery | Verified | `internal/worker:TestAgentAcceptsDuplicateAndRejectsStaleGenerationWithoutRPC` delivers the same command twice and proves exactly one `turn/start` RPC occurs. `Store.Receive` persists the ledger before acknowledgement. | None for worker-side deduplication. |
-| AT-09 Gateway restart | Verified | `internal/worker:TestControlPlaneWorkerOutboxSurvivesGatewayRestartIntegration` uses real PostgreSQL, Hub, webhook, Dispatcher, Sender, worker WSS transport, bbolt, and fake App Server. It stops the gateway during a turn, emits a final event, verifies it in bbolt, restarts the gateway, reconnects, and verifies one Telegram final delivery. | None for the automated restart path. |
+| AT-09 Gateway restart | Verified | `internal/worker:TestControlPlaneWorkerOutboxSurvivesGatewayRestartIntegration` uses real SQLite, Hub, webhook, Dispatcher, Sender, worker WSS transport, bbolt, and fake App Server. It stops the gateway during a turn, emits a final event, verifies it in bbolt, restarts the gateway, reconnects, and verifies one Telegram final delivery. | None for the automated restart path. |
 | AT-10 Worker temporary network loss | Verified | The control-plane integration test closes only the captured worker WSS transport while keeping the HTTPS server, Agent, and fake App Server alive. It verifies Registry `unreachable`, the same local active turn/runtime, reconnect to `online`, and the three-session reconciliation snapshot. | None. |
 | AT-11 Stale runtime command | Verified | `internal/worker:TestAgentAcceptsDuplicateAndRejectsStaleGenerationWithoutRPC` verifies `rejected_stale_runtime` and that stale control does not reach Codex. `internal/registry:TestConnectionFencingAndRuntimeGenerationIntegration` covers persisted generation fencing. | None. |
 | AT-12 Correct approval | Verified | `internal/worker:TestAgentApprovalRequiresExactPendingRequestAndClears` verifies an approval response addresses the exact pending App Server request. `internal/registry:TestAcceptTelegramCommandsCallbacksAndDispatchIntegration` verifies callback claim/race handling creates only one immutable approval command. | None for the exact-target invariant. |
@@ -72,13 +98,13 @@ of the verification turn remains gated on delivery of that turn's final answer.
 | AT-17 Cross-session concurrency | Verified | The same agent test starts independent sessions concurrently while retaining the same-session one-active-turn limit. | None. |
 | AT-18 Runtime crash | Verified | `internal/worker:TestRuntimeClientCrashStartsNextGeneration` closes the fixture transport and checks a new generation. The control-plane integration test repeats the crash through a connected worker and verifies its three persisted session identities recover. | Live 2026-09-13: worker survived owned Codex SIGTERM, generation 2→3, new PID, stable session identities and fully acknowledged outbox. |
 | AT-19 Gateway database restart | Verified (live) | 2026-09-13: the PostgreSQL cluster was stopped. HTTPS `/healthz` remained 200 and `/readyz` became 503; the running worker and Codex PIDs remained alive and unchanged. After the cluster restart, `/readyz` returned 200. The control-plane test separately covers readiness/runtime isolation with an injected failed `Ping`. | Repeat after material deployment topology changes. |
-| AT-20 Worker cross-platform build | Verified (local CI job) | 2026-09-13: `scripts/ci.sh` completed with PostgreSQL: format check, `go vet ./...`, `go test -race ./...`, all ten CGO-free cross-build archives, and inner/outer SHA-256 verification. It builds `codex-worker` for Linux/Darwin × amd64/arm64. `.github/workflows/ci.yml` invokes this exact job. | Hosted workflow has not been triggered because this repository has no configured remote. |
+| AT-20 Worker cross-platform build | Verified (local CI job) | 2026-09-13: `scripts/ci.sh` completed with PostgreSQL: format check, `go vet ./...`, `go test -race ./...`, all ten CGO-free cross-build archives, and inner/outer SHA-256 verification. It builds `codex-worker` for Linux/Darwin × amd64/arm64. `.github/workflows/ci.yml` invokes this exact job. | See the latest hosted workflow for current CI results. |
 
 ## Hard invariants and security review
 
 | Requirement family | Evidence | Status |
 | --- | --- | --- |
-| Immutable Telegram target | `AcceptTelegram` takes an advisory transaction lock, deduplicates, resolves, and writes a command in one transaction. Migration `001_registry.sql` rejects routing-field updates. Routing integration tests cover selection, reply mapping, and duplicate updates. | Verified |
+| Immutable Telegram target | `AcceptTelegram` starts an immediate SQLite write transaction, deduplicates, resolves, and writes a command in one transaction. Migration `001_registry.sql` rejects routing-field updates. Routing integration tests cover selection, reply mapping, and duplicate updates. | Verified |
 | Durable Class A events | `Store.AppendEvent` accepts only durable event kinds, assigns a monotonic sequence in the bbolt transaction, and `Connection` deletes only after `event_ack`. `RecordResult` persists command outcome and event together. `TestConnectionReplaysOutboxAfterReconnectAndAcknowledges`, `TestStoreReopenPreservesLedgerOutboxAndGeneration`, and AT-09 cover replay. | Verified |
 | Gateway event ingestion | `Store.IngestEvent` fences the connection, verifies ordered/replayed sequence, writes event and projection transactionally, advances the watermark, then Hub sends `event_ack`. Registry event integration tests cover replay, rollback, stale generation, and cross-worker targets. | Verified |
 | Command dedupe and uncertain outcomes | `Store.Receive` writes the immutable command before dispatch. Duplicate command IDs return their prior record. Startup converts `executing` records to `outcome_unknown` and emits `command_result_unknown`; store tests cover this recovery. | Verified |

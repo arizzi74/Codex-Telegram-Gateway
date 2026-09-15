@@ -35,7 +35,7 @@ func (s *Store) ListTelegramTypingTargets(ctx context.Context, limit int) ([]Tel
           AND command.telegram_bot_id IS NOT NULL
           AND command.telegram_chat_id IS NOT NULL
           AND command.status IN ('pending', 'dispatched', 'acknowledged')
-          AND (command.expires_at IS NULL OR command.expires_at > now())
+          AND (command.expires_at IS NULL OR command.expires_at > (strftime('%Y-%m-%dT%H:%M:%f','now') || '000000Z'))
           AND worker.enabled = TRUE AND worker.connectivity = 'online'
           AND (command.session_id IS NULL OR EXISTS (
               SELECT 1 FROM telegram_bindings AS binding
@@ -61,9 +61,9 @@ func (s *Store) ListTelegramTypingTargets(ctx context.Context, limit int) ([]Tel
          AND event.runtime_id = session.runtime_id
          AND event.session_id = session.session_id
          AND event.kind = 'turn_started'
-         AND event.payload->>'turn_id' = session.active_turn_id
+         AND json_extract(event.payload, '$.turn_id') = session.active_turn_id
         JOIN commands AS command
-          ON command.command_id::text = event.payload->>'command_id'
+          ON command.command_id = json_extract(event.payload, '$.command_id')
          AND command.source = 'telegram'
         JOIN telegram_bindings AS binding
           ON binding.bot_id = command.telegram_bot_id

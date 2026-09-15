@@ -18,14 +18,11 @@ import (
 	"net/http/cookiejar"
 	"net/http/httptest"
 	"net/url"
-	"os"
-	"strings"
+	"path/filepath"
 	"testing"
 
 	"github.com/fxamacker/cbor/v2"
-	"github.com/google/uuid"
 	"github.com/iaia/telegramgw/internal/registry"
-	"github.com/jackc/pgx/v5"
 )
 
 const passkeyTestOrigin = "https://gateway.example.com"
@@ -143,40 +140,14 @@ func TestPasskeyRegistrationAndAuthenticationHTTP(t *testing.T) {
 
 func adminIntegrationStore(t *testing.T) *registry.Store {
 	t.Helper()
-	baseURL := os.Getenv("TEST_DATABASE_URL")
-	if baseURL == "" {
-		t.Skip("TEST_DATABASE_URL is not set")
-	}
 	ctx := context.Background()
-	connection, err := pgx.Connect(ctx, baseURL)
+	store, err := registry.Open(ctx, filepath.Join(t.TempDir(), "gateway.db"))
 	if err != nil {
-		t.Fatalf("connect TEST_DATABASE_URL: %v", err)
-	}
-	schema := "admin_registration_test_" + strings.ReplaceAll(uuid.NewString(), "-", "")
-	if _, err = connection.Exec(ctx, "CREATE SCHEMA "+schema); err != nil {
-		connection.Close(ctx)
-		t.Fatalf("create isolated test schema: %v", err)
-	}
-	t.Cleanup(func() {
-		if _, cleanupErr := connection.Exec(context.Background(), "DROP SCHEMA "+schema+" CASCADE"); cleanupErr != nil {
-			t.Errorf("drop isolated test schema %s: %v", schema, cleanupErr)
-		}
-		connection.Close(context.Background())
-	})
-	parsed, err := url.Parse(baseURL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	query := parsed.Query()
-	query.Set("search_path", schema)
-	parsed.RawQuery = query.Encode()
-	store, err := registry.Open(ctx, parsed.String())
-	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("open isolated SQLite store: %v", err)
 	}
 	t.Cleanup(store.Close)
-	if err = store.Migrate(ctx); err != nil {
-		t.Fatal(err)
+	if err := store.Migrate(ctx); err != nil {
+		t.Fatalf("migrate isolated SQLite store: %v", err)
 	}
 	return store
 }

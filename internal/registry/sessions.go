@@ -2,6 +2,7 @@ package registry
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,10 +12,9 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/iaia/telegramgw/internal/protocol"
-	"github.com/jackc/pgx/v5"
 )
 
-func upsertProtocolSession(ctx context.Context, tx pgx.Tx, workerID, runtimeID uuid.UUID, expectedID *uuid.UUID, session protocol.Session) error {
+func upsertProtocolSession(ctx context.Context, tx *dbTx, workerID, runtimeID uuid.UUID, expectedID *uuid.UUID, session protocol.Session) error {
 	id, err := uuid.Parse(session.ID)
 	if err != nil || session.WorkerID != workerID.String() || session.RuntimeID != runtimeID.String() ||
 		(expectedID != nil && id != *expectedID) || strings.TrimSpace(session.ThreadID) == "" || !validSessionState(session.State) {
@@ -29,14 +29,14 @@ func upsertProtocolSession(ctx context.Context, tx pgx.Tx, workerID, runtimeID u
          git_branch, git_root, state, active_turn_id, loaded, archived,
          discovered_at, last_activity_at, last_reconciled_at, metadata)
         VALUES ($1,$2,$3,$4,NULLIF($5,''),NULLIF($6,''),NULLIF($7,''),NULLIF($8,''),
-            NULLIF($9,''),$10,NULLIF($11,''),$12,$13,now(),$14,now(),'{}'::jsonb)
+            NULLIF($9,''),$10,NULLIF($11,''),$12,$13,(strftime('%Y-%m-%dT%H:%M:%f','now') || '000000Z'),$14,(strftime('%Y-%m-%dT%H:%M:%f','now') || '000000Z'),'{}')
         ON CONFLICT (session_id) DO UPDATE SET
             codex_thread_id = EXCLUDED.codex_thread_id, name = EXCLUDED.name,
             preview = EXCLUDED.preview, cwd = EXCLUDED.cwd, git_branch = EXCLUDED.git_branch,
             git_root = EXCLUDED.git_root, state = EXCLUDED.state,
             active_turn_id = EXCLUDED.active_turn_id, loaded = EXCLUDED.loaded,
             archived = EXCLUDED.archived, last_activity_at = EXCLUDED.last_activity_at,
-            last_reconciled_at = now()
+            last_reconciled_at = (strftime('%Y-%m-%dT%H:%M:%f','now') || '000000Z')
         WHERE sessions.worker_id = EXCLUDED.worker_id AND sessions.runtime_id = EXCLUDED.runtime_id`,
 		id, workerID, runtimeID, session.ThreadID, session.Name, session.Preview, session.CWD,
 		session.GitBranch, session.GitRoot, session.State, session.ActiveTurnID,
@@ -50,7 +50,7 @@ func upsertProtocolSession(ctx context.Context, tx pgx.Tx, workerID, runtimeID u
 	return nil
 }
 
-func ensureHistoricalSessionIdentity(ctx context.Context, tx pgx.Tx, workerID, runtimeID uuid.UUID, expectedID *uuid.UUID, session protocol.Session) error {
+func ensureHistoricalSessionIdentity(ctx context.Context, tx *dbTx, workerID, runtimeID uuid.UUID, expectedID *uuid.UUID, session protocol.Session) error {
 	id, err := uuid.Parse(session.ID)
 	if err != nil || session.WorkerID != workerID.String() || session.RuntimeID != runtimeID.String() ||
 		(expectedID != nil && id != *expectedID) || strings.TrimSpace(session.ThreadID) == "" {
@@ -62,7 +62,7 @@ func ensureHistoricalSessionIdentity(ctx context.Context, tx pgx.Tx, workerID, r
 	_, err = tx.Exec(ctx, `INSERT INTO sessions
         (session_id, worker_id, runtime_id, codex_thread_id, state, loaded,
          archived, discovered_at, last_reconciled_at, metadata)
-        VALUES ($1,$2,$3,$4,'not_loaded',FALSE,FALSE,now(),now(),'{}'::jsonb)
+        VALUES ($1,$2,$3,$4,'not_loaded',FALSE,FALSE,(strftime('%Y-%m-%dT%H:%M:%f','now') || '000000Z'),(strftime('%Y-%m-%dT%H:%M:%f','now') || '000000Z'),'{}')
         ON CONFLICT (session_id) DO NOTHING`, id, workerID, runtimeID, session.ThreadID)
 	if err != nil {
 		return fmt.Errorf("registry: retain historical session identity: %w", err)
@@ -70,11 +70,11 @@ func ensureHistoricalSessionIdentity(ctx context.Context, tx pgx.Tx, workerID, r
 	return nil
 }
 
-func setSessionWaiting(ctx context.Context, tx pgx.Tx, sessionID uuid.UUID, state string) error {
+func setSessionWaiting(ctx context.Context, tx *dbTx, sessionID uuid.UUID, state string) error {
 	if state != "waiting_approval" && state != "waiting_input" {
 		return ErrEventTarget
 	}
-	ct, err := tx.Exec(ctx, `UPDATE sessions SET state = $2, last_activity_at = now() WHERE session_id = $1`, sessionID, state)
+	ct, err := tx.Exec(ctx, `UPDATE sessions SET state = $2, last_activity_at = (strftime('%Y-%m-%dT%H:%M:%f','now') || '000000Z') WHERE session_id = $1`, sessionID, state)
 	if err != nil {
 		return fmt.Errorf("registry: update waiting session state: %w", err)
 	}
@@ -84,13 +84,13 @@ func setSessionWaiting(ctx context.Context, tx pgx.Tx, sessionID uuid.UUID, stat
 	return nil
 }
 
-func setSessionState(ctx context.Context, tx pgx.Tx, sessionID uuid.UUID, state, activeTurnID, terminalTurnID string) error {
+func setSessionState(ctx context.Context, tx *dbTx, sessionID uuid.UUID, state, activeTurnID, terminalTurnID string) error {
 	if !validSessionState(state) {
 		return ErrEventTarget
 	}
 	if terminalTurnID != "" {
 		ct, err := tx.Exec(ctx, `UPDATE sessions SET state = $2,
-            active_turn_id = NULL, last_activity_at = now()
+            active_turn_id = NULL, last_activity_at = (strftime('%Y-%m-%dT%H:%M:%f','now') || '000000Z')
             WHERE session_id = $1 AND (active_turn_id IS NULL OR active_turn_id = $3)`, sessionID, state, terminalTurnID)
 		if err != nil {
 			return fmt.Errorf("registry: update terminal session state: %w", err)
@@ -103,7 +103,7 @@ func setSessionState(ctx context.Context, tx pgx.Tx, sessionID uuid.UUID, state,
 		return nil
 	}
 	ct, err := tx.Exec(ctx, `UPDATE sessions SET state = $2,
-        active_turn_id = NULLIF($3, ''), last_activity_at = now()
+        active_turn_id = NULLIF($3, ''), last_activity_at = (strftime('%Y-%m-%dT%H:%M:%f','now') || '000000Z')
         WHERE session_id = $1`, sessionID, state, activeTurnID)
 	if err != nil {
 		return fmt.Errorf("registry: update session state: %w", err)
@@ -118,7 +118,7 @@ func setSessionState(ctx context.Context, tx pgx.Tx, sessionID uuid.UUID, state,
 // newly returned session only while the selection revision captured at accept
 // time is still current. This prevents a late new/fork result from undoing a
 // subsequent selection or disconnect.
-func bindCommandSession(ctx context.Context, tx pgx.Tx, commandID, sessionID uuid.UUID) error {
+func bindCommandSession(ctx context.Context, tx *dbTx, commandID, sessionID uuid.UUID) error {
 	var (
 		botID                   *string
 		userID, chatID, topicID *int64
@@ -130,7 +130,7 @@ func bindCommandSession(ctx context.Context, tx pgx.Tx, commandID, sessionID uui
         telegram_chat_id, telegram_message_thread_id, session_id, operation, payload
         FROM commands WHERE command_id=$1`, commandID).
 		Scan(&botID, &userID, &chatID, &topicID, &sourceSession, &operation, &payload)
-	if errors.Is(err, pgx.ErrNoRows) {
+	if errors.Is(err, sql.ErrNoRows) {
 		return ErrEventTarget
 	}
 	if err != nil {
@@ -185,7 +185,7 @@ func bindCommandSession(ctx context.Context, tx pgx.Tx, commandID, sessionID uui
 	}
 	if _, err := tx.Exec(ctx, `INSERT INTO telegram_bindings
         (bot_id, user_id, chat_id, message_thread_id, session_id, selected_at)
-        VALUES ($1,$2,$3,$4,$5,now())
+        VALUES ($1,$2,$3,$4,$5,(strftime('%Y-%m-%dT%H:%M:%f','now') || '000000Z'))
         ON CONFLICT (bot_id, user_id, chat_id, message_thread_id) DO UPDATE
 		SET session_id = EXCLUDED.session_id, selected_at = EXCLUDED.selected_at`,
 		*botID, *userID, *chatID, topic, sessionID); err != nil {
