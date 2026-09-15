@@ -21,6 +21,7 @@ import sys
 import tempfile
 import time
 import urllib.request
+import urllib.parse
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 CONFIG = pathlib.Path('/etc/codex-gateway/gateway.json')
@@ -55,6 +56,36 @@ def atomic_copy(source, destination):
             os.close(directory)
     finally:
         pathlib.Path(temporary).unlink(missing_ok=True)
+
+
+def postgres_environment(source):
+    # libpq does not expand a connection URI placed directly in PGDATABASE.
+    # Decode it into environment settings instead of exposing credentials in argv.
+    uri = urllib.parse.urlsplit(source)
+    if uri.scheme not in ('postgres', 'postgresql') or uri.fragment:
+        raise ValueError('source database setting must be a PostgreSQL connection URI')
+    environment = {'PATH': '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin',
+                   'LANG': 'C.UTF-8', 'PGCONNECT_TIMEOUT': '10'}
+    if uri.path and uri.path != '/':
+        environment['PGDATABASE'] = urllib.parse.unquote(uri.path[1:])
+    if uri.hostname:
+        environment['PGHOST'] = uri.hostname
+    if uri.port:
+        environment['PGPORT'] = str(uri.port)
+    if uri.username:
+        environment['PGUSER'] = urllib.parse.unquote(uri.username)
+    if uri.password is not None:
+        environment['PGPASSWORD'] = urllib.parse.unquote(uri.password)
+    names = {'host': 'PGHOST', 'hostaddr': 'PGHOSTADDR', 'port': 'PGPORT',
+             'user': 'PGUSER', 'password': 'PGPASSWORD', 'dbname': 'PGDATABASE',
+             'sslmode': 'PGSSLMODE', 'sslcert': 'PGSSLCERT', 'sslkey': 'PGSSLKEY',
+             'sslrootcert': 'PGSSLROOTCERT', 'connect_timeout': 'PGCONNECT_TIMEOUT',
+             'options': 'PGOPTIONS', 'service': 'PGSERVICE', 'passfile': 'PGPASSFILE'}
+    for key, value in urllib.parse.parse_qsl(uri.query, keep_blank_values=True):
+        if key not in names:
+            raise ValueError('unsupported source connection option')
+        environment[names[key]] = value
+    return environment
 
 
 def main():
@@ -133,8 +164,10 @@ def main():
                 source_url = values[0]
         if not source_url:
             raise ValueError('source database configuration is unavailable')
-        pg_environment = {'PATH': '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin', 'LANG': 'C.UTF-8',
-                          'PGDATABASE': source_url, 'PGCONNECT_TIMEOUT': '10'}
+        pg_environment = postgres_environment(source_url)
+        # Exercise the exact backup connection before stopping the live gateway.
+        output(['runuser', '-u', service.pw_name, '--', 'psql', '-X', '-q', '-A', '-t', '-w', '-c', 'SELECT 1'],
+               env=pg_environment)
         tools = database.parent / ('migration-tools-' + stamp)
         (tools / 'scripts').mkdir(parents=True, mode=0o700)
         shutil.copy2(ROOT / 'scripts/migrate-postgres-to-sqlite.py', tools / 'scripts/migrate-postgres-to-sqlite.py')
@@ -148,7 +181,7 @@ def main():
         run(['systemctl', 'stop', 'codex-gateway.service'])
         if migrating:
             with (backup / 'postgres.dump').open('xb') as dump:
-                run(['runuser', '-u', service.pw_name, '--', 'pg_dump', '--format=custom'],
+                run(['runuser', '-u', service.pw_name, '--', 'pg_dump', '--no-password', '--format=custom'],
                     env=pg_environment, stdout=dump, stderr=subprocess.DEVNULL)
                 dump.flush()
                 os.fsync(dump.fileno())
