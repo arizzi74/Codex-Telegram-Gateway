@@ -2,14 +2,17 @@
 
 The installer downloads prebuilt binaries from
 [GitHub Releases](https://github.com/arizzi74/Codex-Telegram-Gateway/releases).
-A Go toolchain and a repository checkout are not required on the target machine.
+A Go toolchain, Python and a repository checkout are not required on the target machine.
 Gateway packages support Linux amd64/arm64. Worker and terminal-helper packages
 support Linux and macOS, on amd64/arm64.
 
 ## Before installing
 
-Install Python 3.10+ and curl. Linux service installation uses systemd; macOS
-workers use launchd. Workers also need the supported Codex executable, its normal
+Install curl and provide `sha256sum` (Linux) or `shasum` (macOS). The bootstrap
+uses the system POSIX shell and standard utilities. Installation and updates run
+in the downloaded native Go manager. Linux binaries are statically linked;
+macOS binaries use the normal macOS system libraries. Linux service installation
+uses systemd; macOS workers use launchd. Workers also need the supported Codex executable, its normal
 account credentials, and access to their configured workspaces.
 
 Prepare the [gateway or worker JSON configuration](../examples/) first. For a
@@ -44,7 +47,7 @@ cannot install symlinks or paths outside the staging directory.
 Run on the Linux gateway host:
 
 ```sh
-sudo bash /tmp/codex-telegramgw-install.sh install gateway \
+sudo sh /tmp/codex-telegramgw-install.sh install gateway \
   --config /path/to/gateway.json \
   --secrets-env /path/to/secrets.env \
   --auto-update
@@ -60,7 +63,7 @@ The gateway uses SQLite; the installer does not install PostgreSQL.
 Run as the developer account that owns Codex and the workspaces:
 
 ```sh
-bash /tmp/codex-telegramgw-install.sh install worker \
+sh /tmp/codex-telegramgw-install.sh install worker \
   --config /path/to/worker.json \
   --auto-update
 ```
@@ -69,6 +72,15 @@ This installs both `codex-worker` and `codex-local` for the current user and set
 up the worker service. Relative configuration paths are resolved before the
 configuration is installed. Add `~/.local/bin` to the terminal's `PATH` if needed.
 
+With a prepared `worker.json`, the same installation fits in one command:
+
+```sh
+curl -fsSL --proto '=https' --proto-redir '=https' --tlsv1.2 https://raw.githubusercontent.com/arizzi74/Codex-Telegram-Gateway/main/scripts/install.sh | sh -s -- install worker --config ./worker.json --auto-update
+```
+
+The installer checks the configured Codex executable but does not install or
+update Codex itself. That runtime continues to use its own update mechanism.
+
 ## Adopt an existing installation
 
 For services already installed in the standard paths, use `adopt` instead of
@@ -76,14 +88,22 @@ For services already installed in the standard paths, use `adopt` instead of
 update manager:
 
 ```sh
-sudo bash /tmp/codex-telegramgw-install.sh adopt gateway --auto-update
-bash /tmp/codex-telegramgw-install.sh adopt worker --auto-update
+sudo sh /tmp/codex-telegramgw-install.sh adopt gateway --auto-update
+sh /tmp/codex-telegramgw-install.sh adopt worker --auto-update
 ```
 
 Gateway adoption also makes the configuration directory root-owned so the
 service account cannot change settings used by the privileged updater. Existing
 SQLite data and credentials remain in place. Worker adoption must run as its
 owning user.
+
+Existing Python-based updaters can install the first native-manager release
+through their normal update command. Its compatibility payload replaces the old
+`release-manager.py` file with the native executable; the filename may remain
+until the native manager installs its canonical `codex-telegramgw` path. It is
+an executable binary and no longer requires Python. Fresh installations use
+the canonical path directly. Older releases whose only standalone manager was
+Python cannot be selected with the new bootstrap.
 
 ## Check and apply updates
 
@@ -179,6 +199,13 @@ builds, and archive verification. Only after those checks pass does it publish
 the version's binaries, installer, update manager, and checksum manifest. It
 uploads a draft first so automatic updaters never select a partially uploaded
 release. Published releases are not overwritten; corrections use a new version.
+
+Each release publishes ten component archives, four native manager executables
+(`codex-telegramgw-{linux,darwin}-{amd64,arm64}`), `install.sh`, and `SHA256SUMS`.
+Every component archive contains the matching native manager and inner checksums.
+Packaging and verification use the Go release tool. Python remains only in the
+repository's historical PostgreSQL migration tools and their CI tests; those
+tools are not shipped in the release archives.
 
 The source of trust is this GitHub repository and its release publishing access.
 Checksums detect mismatched or damaged downloads; protect the repository's write

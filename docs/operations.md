@@ -151,6 +151,12 @@ checks that its runtime PIDs are unchanged after reconnecting. Its paths match
 the systemd template. The older `deploy-host-update.sh` is specific to the
 0.2.1 worker restart and is not used for this database migration.
 
+These Python tools are retained in the source repository for historical
+PostgreSQL cutovers. They are not distributed by the current installer or used
+for routine installation and updates. The current release manager is the
+native Go `codex-telegramgw` executable described in
+[installation and updates](installation.md).
+
 ## Worker bbolt recovery and ambiguous outcomes
 
 Stop the worker before copying or inspecting its `state_file`; bbolt is a

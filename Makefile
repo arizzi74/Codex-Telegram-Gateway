@@ -15,6 +15,7 @@ build:
 	CGO_ENABLED=0 $(GO) build -trimpath -ldflags '$(LDFLAGS)' -o bin/codex-gateway ./cmd/codex-gateway
 	CGO_ENABLED=0 $(GO) build -trimpath -ldflags '$(LDFLAGS)' -o bin/codex-worker ./cmd/codex-worker
 	CGO_ENABLED=0 $(GO) build -trimpath -ldflags '$(LDFLAGS)' -o bin/codex-local ./cmd/codex-local
+	CGO_ENABLED=0 $(GO) build -trimpath -ldflags '$(LDFLAGS)' -o bin/codex-telegramgw ./cmd/codex-telegramgw
 
 release:
 	VERSION='$(VERSION)' ./scripts/release.sh

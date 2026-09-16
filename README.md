@@ -20,10 +20,19 @@ processes and support local terminal attachment.
 
 Prebuilt binaries are distributed through [GitHub Releases](https://github.com/arizzi74/Codex-Telegram-Gateway/releases).
 The [installation guide](docs/installation.md) covers installing the gateway or
-worker without a Go toolchain, enabling daily automatic updates, and updating
+worker without Python or a Go toolchain, enabling daily automatic updates, and updating
 existing installations. Downloads are checksum-verified, gateway data is backed
 up before migrations, and workers defer updates while turns or terminal clients
 are active.
+
+With an enrolled worker configuration in `worker.json`, install as its owning user:
+
+```sh
+curl -fsSL --proto '=https' --proto-redir '=https' --tlsv1.2 https://raw.githubusercontent.com/arizzi74/Codex-Telegram-Gateway/main/scripts/install.sh | sh -s -- install worker --config ./worker.json --auto-update
+```
+
+The bootstrap requires curl and `sha256sum` or `shasum`; the installer and updater
+are native Go executables. Codex itself must already be installed and authenticated.
 
 ## Configuration and startup
 
@@ -147,9 +156,14 @@ make release VERSION=0.4.0
 
 `bin/` contains local executables. `dist/` contains stripped `CGO_ENABLED=0`
 executables, release archives, and SHA-256 checksums for Linux amd64/arm64
-(gateway, worker, helper) and macOS amd64/arm64 (worker and helper).
+(gateway, worker, helper and release manager) and macOS amd64/arm64 (worker, helper
+and release manager). Linux executables have no dynamic-loader or shared-library
+dependency. The four standalone managers support installation without Python;
+packaging and archive verification are also implemented in Go.
 The CI workflow runs the SQLite integration and race tests, checks formatting/vet,
 and builds and verifies the release archives. A hosted CI run requires a remote repository.
+Only the source-only historical PostgreSQL migration/deployment tests require
+Python on the build host; target machines do not need it.
 
 Existing PostgreSQL installations must use the verified [migration procedure](docs/operations.md#switching-from-postgresql)
 before starting this version. Changing the configuration alone does not transfer data.

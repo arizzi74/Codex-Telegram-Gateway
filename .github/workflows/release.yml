@@ -37,7 +37,8 @@ jobs:
           path: |
             dist/*.tar.gz
             dist/SHA256SUMS
-            dist/codex-telegramgw-manager.py
+            dist/codex-telegramgw-linux-*
+            dist/codex-telegramgw-darwin-*
             dist/install.sh
 
   publish:
@@ -51,6 +52,9 @@ jobs:
       RELEASE_TAG: ${{ github.ref_name }}
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
       - uses: actions/download-artifact@v4
         with:
           name: release-files
@@ -66,11 +70,11 @@ jobs:
       - name: Upload and verify draft before publishing
         run: |
           gh release create "$RELEASE_TAG" --draft --verify-tag --title "$RELEASE_TAG" --generate-notes
-          gh release upload "$RELEASE_TAG" dist/*.tar.gz dist/SHA256SUMS dist/codex-telegramgw-manager.py dist/install.sh
+          gh release upload "$RELEASE_TAG" dist/*.tar.gz dist/SHA256SUMS dist/codex-telegramgw-linux-* dist/codex-telegramgw-darwin-* dist/install.sh
           verify_dir=$(mktemp -d)
           trap 'rm -rf -- "$verify_dir"' EXIT
           gh release download "$RELEASE_TAG" --dir "$verify_dir"
-          test "$(find "$verify_dir" -type f | wc -l)" -eq 13
+          test "$(find "$verify_dir" -type f | wc -l)" -eq 16
           cmp dist/SHA256SUMS "$verify_dir/SHA256SUMS"
           (cd "$verify_dir" && sha256sum -c SHA256SUMS)
           gh release edit "$RELEASE_TAG" --draft=false --latest
