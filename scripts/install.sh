@@ -2,6 +2,12 @@
 # Download and execute the native, checksum-verified release manager.
 set -eu
 
+# A plain curl ... | sh starts worker setup. Explicit administration commands
+# continue to be forwarded unchanged.
+if [ "$#" -eq 0 ]; then
+  set -- setup worker
+fi
+
 fail() { printf '%s\n' "Installation failed: $*" >&2; exit 1; }
 stable_tag() {
   case "$1" in v*) tag_numbers=${1#v} ;; *) return 1 ;; esac

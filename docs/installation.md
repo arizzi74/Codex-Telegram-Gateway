@@ -15,17 +15,18 @@ macOS binaries use the normal macOS system libraries. Linux service installation
 uses systemd; macOS workers use launchd. Workers also need the supported Codex executable, its normal
 account credentials, and access to their configured workspaces.
 
-Prepare the [gateway or worker JSON configuration](../examples/) first. For a
-gateway, set your own HTTPS origin, a local SQLite `database_path`, the path to
+For a gateway, prepare the [JSON configuration](../examples/) first. Set your
+own HTTPS origin, a local SQLite `database_path`, the path to
 your private `.botsecrets`, and the environment-variable name for the Telegram
 webhook secret. Provide that variable in a private environment file. Configure
 HTTPS termination separately using the [proxy template](../deploy/nginx/telegramgw.conf).
 The managed gateway service requires its database under `/var/lib/codex-gateway`,
 for example `/var/lib/codex-gateway/gateway.db`.
 
-Worker configuration needs an enrolled worker ID and its private token file,
-the gateway WSS URL, allowed workspace roots, and runtime profiles. Enrollment
-is available through the gateway admin console. Keep all real configuration and
+For a worker, enroll it in the gateway admin console and copy its worker ID and
+one-time token. The guided installer creates the configuration for you, or you
+can prepare [worker.json](../examples/worker.json) with its private token file,
+gateway WSS URL, allowed workspace roots, and runtime profiles. Keep all real configuration and
 credentials outside the repository. See [operations](operations.md) for setup
 and recovery details.
 
@@ -63,19 +64,35 @@ The gateway uses SQLite; the installer does not install PostgreSQL.
 Run as the developer account that owns Codex and the workspaces:
 
 ```sh
-sh /tmp/codex-telegramgw-install.sh install worker \
-  --config /path/to/worker.json \
-  --auto-update
+curl -fsSL https://raw.githubusercontent.com/arizzi74/Codex-Telegram-Gateway/main/scripts/install.sh | sh
 ```
+
+No installer arguments are needed. The default is worker setup with daily
+automatic updates enabled:
+
+- If a worker is already installed in the standard location, setup adopts it
+  without changing its configuration or restarting its sessions.
+- Otherwise, it uses a private `worker.json` in the current directory if present.
+- If neither exists, it asks for the gateway address, enrolled worker ID and
+  token, worker name, and workspace. Token entry is hidden. It detects Codex
+  on your `PATH` and creates one primary runtime for the selected workspace.
+
+The prompts use the terminal directly, so they work when the script is piped
+into `sh`. Without an interactive terminal, provide `worker.json` beforehand.
+You can also run the downloaded script with `sh /tmp/codex-telegramgw-install.sh`
+or run the native manager's `codex-telegramgw setup worker` command.
 
 This installs both `codex-worker` and `codex-local` for the current user and sets
 up the worker service. Relative configuration paths are resolved before the
 configuration is installed. Add `~/.local/bin` to the terminal's `PATH` if needed.
 
-With a prepared `worker.json`, the same installation fits in one command:
+For unattended installation with a configuration at another location, the
+explicit command is still available:
 
 ```sh
-curl -fsSL --proto '=https' --proto-redir '=https' --tlsv1.2 https://raw.githubusercontent.com/arizzi74/Codex-Telegram-Gateway/main/scripts/install.sh | sh -s -- install worker --config ./worker.json --auto-update
+sh /tmp/codex-telegramgw-install.sh install worker \
+  --config /path/to/worker.json \
+  --auto-update
 ```
 
 The installer checks the configured Codex executable but does not install or
@@ -155,8 +172,9 @@ processes, so do not run this from a Codex turn hosted by that worker.
 
 ## Automatic updates
 
-`--auto-update` installs a daily scheduled check for stable releases. To manage
-it later:
+Worker setup enables a daily scheduled check for stable releases automatically.
+For explicit `install` and `adopt` commands, pass `--auto-update` to enable it.
+To manage it later:
 
 ```sh
 sudo codex-telegramgw auto-update enable gateway
@@ -190,8 +208,8 @@ so later writes cannot be lost through an automatic rollback.
 Maintainers commit and push the change, then create a new stable version tag:
 
 ```sh
-git tag v0.4.0
-git push origin v0.4.0
+git tag vMAJOR.MINOR.PATCH
+git push origin vMAJOR.MINOR.PATCH
 ```
 
 The release workflow runs formatting, vet, migration and race tests, all platform

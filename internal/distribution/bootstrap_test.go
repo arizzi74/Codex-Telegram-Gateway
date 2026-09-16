@@ -127,6 +127,33 @@ func TestBootstrapWorksWithoutPythonAndPreservesArguments(t *testing.T) {
 	}
 }
 
+func TestBootstrapWithoutArgumentsStartsWorkerSetup(t *testing.T) {
+	fixture := bootstrapTestFixture(t)
+	// Simulate curl piping the bootstrap to sh: no filename or shell arguments.
+	script, err := os.ReadFile(fixture.script)
+	if err != nil {
+		t.Fatal(err)
+	}
+	command := exec.Command("/bin/sh")
+	command.Env = fixture.environment
+	command.Stdin = strings.NewReader(string(script))
+	output, err := command.CombinedOutput()
+	if exit, ok := err.(*exec.ExitError); !ok || exit.ExitCode() != 17 {
+		t.Fatalf("manager status was not propagated: %v %s", err, output)
+	}
+	data, err := os.ReadFile(filepath.Join(fixture.root, "record"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	if strings.Join(lines[1:], "\n") != "v1.2.3\nsetup\nworker" {
+		t.Fatalf("unexpected default invocation: %q", lines)
+	}
+	if _, err := os.Stat(lines[0]); !os.IsNotExist(err) {
+		t.Fatalf("temporary manager not removed: %v", err)
+	}
+}
+
 func TestBootstrapPinnedVersionAndRepository(t *testing.T) {
 	for _, args := range [][]string{
 		{"install", "worker", "--version", "v2.3.4", "--repo", "owner/repository"},

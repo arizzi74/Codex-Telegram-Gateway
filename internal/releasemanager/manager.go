@@ -69,6 +69,7 @@ type options struct {
 const usage = `Install and update Codex Telegram Gateway from verified GitHub Releases.
 
 Usage:
+  codex-telegramgw setup worker
   codex-telegramgw install gateway --config PATH --secrets-env PATH [--auto-update]
   codex-telegramgw install worker --config PATH [--auto-update]
   codex-telegramgw adopt gateway|worker [--auto-update]
@@ -79,6 +80,8 @@ Usage:
 Install and update accept --version vMAJOR.MINOR.PATCH and --repo OWNER/REPOSITORY.
 Run gateway administration with sudo and worker administration as its user.
 Worker installation requires an installed, authenticated Codex executable.
+Worker setup reuses ./worker.json or prompts for enrollment and workspace details.
+It enables daily updates and adopts existing workers without restarting them.
 `
 
 func parseOptions(args []string) (options, error) {
@@ -154,17 +157,23 @@ func Execute(ctx context.Context, args []string, out, errOut io.Writer) int {
 			return 0
 		}
 	}
-	opts, err := parseOptions(args)
-	if err == nil {
-		if opts.Action == "install" && opts.Version == "" {
-			opts.Version = os.Getenv("CODEX_TELEGRAMGW_BOOTSTRAP_RELEASE")
+	var err error
+	if len(args) == 2 && args[0] == "setup" && args[1] == "worker" {
+		err = New(out).SetupWorker(ctx)
+	} else {
+		var opts options
+		opts, err = parseOptions(args)
+		if err == nil {
+			if opts.Action == "install" && opts.Version == "" {
+				opts.Version = os.Getenv("CODEX_TELEGRAMGW_BOOTSTRAP_RELEASE")
+			}
+			if opts.Version != "" {
+				_, err = ParseVersion(opts.Version)
+			}
 		}
-		if opts.Version != "" {
-			_, err = ParseVersion(opts.Version)
+		if err == nil {
+			err = New(out).execute(ctx, opts)
 		}
-	}
-	if err == nil {
-		err = New(out).execute(ctx, opts)
 	}
 	if err == nil {
 		return 0

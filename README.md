@@ -25,11 +25,16 @@ existing installations. Downloads are checksum-verified, gateway data is backed
 up before migrations, and workers defer updates while turns or terminal clients
 are active.
 
-With an enrolled worker configuration in `worker.json`, install as its owning user:
+Install a worker as the account that owns Codex and your workspaces:
 
 ```sh
-curl -fsSL --proto '=https' --proto-redir '=https' --tlsv1.2 https://raw.githubusercontent.com/arizzi74/Codex-Telegram-Gateway/main/scripts/install.sh | sh -s -- install worker --config ./worker.json --auto-update
+curl -fsSL https://raw.githubusercontent.com/arizzi74/Codex-Telegram-Gateway/main/scripts/install.sh | sh
 ```
+
+The installer asks for your gateway address, enrolled worker ID and token, and
+workspace, then enables daily automatic updates. It uses `./worker.json` if
+you already prepared one. Rerunning it adopts an existing worker without
+replacing its configuration or restarting its sessions.
 
 The bootstrap requires curl and `sha256sum` or `shasum`; the installer and updater
 are native Go executables. Codex itself must already be installed and authenticated.
