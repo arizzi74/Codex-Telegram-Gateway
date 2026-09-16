@@ -227,6 +227,11 @@ func (c *Connection) readLoop(ctx context.Context, conn *websocket.Conn, writes 
 
 func (c *Connection) handleCommand(ctx context.Context, writes chan<- outbound, command protocol.Command) {
 	ack, err := c.onCommand(ctx, command)
+	if errors.Is(err, ErrUpdatePrepared) {
+		// No durable receive and no terminal rejection: the gateway retries its
+		// existing dispatch after the update completes or its lease is aborted.
+		return
+	}
 	if err != nil {
 		ack = protocol.CommandAck{CommandID: command.ID, Status: "rejected", Error: &protocol.Error{Code: protocol.InternalError, Message: "worker command handling failed"}}
 	}

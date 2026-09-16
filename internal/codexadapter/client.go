@@ -115,18 +115,19 @@ type Client struct {
 	reqs      chan Request
 	done      chan struct{}
 
-	mu             sync.Mutex
-	pending        map[int64]chan rpcResponse
-	active         map[string]string
-	cause          error
-	ready          bool
-	info           InitializeInfo
-	methods        map[string]bool
-	serverRequests map[string]Request
-	pid            int
-	localSocket    string
-	nextID         atomic.Int64
-	stop           sync.Once
+	mu              sync.Mutex
+	pending         map[int64]chan rpcResponse
+	active          map[string]string
+	cause           error
+	ready           bool
+	info            InitializeInfo
+	methods         map[string]bool
+	serverRequests  map[string]Request
+	pid             int
+	localSocket     string
+	updateUncertain bool
+	nextID          atomic.Int64
+	stop            sync.Once
 }
 
 type outbound struct {
@@ -304,6 +305,17 @@ func (c *Client) LocalSocket() string {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.localSocket
+}
+
+// UpdateQuiescent reports whether the transport has no unanswered RPCs or
+// approval requests and every submitted request had a confirmed response.
+// A timeout cannot cancel work already queued inside app-server. Keep that
+// uncertainty for this client's lifetime even if a later read reports idle;
+// only replacing the owned runtime safely resets it.
+func (c *Client) UpdateQuiescent() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.ready && c.cause == nil && !c.updateUncertain && len(c.pending) == 0 && len(c.serverRequests) == 0
 }
 
 // ExecutableVersion returns the installed CLI's version text. It is separate
@@ -544,8 +556,14 @@ func (c *Client) request(ctx context.Context, method string, params any, result 
 	}
 	c.pending[id] = response
 	c.mu.Unlock()
+	confirmed := false
 	defer func() {
 		c.mu.Lock()
+		if !confirmed {
+			// A cancelled send may already have reached the writer. Withholding
+			// automatic restart is safer than assuming the operation was absent.
+			c.updateUncertain = true
+		}
 		delete(c.pending, id)
 		c.mu.Unlock()
 	}()
@@ -558,6 +576,7 @@ func (c *Client) request(ctx context.Context, method string, params any, result 
 	case <-ctx.Done():
 		return ctx.Err()
 	case reply := <-response:
+		confirmed = true
 		if reply.Error != nil {
 			if reply.Error.Code == -32601 {
 				c.mu.Lock()

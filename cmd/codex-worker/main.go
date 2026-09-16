@@ -55,7 +55,7 @@ func run(args []string, logger *slog.Logger) error {
 		return nil
 	}
 	if args[0] == "help" || args[0] == "--help" {
-		fmt.Println("codex-worker [--config PATH] run|status|doctor|attach [SESSION]|config export")
+		fmt.Println("codex-worker [--config PATH] run|status|doctor|attach [SESSION]|config export|update prepare|update abort --token TOKEN")
 		return nil
 	}
 	cfg, err := config.LoadWorker(path)
@@ -76,6 +76,23 @@ func run(args []string, logger *slog.Logger) error {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 	switch args[0] {
+	case "update":
+		action, token := "", ""
+		if len(args) == 2 && args[1] == "prepare" {
+			action = "prepare"
+		} else if len(args) == 4 && args[1] == "abort" && args[2] == "--token" && args[3] != "" {
+			action, token = "abort", args[3]
+		} else {
+			return errors.New("usage: codex-worker [--config PATH] update prepare|update abort --token TOKEN")
+		}
+		lease, err := worker.RequestUpdate(ctx, cfg, action, token)
+		if err != nil {
+			return err
+		}
+		if action == "abort" {
+			return json.NewEncoder(os.Stdout).Encode(map[string]bool{"aborted": true})
+		}
+		return json.NewEncoder(os.Stdout).Encode(lease)
 	case "run":
 		if len(args) > 1 {
 			return errors.New("unexpected run arguments")

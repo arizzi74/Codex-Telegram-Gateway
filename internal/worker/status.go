@@ -6,10 +6,12 @@ import (
 	"os"
 	"time"
 
+	"github.com/iaia/telegramgw/internal/buildinfo"
 	"github.com/iaia/telegramgw/internal/protocol"
 )
 
 type Status struct {
+	Version   string             `json:"version,omitempty"`
 	WorkerID  string             `json:"worker_id"`
 	Name      string             `json:"name"`
 	PID       int                `json:"pid"`
@@ -30,7 +32,7 @@ func (a *Agent) writeStatus(connected bool) error {
 	if err != nil {
 		return err
 	}
-	status := Status{WorkerID: a.cfg.WorkerID, Name: a.cfg.Name, PID: os.Getpid(), UpdatedAt: time.Now().UTC(), Connected: connected, EventAck: ack, EventHigh: high, Runtimes: a.manager.Snapshot(), Sessions: sessions}
+	status := Status{Version: buildinfo.Version, WorkerID: a.cfg.WorkerID, Name: a.cfg.Name, PID: os.Getpid(), UpdatedAt: time.Now().UTC(), Connected: connected, EventAck: ack, EventHigh: high, Runtimes: a.manager.Snapshot(), Sessions: sessions}
 	data, err := json.MarshalIndent(status, "", "  ")
 	if err != nil {
 		return err

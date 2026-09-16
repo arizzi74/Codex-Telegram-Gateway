@@ -21,11 +21,13 @@ for target in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64; do
     cp README.md LICENSE "${package_dir}/"
     cp -R examples deploy migrations "${package_dir}/"
     mkdir -p "${package_dir}/scripts"
-    cp scripts/migrate-postgres-to-sqlite.py "${package_dir}/scripts/"
-    (cd "$package_dir" && checksum "$binary" > SHA256SUMS)
+    cp scripts/migrate-postgres-to-sqlite.py scripts/release-manager.py scripts/install-worker.sh "${package_dir}/scripts/"
+    (cd "$package_dir" && checksum "$binary" scripts/release-manager.py scripts/install-worker.sh > SHA256SUMS)
     tar -czf "dist/${artifact}.tar.gz" -C "$package_dir" .
     # mktemp creates a dedicated temporary staging directory owned by this script.
     rm -rf -- "$package_dir"
   done
 done
-(cd dist && checksum ./*.tar.gz > SHA256SUMS)
+cp scripts/release-manager.py dist/codex-telegramgw-manager.py
+cp scripts/install.sh dist/install.sh
+(cd dist && checksum ./*.tar.gz codex-telegramgw-manager.py install.sh > SHA256SUMS)

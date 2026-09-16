@@ -1,6 +1,6 @@
 [Unit]
 Description=Codex Telegram Gateway
-Documentation=https://github.com/iaia/telegramgw
+Documentation=https://github.com/arizzi74/Codex-Telegram-Gateway
 After=network-online.target
 Wants=network-online.target
 

@@ -1,0 +1,75 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  test-and-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Validate tag and run all checks
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          [[ "$RELEASE_TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] || {
+            echo 'Only stable vMAJOR.MINOR.PATCH tags can be released.' >&2
+            exit 1
+          }
+          VERSION="${RELEASE_TAG#v}" ./scripts/ci.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-files
+          if-no-files-found: error
+          path: |
+            dist/*.tar.gz
+            dist/SHA256SUMS
+            dist/codex-telegramgw-manager.py
+            dist/install.sh
+
+  publish:
+    needs: test-and-build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      RELEASE_TAG: ${{ github.ref_name }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-files
+          path: dist
+      - name: Verify release files and tag
+        run: |
+          ./scripts/verify-release.sh
+          test "$(gh api "repos/$GH_REPO/commits/$RELEASE_TAG" --jq .sha)" = "$GITHUB_SHA"
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            echo 'A release already exists for this tag; refusing to replace its assets.' >&2
+            exit 1
+          fi
+      - name: Upload and verify draft before publishing
+        run: |
+          gh release create "$RELEASE_TAG" --draft --verify-tag --title "$RELEASE_TAG" --generate-notes
+          gh release upload "$RELEASE_TAG" dist/*.tar.gz dist/SHA256SUMS dist/codex-telegramgw-manager.py dist/install.sh
+          verify_dir=$(mktemp -d)
+          trap 'rm -rf -- "$verify_dir"' EXIT
+          gh release download "$RELEASE_TAG" --dir "$verify_dir"
+          test "$(find "$verify_dir" -type f | wc -l)" -eq 13
+          cmp dist/SHA256SUMS "$verify_dir/SHA256SUMS"
+          (cd "$verify_dir" && sha256sum -c SHA256SUMS)
+          gh release edit "$RELEASE_TAG" --draft=false --latest

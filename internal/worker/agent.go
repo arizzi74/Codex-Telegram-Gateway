@@ -20,6 +20,8 @@ import (
 // Agent joins runtime supervision, independent session actors, and the durable
 // transport. The network context never owns a runtime or an accepted turn.
 type Agent struct {
+	updateMu      sync.Mutex
+	update        *updateState
 	cfg           config.WorkerConfig
 	store         *Store
 	log           *slog.Logger
@@ -82,6 +84,11 @@ func (a *Agent) Run(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	stopUpdateControl, err := a.startUpdateControl(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { cancel(); stopUpdateControl() }()
 	networkDone := make(chan error, 1)
 	a.group.Add(1)
 	go func() { defer a.group.Done(); a.statusLoop(ctx, conn) }()
@@ -106,6 +113,11 @@ func (a *Agent) report(err error) {
 }
 
 func (a *Agent) HandleCommand(ctx context.Context, c protocol.Command) (protocol.CommandAck, error) {
+	a.updateMu.Lock()
+	defer a.updateMu.Unlock()
+	if a.update != nil {
+		return protocol.CommandAck{}, ErrUpdatePrepared
+	}
 	received, err := a.store.Receive(c)
 	if err != nil {
 		return protocol.CommandAck{}, err
@@ -223,7 +235,7 @@ func (a *Agent) onSession(runtime protocol.Runtime, s protocol.Session) {
 	a.mu.Lock()
 	actor := a.sessions[s.ID]
 	if actor == nil {
-		actor = &sessionActor{agent: a, identityRuntime: runtime.ID, identityThread: s.ThreadID, runtime: runtime, session: s, commands: make(chan actorCommand), eventQueue: make(chan actorEvent, 128), requestQueue: make(chan actorRequest, 32), snapshots: make(chan actorSnapshot, 8), pending: map[string]pendingRequest{}}
+		actor = &sessionActor{agent: a, identityRuntime: runtime.ID, identityThread: s.ThreadID, runtime: runtime, session: s, commands: make(chan actorCommand), eventQueue: make(chan actorEvent, 128), requestQueue: make(chan actorRequest, 32), snapshots: make(chan actorSnapshot, 8), pending: map[string]pendingRequest{}, updateChecks: make(chan chan bool)}
 		a.sessions[s.ID] = actor
 		a.group.Add(1)
 		go func() { defer a.group.Done(); actor.run() }()
@@ -456,6 +468,7 @@ type pendingRequest struct {
 }
 
 type sessionActor struct {
+	updateChecks                    chan chan bool
 	agent                           *Agent
 	identityRuntime, identityThread string
 	runtime                         protocol.Runtime
@@ -525,6 +538,8 @@ func (s *sessionActor) run() {
 			if snapshot.processed != nil {
 				close(snapshot.processed)
 			}
+		case reply := <-s.updateChecks:
+			reply <- updateSessionIdle(s.session) && len(s.queue) == 0 && s.activeCommand == nil && !s.awaitingTurnStart && len(s.pending) == 0 && len(s.eventQueue) == 0 && len(s.requestQueue) == 0
 		case request := <-s.commands:
 			s.command(request)
 		case event := <-s.eventQueue:

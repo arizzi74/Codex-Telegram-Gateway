@@ -16,6 +16,15 @@ processes and support local terminal attachment.
 - **Local helper:** opens a terminal interface against a private app-server
   socket or starts an independent local runtime.
 
+## Install and update
+
+Prebuilt binaries are distributed through [GitHub Releases](https://github.com/arizzi74/Codex-Telegram-Gateway/releases).
+The [installation guide](docs/installation.md) covers installing the gateway or
+worker without a Go toolchain, enabling daily automatic updates, and updating
+existing installations. Downloads are checksum-verified, gateway data is backed
+up before migrations, and workers defer updates while turns or terminal clients
+are active.
+
 ## Configuration and startup
 
 Use the [example configuration](examples/) as a starting point. Set the gateway's
@@ -38,8 +47,8 @@ codex-worker --config /path/to/worker.json run
 The gateway creates its SQLite database at `database_path`; relative paths are
 resolved against the configuration directory. Use a local disk and a private,
 writable directory. It needs the webhook-secret environment variable named in
-its configuration; no database server or database credentials are required. The worker needs a private enrollment-token file
-and access to the Codex executable. Use `codex-worker status` and
+its configuration; no database server or database credentials are required.
+The worker needs a private enrollment-token file and access to the Codex executable. Use `codex-worker status` and
 `codex-worker doctor` to inspect the worker and its runtime compatibility.
 When using a custom configuration file, pass the same `--config` option to
 diagnostics and terminal attachment commands.
@@ -130,16 +139,15 @@ files. The pure-Go SQLite driver also works with `CGO_ENABLED=0`.
 go test ./...
 go test -race ./... -timeout=90s
 make lint
-make build VERSION=0.3.0
-make release VERSION=0.3.0
+make build VERSION=0.4.0
+make release VERSION=0.4.0
 ```
 
 `bin/` contains local executables. `dist/` contains stripped `CGO_ENABLED=0`
 executables, release archives, and SHA-256 checksums for Linux amd64/arm64
 (gateway, worker, helper) and macOS amd64/arm64 (worker and helper).
 The CI workflow runs the SQLite integration and race tests, checks formatting/vet,
-and builds
-and verifies the release archives. A hosted CI run requires a remote repository.
+and builds and verifies the release archives. A hosted CI run requires a remote repository.
 
 Existing PostgreSQL installations must use the verified [migration procedure](docs/operations.md#switching-from-postgresql)
 before starting this version. Changing the configuration alone does not transfer data.

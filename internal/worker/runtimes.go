@@ -35,10 +35,12 @@ type RuntimeHooks struct {
 
 // RuntimeManager supervises configured local Codex app-server profiles.
 type RuntimeManager struct {
-	cfg   config.WorkerConfig
-	store *Store
-	log   *slog.Logger
-	hooks RuntimeHooks
+	lifecycle   sync.RWMutex
+	attachments map[string]*attachmentProxy
+	cfg         config.WorkerConfig
+	store       *Store
+	log         *slog.Logger
+	hooks       RuntimeHooks
 
 	mu       sync.RWMutex
 	runtimes map[string]*managedRuntime
@@ -87,7 +89,7 @@ func NewRuntimeManager(cfg config.WorkerConfig, store *Store, logger *slog.Logge
 			return nil, errors.New("runtime manager: runtime working_directory is outside allowed workspace roots")
 		}
 	}
-	m := &RuntimeManager{cfg: cfg, store: store, log: logger, hooks: hooks, runtimes: make(map[string]*managedRuntime), ready: make(chan struct{})}
+	m := &RuntimeManager{cfg: cfg, store: store, log: logger, hooks: hooks, runtimes: make(map[string]*managedRuntime), attachments: make(map[string]*attachmentProxy), ready: make(chan struct{})}
 	m.start = func(ctx context.Context, options codexadapter.Config) (*codexadapter.Client, error) {
 		base := filepath.Join(filepath.Dir(cfg.StateFile), "runtimes")
 		if err := os.MkdirAll(base, 0o700); err != nil {
@@ -97,7 +99,7 @@ func NewRuntimeManager(cfg config.WorkerConfig, store *Store, logger *slog.Logge
 		if err != nil {
 			return nil, err
 		}
-		shared, err := codexadapter.StartShared(ctx, options, filepath.Join(dir, "app.sock"))
+		shared, err := codexadapter.StartShared(ctx, options, filepath.Join(dir, "server.sock"))
 		if err != nil {
 			return nil, err
 		}
@@ -156,8 +158,20 @@ func (m *RuntimeManager) supervise(ctx context.Context, profile config.RuntimePr
 	var initial sync.Once
 	defer initial.Do(initialDone)
 	for ctx.Err() == nil {
+		// Update preparation holds the writer lock. Waiting for it must remain
+		// cancellable so service shutdown cannot wait for the lease timeout.
+		for !m.lifecycle.TryRLock() {
+			if !sleepContext(ctx, 25*time.Millisecond) {
+				return
+			}
+		}
+		if ctx.Err() != nil {
+			m.lifecycle.RUnlock()
+			return
+		}
 		runtime, client, err := m.startProfile(ctx, profile)
 		if err != nil {
+			m.lifecycle.RUnlock()
 			initial.Do(initialDone)
 			m.log.Error("runtime start failed", "profile_id", profile.ID, "error", err)
 			if !shouldRestart(profile.RestartPolicy, &attempts, time.Now()) {
@@ -180,6 +194,7 @@ func (m *RuntimeManager) supervise(ctx context.Context, profile config.RuntimePr
 			}
 			_ = client.Close()
 			m.markRuntimeFailed(runtime)
+			m.lifecycle.RUnlock()
 			initial.Do(initialDone)
 			if !shouldRestart(profile.RestartPolicy, &attempts, time.Now()) {
 				return
@@ -189,6 +204,7 @@ func (m *RuntimeManager) supervise(ctx context.Context, profile config.RuntimePr
 			}
 			continue
 		}
+		m.lifecycle.RUnlock()
 		initial.Do(initialDone)
 		stopForwarding := m.forwardAdapter(ctx, runtime, client)
 		select {
@@ -230,6 +246,19 @@ func (m *RuntimeManager) startProfile(ctx context.Context, profile config.Runtim
 	}
 	runtime.PID, runtime.State = client.PID(), "running"
 	runtime.LocalSocket = client.LocalSocket()
+	if runtime.LocalSocket != "" {
+		publicSocket := filepath.Join(filepath.Dir(runtime.LocalSocket), "app.sock")
+		proxy, err := newAttachmentProxy(publicSocket, runtime.LocalSocket)
+		if err != nil {
+			_ = client.Close()
+			return runtime, nil, err
+		}
+		runtime.LocalSocket = publicSocket
+		m.mu.Lock()
+		m.attachments[runtime.ID] = proxy
+		m.mu.Unlock()
+		go func() { <-client.Done(); proxy.close() }()
+	}
 	versionCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	version, versionErr := codexadapter.ExecutableVersion(versionCtx, profile.CodexBinary)
 	cancel()
@@ -290,7 +319,12 @@ func (m *RuntimeManager) forwardAdapter(ctx context.Context, runtime protocol.Ru
 			case <-client.Done():
 				return
 			case <-ticker.C:
-				if err := m.discover(ctx, runtime, client); err != nil {
+				if !m.lifecycle.TryRLock() {
+					continue
+				}
+				err := m.discover(ctx, runtime, client)
+				m.lifecycle.RUnlock()
+				if err != nil {
 					m.log.Warn("runtime discovery failed", "runtime_id", runtime.ID, "error", err)
 					if isPersistenceError(err) {
 						m.report(err)
