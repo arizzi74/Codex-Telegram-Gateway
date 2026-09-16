@@ -11,7 +11,7 @@
     "id": "primary",
     "name": "Primary Codex",
     "codex_binary": "codex",
-    "working_directory": "/home/USERNAME/projects/telegramgw",
+    "working_directory": "/home/USERNAME/projects/my-project",
     "autostart": true,
     "restart_policy": "on-failure"
   }]

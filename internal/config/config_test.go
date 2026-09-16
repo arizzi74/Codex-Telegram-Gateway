@@ -111,3 +111,24 @@ func TestGatewayRequiresPersistentSQLitePath(t *testing.T) {
 		t.Fatalf("absolute SQLite database path rejected: %v", err)
 	}
 }
+
+func TestGatewayPublicOriginAllowsConfiguredDomainsAndPreservesPort(t *testing.T) {
+	for _, origin := range []string{"https://gateway.example.com", "https://codex.operations.example.org:8443/"} {
+		cfg, err := (gatewayJSON{PublicBaseURL: origin, DatabasePath: "gateway.db", WebhookSecretEnv: "WH"}).config()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if cfg.PublicBaseURL != strings.TrimSuffix(origin, "/") {
+			t.Fatalf("configured public origin changed: %q", cfg.PublicBaseURL)
+		}
+	}
+	for _, origin := range []string{
+		"http://gateway.example.com", "https://:8443", "https://user:password@gateway.example.com",
+		"https://gateway.example.com/admin", "https://gateway.example.com?", "https://gateway.example.com#",
+		"https://gateway.example.com:", "https://gateway.example.com:0", "https://gateway.example.com:65536",
+	} {
+		if _, err := (gatewayJSON{PublicBaseURL: origin, DatabasePath: "gateway.db", WebhookSecretEnv: "WH"}).config(); err == nil {
+			t.Errorf("invalid gateway public origin accepted: %q", origin)
+		}
+	}
+}

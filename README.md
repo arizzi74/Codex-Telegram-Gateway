@@ -100,6 +100,8 @@ Open `/admin/` on your gateway's public HTTPS URL, such as
 administrator?**. Register your passkey, sign in, and add a spare passkey.
 The token expires in 15 minutes. The console manages worker enrollment,
 credential rotation, revocation, and operational inventory.
+Passkeys use the hostname from the configured public HTTPS URL as their
+relying-party ID; browser requests must match the full configured origin.
 
 ## Local Codex terminal
 

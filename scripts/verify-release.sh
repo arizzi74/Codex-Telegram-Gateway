@@ -48,6 +48,8 @@ for name, binary in artifacts.items():
         members = {}
         for member in archive.getmembers():
             normalized = member.name.removeprefix("./")
+            if member.uid != 0 or member.gid != 0 or member.uname not in ("", "root") or member.gname not in ("", "root"):
+                raise SystemExit(f"archive contains build-account ownership metadata: {name}: {normalized}")
             if normalized in members:
                 raise SystemExit(f"duplicate archive member: {name}: {normalized}")
             if member.issym() or member.islnk() or member.name.startswith("/") or ".." in Path(normalized).parts:

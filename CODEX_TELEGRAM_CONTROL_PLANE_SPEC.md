@@ -2642,7 +2642,7 @@ Conceptual:
     <string>/usr/local/bin/codex-worker</string>
     <string>run</string>
     <string>--config</string>
-    <string>/Users/USER/.config/codex-worker/config.yaml</string>
+    <string>/Users/USERNAME/.config/codex-worker/config.yaml</string>
   </array>
 
   <key>RunAtLoad</key>

@@ -23,7 +23,21 @@ for target in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64; do
     mkdir -p "${package_dir}/scripts"
     cp scripts/migrate-postgres-to-sqlite.py scripts/release-manager.py scripts/install-worker.sh "${package_dir}/scripts/"
     (cd "$package_dir" && checksum "$binary" scripts/release-manager.py scripts/install-worker.sh > SHA256SUMS)
-    tar -czf "dist/${artifact}.tar.gz" -C "$package_dir" .
+    python3 - "$package_dir" "dist/${artifact}.tar.gz" <<'PY'
+import sys
+import tarfile
+
+
+def generic_owner(member):
+    # Do not publish the build machine's account names or numeric identities.
+    member.uid = member.gid = 0
+    member.uname = member.gname = "root"
+    return member
+
+
+with tarfile.open(sys.argv[2], "w:gz", format=tarfile.PAX_FORMAT) as archive:
+    archive.add(sys.argv[1], arcname=".", filter=generic_owner)
+PY
     # mktemp creates a dedicated temporary staging directory owned by this script.
     rm -rf -- "$package_dir"
   done

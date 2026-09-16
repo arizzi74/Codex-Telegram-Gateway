@@ -257,11 +257,11 @@ func (r gatewayJSON) config() (GatewayConfig, error) {
 	if cfg.PublicBaseURL == "" {
 		cfg.PublicBaseURL = DefaultPublicBaseURL
 	}
-	u, err := url.Parse(cfg.PublicBaseURL)
-	if err != nil || u.Scheme != "https" || u.Hostname() == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || (u.Path != "" && u.Path != "/") {
+	u, err := ParseHTTPSOrigin(cfg.PublicBaseURL)
+	if err != nil {
 		return GatewayConfig{}, errors.New("gateway config: public_base_url must be an HTTPS origin")
 	}
-	cfg.PublicBaseURL = strings.TrimRight(cfg.PublicBaseURL, "/")
+	cfg.PublicBaseURL = u.String()
 	host, _, err := net.SplitHostPort(cfg.Listen)
 	if err != nil || net.ParseIP(host) == nil || !net.ParseIP(host).IsLoopback() {
 		return GatewayConfig{}, errors.New("gateway config: listen must be a loopback IP and port behind nginx")

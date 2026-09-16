@@ -1,8 +1,8 @@
 # Implementation and verification tracker
 
-The specification and the user's additions are implemented in Go and committed
-in incremental steps. The gateway and local worker are deployed on
-`gateway.example.com`.
+The gateway and worker implement the specification in Go, with changes committed
+in incremental steps. Deployment addresses and local installation details belong
+in private operator configuration.
 
 ## Completed milestones
 
@@ -48,8 +48,9 @@ CGO disabled; the LaunchAgent was not run on a Darwin host.
 ## Owner setup
 
 The first personal passkey requires the owner's authenticator. Run
-`sudo /usr/local/sbin/codex-gateway-admin admin bootstrap`, then open
-`https://gateway.example.com/admin/` and register. The implementation was tested
+`codex-gateway --config /path/to/gateway.json admin bootstrap` as the gateway's
+service account, then open `/admin/` at the configured public HTTPS origin and
+register. The implementation was tested
 with a synthetic authenticator; production contains no fabricated passkey.
 
 CLI sharing is the user's explicit extension to direct app-server stdio:
@@ -86,7 +87,7 @@ process group, after all turns finished. It activated the verified 0.2.1 release
 with:
 
 ```sh
-/home/USERNAME/projects/telegramgw/scripts/deploy-host-update.sh --wait
+scripts/deploy-host-update.sh --wait
 ```
 
 The helper verifies release checksums and waits up to ten minutes for running

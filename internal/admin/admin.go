@@ -10,7 +10,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
 	"strings"
 	"time"
 
@@ -18,6 +17,7 @@ import (
 	wa "github.com/go-webauthn/webauthn/webauthn"
 	"github.com/google/uuid"
 	"github.com/iaia/telegramgw/internal/auth"
+	"github.com/iaia/telegramgw/internal/config"
 	"github.com/iaia/telegramgw/internal/registry"
 )
 
@@ -47,15 +47,12 @@ func New(store *registry.Store, cfg Config) (*Server, error) {
 	if store == nil {
 		return nil, errors.New("admin: registry store is required")
 	}
-	u, err := url.Parse(cfg.Origin)
-	if err != nil || u.Scheme != "https" || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
+	u, err := config.ParseHTTPSOrigin(cfg.Origin)
+	if err != nil {
 		return nil, errors.New("admin: origin must be an exact https origin")
 	}
-	if !strings.EqualFold(u.Hostname(), "gateway.example.com") {
-		return nil, errors.New("admin: origin must use gateway.example.com")
-	}
-	origin := u.Scheme + "://" + u.Host
-	w, err := wa.New(&wa.Config{RPID: "gateway.example.com", RPDisplayName: "Codex Gateway", RPOrigins: []string{origin}, RPTopOrigins: []string{origin}, AuthenticatorSelection: protocol.AuthenticatorSelection{UserVerification: protocol.VerificationRequired}})
+	origin := u.String()
+	w, err := wa.New(&wa.Config{RPID: u.Hostname(), RPDisplayName: "Codex Gateway", RPOrigins: []string{origin}, RPTopOrigins: []string{origin}, AuthenticatorSelection: protocol.AuthenticatorSelection{UserVerification: protocol.VerificationRequired}})
 	if err != nil {
 		return nil, fmt.Errorf("admin: configure webauthn: %w", err)
 	}

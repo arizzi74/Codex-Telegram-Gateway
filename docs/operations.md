@@ -4,7 +4,8 @@ For prebuilt binaries and scheduled updates, use the [installation and update
 guide](installation.md). The manual service procedures below remain available
 for custom deployments and recovery.
 
-Run the gateway behind TLS termination on `gateway.example.com`. The gateway
+Run the gateway behind TLS termination at its configured public HTTPS origin,
+such as `https://gateway.example.com`. The gateway
 listens only on loopback; public access goes through nginx. The sample
 [nginx configuration](../deploy/nginx/telegramgw.conf) proxies health checks,
 the admin interface, HTTP APIs, and WebSocket upgrades with bounded body and

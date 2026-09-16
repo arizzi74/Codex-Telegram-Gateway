@@ -132,12 +132,14 @@ class BundleVerificationTests(unittest.TestCase):
         return "".join(f"{hashlib.sha256(data).hexdigest()}  ./{name}\n" for name, data in files.items()).encode()
 
     @staticmethod
-    def archive(path, files, binary):
+    def archive(path, files, binary, ownership=None):
         with tarfile.open(path, "w:gz") as archive:
             for name, data in files.items():
                 entry = tarfile.TarInfo("./" + name)
                 entry.mode = 0o755 if name == binary else 0o644
                 entry.size = len(data)
+                for field, value in (ownership or {}).items():
+                    setattr(entry, field, value)
                 archive.addfile(entry, io.BytesIO(data))
 
     def write_manifest(self):
@@ -177,6 +179,38 @@ class BundleVerificationTests(unittest.TestCase):
         result = self.verify()
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("unsafe archive member", result.stderr)
+
+    def test_valid_checksums_cannot_hide_build_account_metadata(self):
+        path = self.dist / "codex-worker-linux-amd64.tar.gz"
+        with tarfile.open(path, "r:gz") as archive:
+            files = {member.name.removeprefix("./"): archive.extractfile(member).read() for member in archive.getmembers()}
+        for ownership in ({"uid": 1234}, {"gid": 2345}, {"uname": "fictional-builder"}, {"gname": "fictional-build-team"}):
+            with self.subTest(ownership=ownership):
+                self.archive(path, files, "codex-worker", ownership)
+                self.write_manifest()
+                result = self.verify()
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("build-account ownership metadata", result.stderr)
+
+    def test_release_packager_anonymizes_owners_and_preserves_files_and_modes(self):
+        source = (ROOT / "scripts/release.sh").read_text().split("<<'PY'\n", 1)[1].split("\nPY", 1)[0]
+        stage = self.root / "package-stage"
+        (stage / "nested").mkdir(parents=True)
+        (stage / "program").write_bytes(b"executable payload")
+        (stage / "program").chmod(0o751)
+        (stage / "nested/config").write_bytes(b"configuration payload")
+        (stage / "nested/config").chmod(0o640)
+        output = self.root / "package.tar.gz"
+        subprocess.run(["python3", "-", str(stage), str(output)], input=source, text=True, check=True)
+        with tarfile.open(output, "r:gz") as archive:
+            members = {member.name.removeprefix("./"): member for member in archive.getmembers()}
+            self.assertEqual(set(members), {".", "program", "nested", "nested/config"})
+            for member in members.values():
+                self.assertEqual((member.uid, member.gid, member.uname, member.gname), (0, 0, "root", "root"))
+            self.assertEqual(members["program"].mode, 0o751)
+            self.assertEqual(members["nested/config"].mode, 0o640)
+            self.assertEqual(archive.extractfile(members["program"]).read(), b"executable payload")
+            self.assertEqual(archive.extractfile(members["nested/config"]).read(), b"configuration payload")
 
 
 if __name__ == "__main__":

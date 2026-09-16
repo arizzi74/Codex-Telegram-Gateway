@@ -31,12 +31,23 @@ const passkeyTestOrigin = "https://gateway.example.com"
 // used by app.js. The fake authenticator emits standards-shaped P-256
 // registration and assertion responses; no browser or real credential is used.
 func TestPasskeyRegistrationAndAuthenticationHTTP(t *testing.T) {
+	for _, origin := range []string{passkeyTestOrigin, "https://codex.operations.example.org:8443"} {
+		t.Run(origin, func(t *testing.T) { testPasskeyRegistrationAndAuthenticationHTTP(t, origin) })
+	}
+}
+
+func testPasskeyRegistrationAndAuthenticationHTTP(t *testing.T, origin string) {
+	publicURL, err := url.Parse(origin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rpID := publicURL.Hostname()
 	store := adminIntegrationStore(t)
 	bootstrap, err := store.BootstrapAdmin(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
-	admin, err := New(store, Config{Origin: passkeyTestOrigin})
+	admin, err := New(store, Config{Origin: origin})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -44,15 +55,15 @@ func TestPasskeyRegistrationAndAuthenticationHTTP(t *testing.T) {
 	t.Cleanup(server.Close)
 	client := passkeyHTTPClient(t, server)
 
-	response := adminRequest(t, client, server.URL, http.MethodGet, "/admin/", nil, "", "")
+	response := adminRequest(t, client, origin, http.MethodGet, "/admin/", nil, "", "")
 	requireHTTPStatus(t, response, http.StatusOK)
-	csrf := cookieValue(t, client, server.URL, csrfCookie)
+	csrf := cookieValue(t, client, origin, csrfCookie)
 
 	// HTTP origin checks run before any ceremony state is created.
-	response = adminRequest(t, client, server.URL, http.MethodPost, "/api/v1/admin/passkeys/register/begin", map[string]string{"bootstrap_token": bootstrap}, "https://evil.example", csrf)
+	response = adminRequest(t, client, origin, http.MethodPost, "/api/v1/admin/passkeys/register/begin", map[string]string{"bootstrap_token": bootstrap}, "https://evil.example", csrf)
 	requireHTTPStatus(t, response, http.StatusForbidden)
 
-	response = adminRequest(t, client, server.URL, http.MethodPost, "/api/v1/admin/passkeys/register/begin", map[string]string{"bootstrap_token": bootstrap}, passkeyTestOrigin, csrf)
+	response = adminRequest(t, client, origin, http.MethodPost, "/api/v1/admin/passkeys/register/begin", map[string]string{"bootstrap_token": bootstrap}, origin, csrf)
 	var registration struct {
 		CeremonyID string `json:"ceremony_id"`
 		PublicKey  struct {
@@ -74,7 +85,7 @@ func TestPasskeyRegistrationAndAuthenticationHTTP(t *testing.T) {
 	if err != nil || len(userHandle) < 16 {
 		t.Fatalf("invalid discoverable user handle %q: %v", registration.PublicKey.User.ID, err)
 	}
-	ceremony := cookieValue(t, client, server.URL, ceremonyCookie)
+	ceremony := cookieValue(t, client, origin, ceremonyCookie)
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		t.Fatal(err)
@@ -83,26 +94,29 @@ func TestPasskeyRegistrationAndAuthenticationHTTP(t *testing.T) {
 
 	// A client-data origin mismatch and a response without UV both fail while
 	// leaving the valid ceremony available for a subsequent correct response.
-	wrongOrigin := registrationCredential(t, key, credentialID, registration.PublicKey.Challenge, "https://evil.example", 0x45)
-	response = registrationFinishRequest(t, client, server.URL, csrf, registration.CeremonyID, bootstrap, wrongOrigin)
+	wrongOrigin := registrationCredential(t, key, credentialID, registration.PublicKey.Challenge, "https://evil.example", rpID, 0x45)
+	response = registrationFinishRequest(t, client, origin, csrf, registration.CeremonyID, bootstrap, wrongOrigin)
 	requireHTTPStatus(t, response, http.StatusBadRequest)
-	withoutUV := registrationCredential(t, key, credentialID, registration.PublicKey.Challenge, passkeyTestOrigin, 0x41)
-	response = registrationFinishRequest(t, client, server.URL, csrf, registration.CeremonyID, bootstrap, withoutUV)
+	wrongPort := registrationCredential(t, key, credentialID, registration.PublicKey.Challenge, "https://"+rpID+":9443", rpID, 0x45)
+	response = registrationFinishRequest(t, client, origin, csrf, registration.CeremonyID, bootstrap, wrongPort)
 	requireHTTPStatus(t, response, http.StatusBadRequest)
-	validRegistration := registrationCredential(t, key, credentialID, registration.PublicKey.Challenge, passkeyTestOrigin, 0x45)
-	response = registrationFinishRequest(t, client, server.URL, csrf, registration.CeremonyID, bootstrap, validRegistration)
+	withoutUV := registrationCredential(t, key, credentialID, registration.PublicKey.Challenge, origin, rpID, 0x41)
+	response = registrationFinishRequest(t, client, origin, csrf, registration.CeremonyID, bootstrap, withoutUV)
+	requireHTTPStatus(t, response, http.StatusBadRequest)
+	validRegistration := registrationCredential(t, key, credentialID, registration.PublicKey.Challenge, origin, rpID, 0x45)
+	response = registrationFinishRequest(t, client, origin, csrf, registration.CeremonyID, bootstrap, validRegistration)
 	requireHTTPStatus(t, response, http.StatusCreated)
 
 	// Restore the ceremony cookie to prove the durable challenge, rather than
 	// cookie clearing alone, prevents replay.
-	setCookie(client, server.URL, ceremonyCookie, ceremony)
-	response = registrationFinishRequest(t, client, server.URL, csrf, registration.CeremonyID, bootstrap, validRegistration)
+	setCookie(client, origin, ceremonyCookie, ceremony)
+	response = registrationFinishRequest(t, client, origin, csrf, registration.CeremonyID, bootstrap, validRegistration)
 	requireHTTPStatus(t, response, http.StatusForbidden)
 
-	response = adminRequest(t, passkeyHTTPClient(t, server), server.URL, http.MethodGet, "/api/v1/admin/dashboard", nil, "", "")
+	response = adminRequest(t, passkeyHTTPClient(t, server), origin, http.MethodGet, "/api/v1/admin/dashboard", nil, "", "")
 	requireHTTPStatus(t, response, http.StatusUnauthorized)
 
-	response = adminRequest(t, client, server.URL, http.MethodPost, "/api/v1/admin/login/begin", struct{}{}, passkeyTestOrigin, csrf)
+	response = adminRequest(t, client, origin, http.MethodPost, "/api/v1/admin/login/begin", struct{}{}, origin, csrf)
 	var login struct {
 		CeremonyID string `json:"ceremony_id"`
 		PublicKey  struct {
@@ -112,29 +126,29 @@ func TestPasskeyRegistrationAndAuthenticationHTTP(t *testing.T) {
 		} `json:"publicKey"`
 	}
 	decodeHTTPJSON(t, response, http.StatusOK, &login)
-	if login.PublicKey.RPID != "gateway.example.com" || login.PublicKey.UserVerification != "required" {
+	if login.PublicKey.RPID != rpID || login.PublicKey.UserVerification != "required" {
 		t.Fatalf("login options = %#v", login.PublicKey)
 	}
-	loginCeremony := cookieValue(t, client, server.URL, ceremonyCookie)
-	wrongLoginOrigin := browserAssertion(t, key, credentialID, userHandle, login.PublicKey.Challenge, "https://evil.example", 0x05)
-	response = loginFinishRequest(t, client, server.URL, csrf, login.CeremonyID, wrongLoginOrigin)
+	loginCeremony := cookieValue(t, client, origin, ceremonyCookie)
+	wrongLoginOrigin := browserAssertion(t, key, credentialID, userHandle, login.PublicKey.Challenge, "https://evil.example", rpID, 0x05)
+	response = loginFinishRequest(t, client, origin, csrf, login.CeremonyID, wrongLoginOrigin)
 	requireHTTPStatus(t, response, http.StatusBadRequest)
-	loginWithoutUV := browserAssertion(t, key, credentialID, userHandle, login.PublicKey.Challenge, passkeyTestOrigin, 0x01)
-	response = loginFinishRequest(t, client, server.URL, csrf, login.CeremonyID, loginWithoutUV)
+	loginWithoutUV := browserAssertion(t, key, credentialID, userHandle, login.PublicKey.Challenge, origin, rpID, 0x01)
+	response = loginFinishRequest(t, client, origin, csrf, login.CeremonyID, loginWithoutUV)
 	requireHTTPStatus(t, response, http.StatusBadRequest)
-	validAssertion := browserAssertion(t, key, credentialID, userHandle, login.PublicKey.Challenge, passkeyTestOrigin, 0x05)
-	response = loginFinishRequest(t, client, server.URL, csrf, login.CeremonyID, validAssertion)
+	validAssertion := browserAssertion(t, key, credentialID, userHandle, login.PublicKey.Challenge, origin, rpID, 0x05)
+	response = loginFinishRequest(t, client, origin, csrf, login.CeremonyID, validAssertion)
 	requireHTTPStatus(t, response, http.StatusOK)
-	if cookieValue(t, client, server.URL, adminCookie) == "" {
+	if cookieValue(t, client, origin, adminCookie) == "" {
 		t.Fatal("login did not set the admin session cookie")
 	}
 
-	response = adminRequest(t, client, server.URL, http.MethodGet, "/api/v1/admin/dashboard", nil, "", "")
+	response = adminRequest(t, client, origin, http.MethodGet, "/api/v1/admin/dashboard", nil, "", "")
 	requireHTTPStatus(t, response, http.StatusOK)
 
-	setCookie(client, server.URL, ceremonyCookie, loginCeremony)
-	csrf = cookieValue(t, client, server.URL, csrfCookie)
-	response = loginFinishRequest(t, client, server.URL, csrf, login.CeremonyID, validAssertion)
+	setCookie(client, origin, ceremonyCookie, loginCeremony)
+	csrf = cookieValue(t, client, origin, csrfCookie)
+	response = loginFinishRequest(t, client, origin, csrf, login.CeremonyID, validAssertion)
 	requireHTTPStatus(t, response, http.StatusForbidden)
 }
 
@@ -164,7 +178,7 @@ func passkeyHTTPClient(t *testing.T, server *httptest.Server) *http.Client {
 	}
 	dialer := &net.Dialer{}
 	// Keep the test's transport explicit: requests go directly to the TLS test
-	// server even though their virtual Host and WebAuthn Origin are production.
+	// server even though their virtual Host and WebAuthn Origin use the configured domain.
 	transport := &http.Transport{
 		TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, // httptest certificate is not issued for the virtual host.
 		DialContext: func(ctx context.Context, network, _ string) (net.Conn, error) {
@@ -184,7 +198,7 @@ func adminRequest(t *testing.T, client *http.Client, serverURL, method, path str
 		}
 		input = bytes.NewReader(raw)
 	}
-	request, err := http.NewRequest(method, passkeyTestOrigin+path, input)
+	request, err := http.NewRequest(method, serverURL+path, input)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -206,12 +220,12 @@ func adminRequest(t *testing.T, client *http.Client, serverURL, method, path str
 
 func registrationFinishRequest(t *testing.T, client *http.Client, serverURL, csrf, ceremonyID, bootstrap string, credential json.RawMessage) *http.Response {
 	t.Helper()
-	return adminRequest(t, client, serverURL, http.MethodPost, "/api/v1/admin/passkeys/register/finish", map[string]any{"ceremony_id": ceremonyID, "bootstrap_token": bootstrap, "credential": credential}, passkeyTestOrigin, csrf)
+	return adminRequest(t, client, serverURL, http.MethodPost, "/api/v1/admin/passkeys/register/finish", map[string]any{"ceremony_id": ceremonyID, "bootstrap_token": bootstrap, "credential": credential}, serverURL, csrf)
 }
 
 func loginFinishRequest(t *testing.T, client *http.Client, serverURL, csrf, ceremonyID string, credential json.RawMessage) *http.Response {
 	t.Helper()
-	return adminRequest(t, client, serverURL, http.MethodPost, "/api/v1/admin/login/finish", map[string]any{"ceremony_id": ceremonyID, "credential": credential}, passkeyTestOrigin, csrf)
+	return adminRequest(t, client, serverURL, http.MethodPost, "/api/v1/admin/login/finish", map[string]any{"ceremony_id": ceremonyID, "credential": credential}, serverURL, csrf)
 }
 
 func decodeHTTPJSON(t *testing.T, response *http.Response, expected int, output any) {
@@ -237,7 +251,7 @@ func requireHTTPStatus(t *testing.T, response *http.Response, expected int) {
 
 func cookieValue(t *testing.T, client *http.Client, serverURL, name string) string {
 	t.Helper()
-	u, err := url.Parse(passkeyTestOrigin)
+	u, err := url.Parse(serverURL)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -251,17 +265,17 @@ func cookieValue(t *testing.T, client *http.Client, serverURL, name string) stri
 }
 
 func setCookie(client *http.Client, serverURL, name, value string) {
-	u, _ := url.Parse(passkeyTestOrigin)
+	u, _ := url.Parse(serverURL)
 	client.Jar.SetCookies(u, []*http.Cookie{{Name: name, Value: value, Path: "/", Secure: true}})
 }
 
-func registrationCredential(t *testing.T, key *ecdsa.PrivateKey, credentialID []byte, challenge, origin string, flags byte) json.RawMessage {
+func registrationCredential(t *testing.T, key *ecdsa.PrivateKey, credentialID []byte, challenge, origin, rpID string, flags byte) json.RawMessage {
 	t.Helper()
 	clientData, err := json.Marshal(map[string]string{"type": "webauthn.create", "challenge": challenge, "origin": origin})
 	if err != nil {
 		t.Fatal(err)
 	}
-	rpIDHash := sha256.Sum256([]byte("gateway.example.com"))
+	rpIDHash := sha256.Sum256([]byte(rpID))
 	authenticatorData := make([]byte, 37)
 	copy(authenticatorData, rpIDHash[:])
 	authenticatorData[32] = flags
@@ -283,13 +297,13 @@ func registrationCredential(t *testing.T, key *ecdsa.PrivateKey, credentialID []
 	})
 }
 
-func browserAssertion(t *testing.T, key *ecdsa.PrivateKey, credentialID, userHandle []byte, challenge, origin string, flags byte) json.RawMessage {
+func browserAssertion(t *testing.T, key *ecdsa.PrivateKey, credentialID, userHandle []byte, challenge, origin, rpID string, flags byte) json.RawMessage {
 	t.Helper()
 	clientData, err := json.Marshal(map[string]string{"type": "webauthn.get", "challenge": challenge, "origin": origin})
 	if err != nil {
 		t.Fatal(err)
 	}
-	rpIDHash := sha256.Sum256([]byte("gateway.example.com"))
+	rpIDHash := sha256.Sum256([]byte(rpID))
 	authenticatorData := make([]byte, 37)
 	copy(authenticatorData, rpIDHash[:])
 	authenticatorData[32] = flags

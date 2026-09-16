@@ -2,7 +2,10 @@
 
 The passkey-only console is served at `/admin/`. It is available only when the
 gateway mounts `admin.New(store, admin.Config{Origin: cfg.PublicBaseURL})`.
-`PublicBaseURL` must be the exact HTTPS origin on `gateway.example.com`.
+`PublicBaseURL` must be the gateway's exact public HTTPS origin, such as
+`https://gateway.example.com`. WebAuthn derives its relying-party ID from that
+origin's hostname; browser requests must match the full configured origin,
+including its port when one is specified.
 
 Run `codex-gateway admin bootstrap` locally to create a bootstrap token. It is
 shown once, stored only as a SHA-256 hash, expires after 15 minutes, and is
