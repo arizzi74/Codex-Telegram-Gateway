@@ -5,6 +5,35 @@ Codex sessions through an allowlisted Telegram bot. The gateway includes a
 passkey-authenticated admin console. Workers supervise private Codex app-server
 processes and support local terminal attachment.
 
+## Quick install
+
+Requires curl and `sha256sum` or `shasum`. Downloads are verified native Go
+binaries; Python and a Go compiler are not required.
+
+**Worker (Linux or macOS):** install and authenticate Codex first, then run as
+the account that owns your workspaces:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/arizzi74/Codex-Telegram-Gateway/main/scripts/install.sh | sh
+```
+
+Follow the prompts for your gateway address, enrolled worker ID and token, and
+workspace. An existing `worker.json` is reused; rerunning on an installed worker
+preserves its configuration and running sessions.
+
+**Gateway (Linux with systemd):** prepare `gateway.json`, `secrets.env`, and `.botsecrets`
+using the [installation guide](docs/installation.md#before-installing), then run:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/arizzi74/Codex-Telegram-Gateway/main/scripts/install.sh | sudo sh -s -- install gateway \
+  --config ./gateway.json --secrets-env ./secrets.env --auto-update
+```
+
+Both commands enable daily automatic updates from
+[GitHub Releases](https://github.com/arizzi74/Codex-Telegram-Gateway/releases).
+See the [installation guide](docs/installation.md) for HTTPS setup, worker
+enrollment, and manual updates.
+
 ## Components
 
 - **Gateway:** receives Telegram updates, manages worker connections, and serves
@@ -15,29 +44,6 @@ processes and support local terminal attachment.
   executes commands within configured workspace roots.
 - **Local helper:** opens a terminal interface against a private app-server
   socket or starts an independent local runtime.
-
-## Install and update
-
-Prebuilt binaries are distributed through [GitHub Releases](https://github.com/arizzi74/Codex-Telegram-Gateway/releases).
-The [installation guide](docs/installation.md) covers installing the gateway or
-worker without Python or a Go toolchain, enabling daily automatic updates, and updating
-existing installations. Downloads are checksum-verified, gateway data is backed
-up before migrations, and workers defer updates while turns or terminal clients
-are active.
-
-Install a worker as the account that owns Codex and your workspaces:
-
-```sh
-curl -fsSL https://raw.githubusercontent.com/arizzi74/Codex-Telegram-Gateway/main/scripts/install.sh | sh
-```
-
-The installer asks for your gateway address, enrolled worker ID and token, and
-workspace, then enables daily automatic updates. It uses `./worker.json` if
-you already prepared one. Rerunning it adopts an existing worker without
-replacing its configuration or restarting its sessions.
-
-The bootstrap requires curl and `sha256sum` or `shasum`; the installer and updater
-are native Go executables. Codex itself must already be installed and authenticated.
 
 ## Configuration and startup
 
