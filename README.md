@@ -21,13 +21,17 @@ Follow the prompts for your gateway address, enrolled worker ID and token, and
 workspace. An existing `worker.json` is reused; rerunning on an installed worker
 preserves its configuration and running sessions.
 
-**Gateway (Linux with systemd):** prepare `gateway.json`, `secrets.env`, and `.botsecrets`
-using the [installation guide](docs/installation.md#before-installing), then run:
+**Gateway (Linux with systemd):** run the same installer with sudo:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/arizzi74/Codex-Telegram-Gateway/main/scripts/install.sh | sudo sh -s -- install gateway \
-  --config ./gateway.json --secrets-env ./secrets.env --auto-update
+curl -fsSL https://raw.githubusercontent.com/arizzi74/Codex-Telegram-Gateway/main/scripts/install.sh | sudo sh
 ```
+
+Follow the prompts for your public HTTPS address, Telegram bot username and
+token, and allowed Telegram user ID. The installer creates the configuration,
+private secrets, SQLite database, and service. Existing installations are adopted
+without restarting. Configure HTTPS separately, then follow the
+[gateway setup steps](docs/installation.md#finish-gateway-setup).
 
 Both commands enable daily automatic updates from
 [GitHub Releases](https://github.com/arizzi74/Codex-Telegram-Gateway/releases).

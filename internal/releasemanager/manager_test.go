@@ -7,6 +7,26 @@ import (
 	"testing"
 )
 
+func TestSetupDefaultsFollowUserPrivileges(t *testing.T) {
+	for _, test := range []struct {
+		args []string
+		uid  int
+		want string
+	}{
+		{nil, 0, "gateway"},
+		{nil, 1000, "worker"},
+		{[]string{"worker"}, 0, "worker"},
+		{[]string{"gateway"}, 1000, "gateway"},
+		{[]string{"other"}, 0, ""},
+		{[]string{"gateway", "--config", "private.json"}, 0, ""},
+	} {
+		got, err := setupComponent(test.args, test.uid)
+		if got != test.want || (err != nil) != (test.want == "") {
+			t.Fatalf("setupComponent(%v, %d) = %q, %v", test.args, test.uid, got, err)
+		}
+	}
+}
+
 func coreWorkerHome(t *testing.T) (*Manager, *Layout) {
 	t.Helper()
 	if os.Geteuid() == 0 {

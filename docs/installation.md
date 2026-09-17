@@ -15,13 +15,14 @@ macOS binaries use the normal macOS system libraries. Linux service installation
 uses systemd; macOS workers use launchd. Workers also need the supported Codex executable, its normal
 account credentials, and access to their configured workspaces.
 
-For a gateway, prepare the [JSON configuration](../examples/) first. Set your
-own HTTPS origin, a local SQLite `database_path`, the path to
-your private `.botsecrets`, and the environment-variable name for the Telegram
-webhook secret. Provide that variable in a private environment file. Configure
+For a gateway, have your public HTTPS address, Telegram bot username and token,
+and allowed numeric Telegram user ID ready. Guided setup creates the JSON
+configuration and private secret files for you, including a random webhook
+secret and a SQLite database at `/var/lib/codex-gateway/gateway.db`. Configure
 HTTPS termination separately using the [proxy template](../deploy/nginx/telegramgw.conf).
-The managed gateway service requires its database under `/var/lib/codex-gateway`,
-for example `/var/lib/codex-gateway/gateway.db`.
+For custom settings, prepare the [JSON configuration](../examples/gateway.json)
+and a private environment file instead. The managed gateway database must be
+under `/var/lib/codex-gateway`.
 
 For a worker, enroll it in the gateway admin console and copy its worker ID and
 one-time token. The guided installer creates the configuration for you, or you
@@ -48,16 +49,63 @@ cannot install symlinks or paths outside the staging directory.
 Run on the Linux gateway host:
 
 ```sh
+curl -fsSL https://raw.githubusercontent.com/arizzi74/Codex-Telegram-Gateway/main/scripts/install.sh | sudo sh
+```
+
+Running with sudo selects gateway setup; running without sudo selects worker
+setup. No installer arguments are needed. Daily automatic updates are enabled.
+
+- An existing gateway in the standard location is adopted without replacing
+  its configuration or restarting its service.
+- Otherwise, a prepared `gateway.json` and private `secrets.env` in the current
+  directory are reused. The bot secrets file referenced by the JSON must also
+  exist with private permissions.
+- If no configuration exists, the wizard asks for your HTTPS address, bot
+  username, allowed Telegram user ID and display label, local port, and bot
+  token. Token entry is hidden; the webhook secret is generated automatically.
+
+The prompts read the terminal directly, so they work through the pipe. Without
+a terminal, prepare the configuration files first. The installer sets up the
+service account, private configuration, SQLite data directory, gateway binary,
+systemd service, and updater. It does not install PostgreSQL or configure DNS,
+TLS certificates, or a reverse proxy.
+
+You can also use `sudo sh /tmp/codex-telegramgw-install.sh` or
+`sudo codex-telegramgw setup gateway`. For an unattended installation using
+custom paths, the explicit command remains available:
+
+```sh
 sudo sh /tmp/codex-telegramgw-install.sh install gateway \
   --config /path/to/gateway.json \
   --secrets-env /path/to/secrets.env \
   --auto-update
 ```
 
-The installer sets up the service account, private configuration and SQLite data
-directory, gateway binary, systemd service, and update manager. Configure the
-Telegram webhook and command menu after HTTPS is ready, then enroll your worker.
-The gateway uses SQLite; the installer does not install PostgreSQL.
+### Finish gateway setup
+
+Configure your public HTTPS reverse proxy to reach the selected local port
+(`127.0.0.1:8080` by default), including WebSocket upgrades. Then run these
+commands on the gateway host to register the Telegram webhook and command menu
+and create the first administrator's one-time token:
+
+```sh
+gateway() {
+  sudo systemd-run --quiet --wait --pipe --collect \
+    --uid=codexgateway --gid=codexgateway \
+    -p EnvironmentFile=/etc/codex-gateway/secrets.env \
+    -p WorkingDirectory=/var/lib/codex-gateway -p UMask=0077 \
+    /usr/local/lib/codex-telegramgw/codex-gateway \
+    --config /etc/codex-gateway/gateway.json "$@"
+}
+gateway webhook set
+gateway menu set
+gateway admin bootstrap
+```
+
+This runs gateway administration as its service account and loads the private
+environment through systemd. The one-time token is printed to your terminal.
+Open the printed `/admin/` address, register a passkey within 15 minutes, and
+enroll a worker to obtain its ID and token.
 
 ## Install a worker
 
@@ -172,7 +220,7 @@ processes, so do not run this from a Codex turn hosted by that worker.
 
 ## Automatic updates
 
-Worker setup enables a daily scheduled check for stable releases automatically.
+Guided gateway and worker setup enable a daily scheduled check for stable releases automatically.
 For explicit `install` and `adopt` commands, pass `--auto-update` to enable it.
 To manage it later:
 

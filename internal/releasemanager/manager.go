@@ -69,7 +69,7 @@ type options struct {
 const usage = `Install and update Codex Telegram Gateway from verified GitHub Releases.
 
 Usage:
-  codex-telegramgw setup worker
+  codex-telegramgw setup [gateway|worker]
   codex-telegramgw install gateway --config PATH --secrets-env PATH [--auto-update]
   codex-telegramgw install worker --config PATH [--auto-update]
   codex-telegramgw adopt gateway|worker [--auto-update]
@@ -79,10 +79,26 @@ Usage:
 
 Install and update accept --version vMAJOR.MINOR.PATCH and --repo OWNER/REPOSITORY.
 Run gateway administration with sudo and worker administration as its user.
+Setup defaults to gateway under sudo/root and worker otherwise.
+Gateway setup reuses ./gateway.json and ./secrets.env or prompts for settings.
+It generates the webhook secret; HTTPS must be configured separately.
 Worker installation requires an installed, authenticated Codex executable.
 Worker setup reuses ./worker.json or prompts for enrollment and workspace details.
-It enables daily updates and adopts existing workers without restarting them.
+Setup enables daily updates and adopts existing services without restarting them.
 `
+
+func setupComponent(args []string, uid int) (string, error) {
+	if len(args) == 0 {
+		if uid == 0 {
+			return "gateway", nil
+		}
+		return "worker", nil
+	}
+	if len(args) == 1 && (args[0] == "gateway" || args[0] == "worker") {
+		return args[0], nil
+	}
+	return "", errors.New("usage: codex-telegramgw setup [gateway|worker]")
+}
 
 func parseOptions(args []string) (options, error) {
 	var result options
@@ -158,8 +174,16 @@ func Execute(ctx context.Context, args []string, out, errOut io.Writer) int {
 		}
 	}
 	var err error
-	if len(args) == 2 && args[0] == "setup" && args[1] == "worker" {
-		err = New(out).SetupWorker(ctx)
+	if args[0] == "setup" {
+		var component string
+		component, err = setupComponent(args[1:], os.Geteuid())
+		if err == nil {
+			if component == "gateway" {
+				err = New(out).SetupGateway(ctx)
+			} else {
+				err = New(out).SetupWorker(ctx)
+			}
+		}
 	} else {
 		var opts options
 		opts, err = parseOptions(args)

@@ -127,7 +127,7 @@ func TestBootstrapWorksWithoutPythonAndPreservesArguments(t *testing.T) {
 	}
 }
 
-func TestBootstrapWithoutArgumentsStartsWorkerSetup(t *testing.T) {
+func TestBootstrapWithoutArgumentsStartsGuidedSetup(t *testing.T) {
 	fixture := bootstrapTestFixture(t)
 	// Simulate curl piping the bootstrap to sh: no filename or shell arguments.
 	script, err := os.ReadFile(fixture.script)
@@ -146,7 +146,7 @@ func TestBootstrapWithoutArgumentsStartsWorkerSetup(t *testing.T) {
 		t.Fatal(err)
 	}
 	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
-	if strings.Join(lines[1:], "\n") != "v1.2.3\nsetup\nworker" {
+	if strings.Join(lines[1:], "\n") != "v1.2.3\nsetup" {
 		t.Fatalf("unexpected default invocation: %q", lines)
 	}
 	if _, err := os.Stat(lines[0]); !os.IsNotExist(err) {

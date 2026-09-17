@@ -2,10 +2,10 @@
 # Download and execute the native, checksum-verified release manager.
 set -eu
 
-# A plain curl ... | sh starts worker setup. Explicit administration commands
-# continue to be forwarded unchanged.
+# The native manager selects gateway setup under sudo, worker setup otherwise.
+# Explicit administration commands continue to be forwarded unchanged.
 if [ "$#" -eq 0 ]; then
-  set -- setup worker
+  set -- setup
 fi
 
 fail() { printf '%s\n' "Installation failed: $*" >&2; exit 1; }

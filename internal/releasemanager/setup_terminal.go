@@ -34,12 +34,12 @@ func (t *workerSetupTerminal) Ask(ctx context.Context, label, fallback string, s
 	if secret {
 		state, err := workerTerminalState(fd)
 		if err != nil {
-			return "", errors.New("cannot hide the enrollment token on this terminal")
+			return "", errors.New("cannot hide secret input on this terminal")
 		}
 		hidden := *state
 		hidden.Lflag &^= unix.ECHO | unix.ECHONL
 		if err := setWorkerTerminalState(fd, &hidden); err != nil {
-			return "", errors.New("cannot hide the enrollment token on this terminal")
+			return "", errors.New("cannot hide secret input on this terminal")
 		}
 		defer func() {
 			// Discard any unfinished secret input before returning to the shell.
