@@ -247,16 +247,12 @@ func (m *RuntimeManager) startProfile(ctx context.Context, profile config.Runtim
 	runtime.PID, runtime.State = client.PID(), "running"
 	runtime.LocalSocket = client.LocalSocket()
 	if runtime.LocalSocket != "" {
-		publicSocket := filepath.Join(filepath.Dir(runtime.LocalSocket), "app.sock")
-		proxy, err := newAttachmentProxy(publicSocket, runtime.LocalSocket)
+		proxy, publicSocket, err := m.openAttachment(runtime, runtime.LocalSocket)
 		if err != nil {
 			_ = client.Close()
 			return runtime, nil, err
 		}
 		runtime.LocalSocket = publicSocket
-		m.mu.Lock()
-		m.attachments[runtime.ID] = proxy
-		m.mu.Unlock()
 		go func() { <-client.Done(); proxy.close() }()
 	}
 	versionCtx, cancel := context.WithTimeout(ctx, 5*time.Second)

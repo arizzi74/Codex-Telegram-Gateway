@@ -85,14 +85,7 @@ func run(args []string, logger *slog.Logger) error {
 		} else {
 			return errors.New("usage: codex-worker [--config PATH] update prepare|update abort --token TOKEN")
 		}
-		lease, err := worker.RequestUpdate(ctx, cfg, action, token)
-		if err != nil {
-			return err
-		}
-		if action == "abort" {
-			return json.NewEncoder(os.Stdout).Encode(map[string]bool{"aborted": true})
-		}
-		return json.NewEncoder(os.Stdout).Encode(lease)
+		return requestUpdate(ctx, cfg, action, token, os.Stdout)
 	case "run":
 		if len(args) > 1 {
 			return errors.New("unexpected run arguments")

@@ -10,6 +10,13 @@ bridge performs HTTP Upgrade through the proxy's stdio and translates WebSocket
 text frames to the adapter's JSONL pump. The worker/gateway protocol remains
 independent and WSS-only. A direct-stdio adapter mode remains available.
 
+The worker publishes a second private, stable Unix socket for native CLI
+attachments. Its WebSocket proxy tracks JSON-RPC requests, approvals and
+asynchronous activity before granting an update lease. Preparation fences new
+requests on existing connections as well as new attachments. Idle connections
+can survive a worker restart through the native CLI's reconnect/resume handling;
+the proxy never replays requests. An unconfirmed outcome still defers updates.
+
 Consequences: this explicitly extends the spec's direct-stdio process topology
 to fulfill the user's CLI requirement. There is no public Codex listener, no PID
 adoption and no multiplexing of multiple JSONL writers. Closing the owned adapter
@@ -18,3 +25,6 @@ start` owns a fresh runtime for the lifetime of its attached terminal CLI.
 
 Verification: the installed Codex 0.154.0 passed the opt-in initialize,
 loaded-thread-list and stored-thread-list smoke test without starting a turn.
+The opt-in native reconnect test also verifies that a saved session reconnects
+through the worker proxy after a backend restart, preserving an unsent draft
+without adding it to saved history.

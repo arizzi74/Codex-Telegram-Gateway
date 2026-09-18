@@ -150,6 +150,10 @@ codex-local attach --socket /absolute/private/app.sock THREAD_ID
 
 Use `codex-worker attach` to share a worker-managed session with Telegram.
 Closing the attached terminal leaves the worker and its app server running.
+An idle attached CLI can reconnect across automatic worker updates. Active turns,
+requests and approvals still defer an update; see the
+[update guide](docs/installation.md#check-and-apply-updates) for the first upgrade from
+older workers.
 
 `codex-local start` owns an independent app server and proxy until the terminal
 exits, and creates a new session when the directory has no history. A session

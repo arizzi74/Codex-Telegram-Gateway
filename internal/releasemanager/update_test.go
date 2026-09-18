@@ -309,7 +309,7 @@ func TestWorkerBusyDoesNotStopOrReplace(t *testing.T) {
 			return CommandResult{Output: []byte("MainPID=123\nActiveState=active\n")}, nil
 		}
 		if args[0] == l.Binary && args[3] == "update" && args[4] == "prepare" {
-			return CommandResult{ExitCode: 75}, nil
+			return CommandResult{ExitCode: 75, Output: []byte(`{"error":"worker update: native CLI approvals or input are pending"}`)}, nil
 		}
 		t.Fatalf("busy worker was acted on: %v", args)
 		return CommandResult{}, nil
@@ -319,8 +319,92 @@ func TestWorkerBusyDoesNotStopOrReplace(t *testing.T) {
 	if !errors.As(err, &busy) {
 		t.Fatalf("wanted busy error: %v", err)
 	}
+	if busy.Reason != "worker update deferred: native CLI approvals or input are pending" {
+		t.Fatalf("lost worker deferral reason: %v", err)
+	}
 	if updateRead(t, l.Binary) != "old binary" || updateRead(t, l.Manager) != "old manager" {
 		t.Fatal("busy worker binary replaced")
+	}
+}
+
+func TestWorkerPrepareReportsKnownDeferralReasons(t *testing.T) {
+	for _, test := range []struct {
+		name, reason, want string
+	}{
+		{"native-request", "worker update: native CLI requests are still in flight", "worker update deferred: native CLI requests are still in flight"},
+		{"native-approval", "worker update: native CLI approvals or input are pending", "worker update deferred: native CLI approvals or input are pending"},
+		{"native-unverified", "worker update: native CLI activity could not be verified", "worker update deferred: native CLI activity could not be verified"},
+		{"native-initializing", "worker update: native CLI connection is still initializing", "worker update deferred: native CLI connection is still initializing"},
+		{"active-thread", "worker update: a native CLI thread is active or its idle state cannot be verified", "worker update deferred: a native CLI thread is active or its idle state cannot be verified"},
+		{"pending-runtime-request", "worker update: runtime has pending or unconfirmed RPCs; finish work and stop the worker service before updating", "worker update deferred: runtime has pending or unconfirmed requests"},
+		{"runtime-busy", "worker update: runtime startup or discovery is in progress", "worker update deferred: runtime startup or discovery is in progress"},
+		{"session-queued", "worker update: session has active or queued work", "worker update deferred: commands are queued or executing"},
+		{"queued-command", "worker update: commands are queued or executing", "worker update deferred: commands are queued or executing"},
+		{"session-response", "worker update: a session has an active turn or pending response", "worker update deferred: a session has an active turn or pending response"},
+		{"unacknowledged-events", "worker update: durable events are awaiting gateway acknowledgement", "worker update deferred: events are awaiting gateway acknowledgement"},
+		{"legacy-native-guard", "worker update: this runtime was used by a native CLI; finish native work and stop the worker service before updating", "worker update deferred: the installed worker cannot verify a runtime previously used by a native CLI"},
+		{"unavailable-coordination", "worker update coordination unavailable; the running worker must support update prepare", "worker update deferred: the running worker does not provide update coordination"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			output, err := json.Marshal(map[string]string{"error": test.reason})
+			if err != nil {
+				t.Fatal(err)
+			}
+			l := &Layout{Binary: "codex-worker", Config: "config.json"}
+			calls := 0
+			m := &Manager{Run: func(_ context.Context, args ...string) (CommandResult, error) {
+				calls++
+				if !reflect.DeepEqual(args, []string{l.Binary, "--config", l.Config, "update", "prepare"}) {
+					t.Fatalf("failed prepare triggered another command: %v", args)
+				}
+				return CommandResult{ExitCode: 1, Output: output}, nil
+			}}
+			lease, err := m.workerPrepare(t.Context(), l)
+			var busy *BusyError
+			if lease != nil || !errors.As(err, &busy) || busy.Reason != test.want || calls != 1 {
+				t.Fatalf("lease=%v error=%v calls=%d, want %q", lease, err, calls, test.want)
+			}
+		})
+	}
+}
+
+func TestWorkerPrepareHidesUntrustedOutput(t *testing.T) {
+	const known = `{"error":"worker update: native CLI approvals or input are pending"}`
+	const secret = "private-token-value"
+	for _, test := range []struct{ name, output string }{
+		{"empty-legacy-output", ""},
+		{"plain-text", "worker update: native CLI approvals or input are pending"},
+		{"arbitrary-stderr", "configuration /private/config.json contains " + secret},
+		{"private-error", `{"error":"worker update: cannot verify native thread: /private/session.json?token=` + secret + `"}`},
+		{"decorated-reason", `{"error":"worker update: native CLI approvals or input are pending: ` + secret + `"}`},
+		{"reason-with-newline", `{"error":"worker update: native CLI approvals or input are pending\n` + secret + `"}`},
+		{"reason-with-control-byte", `{"error":"worker update: native CLI approvals or input are pending\u0000` + secret + `"}`},
+		{"extra-fields", `{"error":"worker update: native CLI approvals or input are pending","token":"` + secret + `"}`},
+		{"log-object", `{"msg":"worker stopped","error":"worker update: native CLI approvals or input are pending"}`},
+		{"leading-output", secret + "\n" + known},
+		{"trailing-output", known + "\n" + secret},
+		{"multiple-objects", known + "\n" + known},
+		{"array", "[" + known + "]"},
+		{"nested-object", `{"error":` + known + `}`},
+		{"null", "null"},
+		{"wrong-field", `{"message":"worker update: native CLI approvals or input are pending"}`},
+		{"wrong-error-type", `{"error":true}`},
+		{"malformed", `{"error":"` + secret},
+		{"oversize", strings.Repeat(" ", 1025) + known},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			m := &Manager{Run: func(context.Context, ...string) (CommandResult, error) {
+				return CommandResult{ExitCode: 1, Output: []byte(test.output)}, nil
+			}}
+			lease, err := m.workerPrepare(t.Context(), &Layout{})
+			var busy *BusyError
+			if lease != nil || !errors.As(err, &busy) || busy.Reason != workerPrepareUnknownReason {
+				t.Fatalf("untrusted worker output escaped the generic deferral: lease=%v error=%v", lease, err)
+			}
+			if strings.Contains(err.Error(), secret) || strings.Contains(err.Error(), "/private/") {
+				t.Fatal("worker output exposed a token or private path")
+			}
+		})
 	}
 }
 

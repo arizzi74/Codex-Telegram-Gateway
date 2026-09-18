@@ -261,6 +261,14 @@ func (a *Agent) prepareUpdate(ctx context.Context, ttl time.Duration) (UpdateLea
 	if err := a.store.checkUpdateIdle(); err != nil {
 		return UpdateLease{}, err
 	}
+	// A server notification or approval can arrive while the other runtime and
+	// actor checks are in progress. Recheck native activity behind the admission
+	// fence before handing the updater a restart lease.
+	for _, proxy := range proxies {
+		if err := proxy.checkIdle(); err != nil {
+			return UpdateLease{}, err
+		}
+	}
 	lease := UpdateLease{WorkerID: a.cfg.WorkerID, PID: os.Getpid(), Token: uuid.NewString(), ExpiresAt: time.Now().UTC().Add(ttl)}
 	a.update = &updateState{lease: lease, proxies: proxies}
 	a.update.timer = time.AfterFunc(ttl, func() { _ = a.abortUpdate(lease.Token) })

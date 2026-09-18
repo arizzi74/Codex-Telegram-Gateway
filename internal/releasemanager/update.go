@@ -444,13 +444,78 @@ func (m *Manager) workerAbort(ctx context.Context, l *Layout, token string) erro
 	return err
 }
 
+const workerPrepareUnknownReason = "worker update deferred: running/waiting work or no safe update support; see installation documentation"
+
+// A failed worker command may contain private configuration or native runtime
+// output. Accept only the prepare command's bounded error object, and translate
+// known fixed worker diagnostics instead of forwarding any subprocess output.
+func workerPrepareFailure(output []byte) string {
+	if len(output) > 1024 {
+		return workerPrepareUnknownReason
+	}
+	var response map[string]json.RawMessage
+	if json.Unmarshal(output, &response) != nil || len(response) != 1 {
+		return workerPrepareUnknownReason
+	}
+	var reason string
+	if json.Unmarshal(response["error"], &reason) != nil {
+		return workerPrepareUnknownReason
+	}
+	switch reason {
+	case "worker update: command admission is busy":
+		return "worker update deferred: command admission is busy"
+	case "worker update: another update is already prepared":
+		return "worker update deferred: another update is already prepared"
+	case "worker update: runtime startup or discovery is in progress":
+		return "worker update deferred: runtime startup or discovery is in progress"
+	case "worker update: runtime is not settled":
+		return "worker update deferred: runtime is still starting or degraded"
+	case "worker update: runtime attachment admission is not managed":
+		return "worker update deferred: runtime attachment admission is not managed"
+	case "worker update: attachment proxy is closed":
+		return "worker update deferred: runtime attachment proxy is closed"
+	case "worker update: a local CLI is attached":
+		return "worker update deferred: a local CLI is attached"
+	case "worker update: this runtime was used by a native CLI; finish native work and stop the worker service before updating":
+		return "worker update deferred: the installed worker cannot verify a runtime previously used by a native CLI"
+	case "worker update: runtime has pending or unconfirmed RPCs; finish work and stop the worker service before updating":
+		return "worker update deferred: runtime has pending or unconfirmed requests"
+	case "worker update: native CLI requests are still in flight":
+		return "worker update deferred: native CLI requests are still in flight"
+	case "worker update: native CLI approvals or input are pending":
+		return "worker update deferred: native CLI approvals or input are pending"
+	case "worker update: native CLI activity could not be verified":
+		return "worker update deferred: native CLI activity could not be verified"
+	case "worker update: native CLI connection is still initializing":
+		return "worker update deferred: native CLI connection is still initializing"
+	case "worker update: a native CLI thread is active or its idle state cannot be verified":
+		return "worker update deferred: a native CLI thread is active or its idle state cannot be verified"
+	case "worker update: runtime RPC state changed while checking idle":
+		return "worker update deferred: runtime request state changed while checking idle"
+	case "worker update: session is busy":
+		return "worker update deferred: a session is busy"
+	case "worker update: session has active or queued work", "worker update: commands are queued or executing":
+		return "worker update deferred: commands are queued or executing"
+	case "worker update: a session has an active turn or pending response":
+		return "worker update deferred: a session has an active turn or pending response"
+	case "worker update: durable events are awaiting gateway acknowledgement":
+		return "worker update deferred: events are awaiting gateway acknowledgement"
+	case "worker update: too many loaded threads to verify", "worker update: repeated loaded-thread cursor":
+		return "worker update deferred: loaded threads could not be verified"
+	case "worker update coordination unavailable; the running worker must support update prepare":
+		return "worker update deferred: the running worker does not provide update coordination"
+	default:
+		return workerPrepareUnknownReason
+	}
+}
+
 func (m *Manager) workerPrepare(ctx context.Context, l *Layout) (_ *workerLease, retErr error) {
 	result, err := m.Run(ctx, l.Binary, "--config", l.Config, "update", "prepare")
 	if err != nil {
 		return nil, err
 	}
 	if result.ExitCode != 0 {
-		return nil, &BusyError{Reason: "worker update deferred: running/waiting work or no safe update support; see installation documentation"}
+		return nil, &BusyError{Reason: workerPrepareFailure(result.Output)}
 	}
 	// Decode the token separately: an invalid timestamp/identity still needs to
 	// release an otherwise valid reservation instead of pausing work until expiry.

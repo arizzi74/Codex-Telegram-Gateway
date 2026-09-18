@@ -200,22 +200,28 @@ startup. Workers continue running while the gateway restarts and replay their
 durable outboxes when it returns.
 
 Worker updates require cooperation from the running worker. It must have no
-active or waiting turns, queued work, attached terminal clients, or outstanding
-events awaiting gateway acknowledgement. During a prepared update, the worker
-fences new commands and terminal attachments until it restarts or the preparation
-expires. Busy workers defer the update and keep working.
+active or waiting turns, queued work, unanswered native CLI requests or approvals,
+or outstanding events awaiting gateway acknowledgement. An attached, idle CLI
+does not prevent an update, and a completed CLI connection leaves no permanent
+blocker. The worker tracks native JSON-RPC requests and asynchronous work, including
+requests whose terminal disconnected before the server replied.
 
-For this release, a worker that has accepted a native terminal attachment also
-defers live updates after the terminal disconnects. This avoids interrupting
-native requests that may still be queued inside the app server. After finishing
-that work, stop the worker and apply the update using the commands below.
-An app-server request timeout also blocks live updates for that runtime, because
-the timed-out request may still execute later.
+During a prepared update, new commands and terminal attachments are fenced until
+the worker restarts or the preparation expires. A request sent through an existing
+CLI during this interval receives an explicit retry error and is not executed.
+Busy workers defer the update and log the specific reason. Unknown protocol
+activity and requests whose completion cannot be verified still defer updates.
 
-Workers predating this update protocol cannot safely participate in unattended
-restarts. Their automatic updates defer. For the first upgrade, finish active
-turns, close attached terminals, stop the old worker service, and run the worker
-update command. The new worker supports guarded automatic updates thereafter.
+The worker publishes a stable private attachment socket across restarts. Compatible
+Codex TUIs can use their native reconnect/resume handling at that address; the
+gateway never replays prompts or RPCs. If the terminal cannot reconnect, attach
+again with `codex-worker attach SESSION` after the worker is ready.
+
+Older workers that block every native CLI attachment need a one-time controlled
+upgrade. Finish active turns, exit the attached CLI, stop the old worker service,
+and run the worker update command below. Then attach again so the CLI uses the new
+stable socket. The same first-upgrade procedure applies to workers predating the
+update coordination protocol. Subsequent idle CLI updates can run automatically.
 
 On Linux, run these commands in a separate terminal after finishing worker tasks:
 
