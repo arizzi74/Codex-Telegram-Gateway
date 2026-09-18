@@ -250,6 +250,20 @@ owning user. Releases marked draft or prerelease are not selected automatically.
 An older version is not installed over a newer one. Network or verification
 failures leave the installed binaries in place.
 
+Older native gateway managers can fail under systemd with `$HOME is not defined`
+before checking GitHub. The current manager uses system paths for the gateway
+and only requires a home directory for worker installations. To let an older
+installed manager download the fixed release at its next scheduled check, run
+`sudo systemctl edit codex-gateway-update.service` and add:
+
+```ini
+[Service]
+Environment=HOME=/root
+```
+
+Then run `sudo systemctl daemon-reload`. This supplies the older manager's
+required environment without starting an update or restarting either service.
+
 On Linux, inspect the schedules and update logs with:
 
 ```sh

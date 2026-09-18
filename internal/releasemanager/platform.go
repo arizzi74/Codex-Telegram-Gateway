@@ -22,9 +22,15 @@ import (
 )
 
 func NewLayout(component string) (*Layout, error) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return nil, err
+	// Gateway services use system paths and may run without HOME under systemd.
+	// Only the worker installation depends on the invoking user's home.
+	var home string
+	if component == "worker" {
+		var err error
+		home, err = os.UserHomeDir()
+		if err != nil {
+			return nil, err
+		}
 	}
 	return newLayout(component, runtime.GOOS, runtime.GOARCH, home)
 }
@@ -33,7 +39,7 @@ func newLayout(component, system, architecture, home string) (*Layout, error) {
 	if (component != "gateway" && component != "worker") || (system != "linux" && system != "darwin") || (architecture != "amd64" && architecture != "arm64") || (component == "gateway" && system != "linux") {
 		return nil, errors.New("unsupported component or platform")
 	}
-	if !filepath.IsAbs(home) || strings.ContainsAny(home, "%\"\\") || strings.ContainsFunc(home, unicode.IsSpace) {
+	if component == "worker" && (!filepath.IsAbs(home) || strings.ContainsAny(home, "%\"\\") || strings.ContainsFunc(home, unicode.IsSpace)) {
 		return nil, errors.New("service installation requires an absolute home path without spaces, quotes, percent signs or backslashes")
 	}
 	l := &Layout{Component: component, System: system, Architecture: architecture, Home: home}

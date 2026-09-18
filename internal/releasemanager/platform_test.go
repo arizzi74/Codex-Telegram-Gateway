@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -56,6 +57,42 @@ func TestPlatformLayoutsRejectUnsupportedServicePaths(t *testing.T) {
 	}
 	if l.Manager != "/usr/local/lib/codex-telegramgw/codex-telegramgw" || l.LegacyManager != "/usr/local/lib/codex-telegramgw/release-manager.py" {
 		t.Fatalf("wrong manager paths: %+v", l)
+	}
+}
+
+func TestPlatformGatewayLayoutDoesNotRequireHome(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("gateway installation requires Linux")
+	}
+	for _, home := range []string{"", "relative/home", "/home/user name"} {
+		t.Run(home, func(t *testing.T) {
+			t.Setenv("HOME", home)
+			if home == "" {
+				if err := os.Unsetenv("HOME"); err != nil {
+					t.Fatal(err)
+				}
+			}
+			l, err := NewLayout("gateway")
+			if err != nil {
+				t.Fatalf("gateway depends on HOME: %v", err)
+			}
+			if l.Config != "/etc/codex-gateway/gateway.json" || l.Command != "/usr/local/bin/codex-telegramgw" || l.UnitDir != "/etc/systemd/system" || l.Home != "" {
+				t.Fatalf("gateway did not use system paths: %+v", l)
+			}
+		})
+	}
+}
+
+func TestPlatformWorkerLayoutStillRequiresHome(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("Linux user home environment")
+	}
+	t.Setenv("HOME", "")
+	if err := os.Unsetenv("HOME"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := NewLayout("worker"); err == nil {
+		t.Fatal("worker accepted a missing home directory")
 	}
 }
 
