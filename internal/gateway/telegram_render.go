@@ -221,9 +221,10 @@ func (s *Sender) renderSessions(ctx context.Context, row registry.Delivery, runt
 	if len(sessions) == 0 {
 		text.WriteString("\n\nNo sessions found.")
 	}
-	for _, session := range sessions[start:end] {
+	for index, session := range sessions[start:end] {
+		number := start + index + 1
 		label := s.sessionListLabel(session)
-		text.WriteString("\n\n" + sessionIcon(session) + " " + s.sessionListField(label, 80, 320) + "\n" + s.sessionListField(titleCase(session.State), 24, 96) + " · " + sessionAvailability(session) + " · " + s.sessionListField(displayValue(session.CWD), 160, 640))
+		fmt.Fprintf(&text, "\n\n%d. %s %s\n%s · %s\n%s", number, sessionIcon(session), label, s.sessionListField(titleCase(session.State), 24, 96), sessionAvailability(session), s.sessionListField(displayValue(session.CWD), 160, 640))
 		sessionID, err := requiredUUID("session", session.ID)
 		if err != nil {
 			return "", nil, err
@@ -236,7 +237,7 @@ func (s *Sender) renderSessions(ctx context.Context, row registry.Delivery, runt
 		if err != nil {
 			return "", nil, fmt.Errorf("render session status callback: %w", err)
 		}
-		keyboard.Rows = append(keyboard.Rows, []TelegramButton{{Text: s.sessionListField("Connect · "+label, 36, 36), Data: connect}, {Text: "Status", Data: status}})
+		keyboard.Rows = append(keyboard.Rows, []TelegramButton{{Text: fmt.Sprintf("Connect %d", number), Data: connect}, {Text: fmt.Sprintf("Status %d", number), Data: status}})
 	}
 	var navigation []TelegramButton
 	for _, target := range []struct {
@@ -263,8 +264,8 @@ func (s *Sender) renderSessions(ctx context.Context, row registry.Delivery, runt
 	return text.String(), keyboard, nil
 }
 
-// Bound fields independently so each page fits one message and its keyboard
-// remains small even with Unicode, control characters and JSON escaping.
+// Bound secondary fields independently. Full session names belong in the
+// message body; ordinary delivery splitting handles pages longer than a message.
 // Redact before truncation to avoid exposing part of a configured secret.
 func (s *Sender) sessionListField(value string, maxUnits, maxBytes int) string {
 	if s.options.Redactor != nil {
@@ -288,11 +289,16 @@ func (s *Sender) sessionListField(value string, maxUnits, maxBytes int) string {
 
 func (s *Sender) sessionListLabel(session protocol.Session) string {
 	if s.options.Redactor != nil {
-		// sessionLabel also shortens fallback previews. Mask the original value
-		// before that shortening, as well as before the page-specific bounds.
 		session.Name = s.options.Redactor.Redact(session.Name)
 		session.Preview = s.options.Redactor.Redact(session.Preview)
 		session.CWD = s.options.Redactor.Redact(session.CWD)
+	}
+	// This view has numbered controls, so neither names nor preview-based
+	// labels need the compact label used by buttons elsewhere.
+	for _, value := range []string{session.Name, session.Preview} {
+		if value = strings.TrimSpace(value); value != "" {
+			return value
+		}
 	}
 	return sessionLabel(session)
 }

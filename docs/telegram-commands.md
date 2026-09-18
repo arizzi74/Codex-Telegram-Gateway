@@ -21,11 +21,14 @@ menu names, so `/debug_config` is the menu spelling of `/debug-config`; both wor
 | `/tginterrupt` | Interrupt the exact active turn. |
 | `/tginput APPROVAL_ID QUESTION_ID ANSWER` | Answer an input request; replying to its message is easier. |
 
-Session lists are ordered by name. Long names and workspace paths are shortened
-in the list; use a session's **Status** button for full details. Page buttons are
+Session lists are ordered by name. Each numbered entry shows the full session
+name, with its state and workspace on separate lines. Use the matching
+**Connect 1**, **Status 1**, and other numbered buttons. Long pages continue across messages
+without shortening session names; controls appear after the complete page. Long
+workspace paths are shortened; **Status** shows full details. Page buttons are
 bound to your user, chat, topic, and runtime generation, and do not change the
-selected session or start any work. Run `/tgsessions` again if a button expires
-or the worker restarts.
+selected session or start any work. Run `/tgsessions` again if a button expires or
+the worker restarts.
 
 Only user conversations inside the worker's allowed workspaces appear. Internal
 helper-agent and ephemeral threads are excluded. Discovery also hides entries

@@ -107,8 +107,17 @@ func TestSessionPageBoundsLongEscapedAndUnicodeLabels(t *testing.T) {
 
 func assertSessionPageBudget(t *testing.T, text string, keyboard *TelegramKeyboard) {
 	t.Helper()
-	if !utf8.ValidString(text) || telegramTextLength(text) > 4000 {
-		t.Fatalf("page exceeds a single valid Telegram message: %d", telegramTextLength(text))
+	if !utf8.ValidString(text) {
+		t.Fatal("page contains invalid Unicode")
+	}
+	parts := SplitText(text, 4000)
+	if strings.Join(parts, "") != text {
+		t.Fatal("splitting lost part of the session list")
+	}
+	for _, part := range parts {
+		if !utf8.ValidString(part) || telegramTextLength(part) > 4000 {
+			t.Fatalf("part exceeds a valid Telegram message: %d", telegramTextLength(part))
+		}
 	}
 	markup, err := json.Marshal(keyboard)
 	if err != nil || len(markup) > sessionKeyboardMaxBytes {

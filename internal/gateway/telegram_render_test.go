@@ -191,7 +191,7 @@ func TestRenderSessionsFiltersRuntimeAndCreatesExactControls(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(text, "auth-fix") || !strings.Contains(text, "Running · Loaded · /work/api") || strings.Contains(text, "other-session") {
+	if !strings.Contains(text, "auth-fix") || !strings.Contains(text, "Running · Loaded\n/work/api") || strings.Contains(text, "other-session") {
 		t.Fatalf("wrong filtered session view: %q", text)
 	}
 	if keyboard == nil || len(store.callbacks) != 3 {
