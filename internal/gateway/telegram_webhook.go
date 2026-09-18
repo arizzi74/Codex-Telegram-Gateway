@@ -18,6 +18,7 @@ import (
 
 type TelegramRegistry interface {
 	AcceptTelegram(context.Context, registry.IncomingUpdate) (registry.AcceptResult, error)
+	PrepareTelegramImage(context.Context, registry.IncomingUpdate) (registry.IncomingUpdate, error)
 }
 type Webhook struct {
 	store  TelegramRegistry
@@ -93,6 +94,27 @@ func (h *Webhook) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		in.CallbackToken = strings.TrimPrefix(update.Callback.Data, "cb:")
+	} else if message.hasMedia() {
+		// Captions are prompt text, including any leading slash. Never execute
+		// a caption as a gateway command while discarding its attachment.
+		in.Action = "text"
+		in.Text = strings.TrimSpace(message.Caption)
+		ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+		in, err = h.store.PrepareTelegramImage(ctx, in)
+		cancel()
+		if err != nil {
+			h.log.Warn("Telegram image target could not be resolved", "telegram_update_id", update.ID)
+			http.Error(w, "registry unavailable", 503)
+			return
+		}
+		if in.MediaError == "" {
+			ctx, cancel = context.WithTimeout(r.Context(), 15*time.Second)
+			in.Images, in.MediaError = h.downloadMessageImage(ctx, message)
+			cancel()
+		}
+		if in.MediaError != "" {
+			in.Action = "media_error"
+		}
 	} else {
 		action, target, text, ignore := parseTelegramText(message.Text, h.cfg.Secrets.BotName)
 		if ignore {

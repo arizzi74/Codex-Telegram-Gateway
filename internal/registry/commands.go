@@ -35,6 +35,9 @@ type IncomingUpdate struct {
 	UpdateID, UserID, ChatID, TopicID, ReplyToMessageID    int64
 	CommandTTL                                             time.Duration
 	Raw                                                    json.RawMessage
+	Images                                                 []protocol.Image
+	MediaError                                             string
+	imageTarget                                            *routeTarget
 }
 
 // AcceptResult is a durable UI response descriptor. The Telegram renderer owns
@@ -209,6 +212,22 @@ func validateIncoming(in IncomingUpdate) error {
 
 func (s *Store) acceptAction(ctx context.Context, tx *dbTx, in IncomingUpdate) (AcceptResult, error) {
 	action := strings.ToLower(strings.TrimSpace(in.Action))
+	if action == "media_error" {
+		return mediaErrorResult(in.MediaError), nil
+	}
+	if len(in.Images) > 0 {
+		if err := protocol.ValidateImages(in.Images); err != nil {
+			for _, image := range in.Images {
+				if len(image.Data) > protocol.MaxImageBytes {
+					return mediaErrorResult("image_too_large"), nil
+				}
+			}
+			return mediaErrorResult("image_unsupported"), nil
+		}
+		if action != "" && action != "text" && action != "start_turn" && action != "steer" {
+			return mediaErrorResult("image_unsupported"), nil
+		}
+	}
 	switch action {
 	case "unknown_command":
 		return AcceptResult{View: "error", ErrorCode: "unknown_command", Action: in.Target}, nil
@@ -365,13 +384,22 @@ func (s *Store) acceptCodexCommand(ctx context.Context, tx *dbTx, in IncomingUpd
 }
 
 func acceptTextCommand(ctx context.Context, tx *dbTx, in IncomingUpdate, operation protocol.Operation) (AcceptResult, error) {
-	target, err := resolveRoute(ctx, tx, in)
+	target, err := resolveImageOrCurrentRoute(ctx, tx, in)
 	if err != nil {
 		return AcceptResult{}, err
 	}
 	if operation == protocol.StartTurn || operation == protocol.Steer {
-		if strings.TrimSpace(in.Text) == "" {
+		if strings.TrimSpace(in.Text) == "" && len(in.Images) == 0 {
 			return AcceptResult{}, ErrTelegramTarget
+		}
+	}
+	if len(in.Images) > 0 {
+		supported, err := workerSupportsImageInput(ctx, tx, target.workerID)
+		if err != nil {
+			return AcceptResult{}, err
+		}
+		if !supported {
+			return mediaErrorResult("image_worker_upgrade"), nil
 		}
 	}
 	expected := ""
@@ -381,7 +409,7 @@ func acceptTextCommand(ctx context.Context, tx *dbTx, in IncomingUpdate, operati
 			return AcceptResult{}, ErrStaleTurn
 		}
 	}
-	command, err := createTelegramCommand(ctx, tx, in, target, operation, target.sessionID.String(), expected, protocol.Arguments{Text: in.Text})
+	command, err := createTelegramCommand(ctx, tx, in, target, operation, target.sessionID.String(), expected, protocol.Arguments{Text: in.Text, Images: in.Images})
 	if err != nil {
 		return AcceptResult{}, err
 	}
@@ -409,6 +437,9 @@ func (s *Store) acceptReplyInput(ctx context.Context, tx *dbTx, in IncomingUpdat
 	}
 	if err != nil {
 		return AcceptResult{}, fmt.Errorf("registry: resolve input reply route: %w", err)
+	}
+	if len(in.Images) > 0 {
+		return mediaErrorResult("image_input_reply"), nil
 	}
 	question := in.QuestionID
 	if question == "" && questionID != nil {
@@ -734,6 +765,9 @@ func createTelegramCommand(ctx context.Context, tx *dbTx, in IncomingUpdate, tar
 	command := protocol.Command{ID: uuid.NewString(), WorkerID: target.workerID.String(), RuntimeID: target.runtimeID.String(), RuntimeGeneration: uint64(target.generation), SessionID: sessionID, ThreadID: target.threadID, Operation: operation, ExpectedTurnID: expectedTurn, Arguments: args, CreatedAt: now, ExpiresAt: now.Add(ttl)}
 	if err := command.Validate(); err != nil {
 		return protocol.Command{}, fmt.Errorf("registry: create command: %w", err)
+	}
+	if _, err := protocol.NewEnvelope("command", command); err != nil {
+		return protocol.Command{}, fmt.Errorf("registry: command frame: %w", err)
 	}
 	payload, err := json.Marshal(command)
 	if err != nil {

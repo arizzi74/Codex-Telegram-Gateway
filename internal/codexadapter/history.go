@@ -13,6 +13,8 @@ import (
 // requested history. It differs from a valid, empty turns array.
 var ErrHistoryUnavailable = errors.New("codex user-prompt history is unavailable")
 
+const maxHistoryTurnPages = 10000
+
 // UserPrompt is a stored user message, not an instruction to execute. The
 // turn/item pair identifies a prompt for stable history pagination.
 type UserPrompt struct {
@@ -26,14 +28,68 @@ type UserPrompt struct {
 // Only explicit userMessage text is projected; attachment locations and all
 // other items (including raw reasoning) remain outside the returned history.
 func (c *Client) UserPrompts(ctx context.Context, threadID string) ([]UserPrompt, error) {
-	thread, err := c.ReadThread(ctx, threadID, true)
-	if err != nil {
-		return nil, err
+	return c.userPrompts(ctx, threadID, maxHistoryTurnPages)
+}
+
+func (c *Client) userPrompts(ctx context.Context, threadID string, maxPages int) ([]UserPrompt, error) {
+	if threadID == "" {
+		return nil, errors.New("thread id is required")
 	}
-	if thread.ID != threadID {
-		return nil, errors.New("thread/read returned a different history thread")
+	// Image URLs contain the complete base64 image. Reading all turns at once
+	// can exceed the shared transport limit after just a few image submissions.
+	// Project each turn before requesting the next so image bytes are discarded.
+	// The summary view omits later user inputs, including steers, so request full.
+	result := make([]UserPrompt, 0)
+	seenTurns, seenCursors := make(map[string]struct{}), make(map[string]struct{})
+	cursor := ""
+	for page := 0; page < maxPages; page++ {
+		params := map[string]any{"threadId": threadID, "limit": 1, "sortDirection": "asc", "itemsView": "full"}
+		if cursor != "" {
+			params["cursor"] = cursor
+		}
+		var reply struct {
+			Data       json.RawMessage `json:"data"`
+			NextCursor string          `json:"nextCursor"`
+		}
+		if err := c.request(ctx, "thread/turns/list", params, &reply, false); err != nil {
+			// Do not fall back to an unbounded thread/read on older runtimes.
+			return nil, err
+		}
+		turns, err := historyArray(reply.Data)
+		if err != nil {
+			return nil, fmt.Errorf("read history turn page: %w", err)
+		}
+		if len(turns) > 1 || (len(turns) == 0 && reply.NextCursor != "") {
+			return nil, fmt.Errorf("invalid history turn page: %w", ErrHistoryUnavailable)
+		}
+		for _, raw := range turns {
+			var turn struct {
+				ID        string `json:"id"`
+				ItemsView string `json:"itemsView"`
+			}
+			if json.Unmarshal(raw, &turn) != nil || strings.TrimSpace(turn.ID) == "" || (turn.ItemsView != "" && turn.ItemsView != "full") {
+				return nil, fmt.Errorf("incomplete history turn: %w", ErrHistoryUnavailable)
+			}
+			if _, duplicate := seenTurns[turn.ID]; duplicate {
+				return nil, fmt.Errorf("repeated history turn: %w", ErrHistoryUnavailable)
+			}
+			seenTurns[turn.ID] = struct{}{}
+		}
+		prompts, err := decodeUserPromptTurns(turns)
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, prompts...)
+		if reply.NextCursor == "" {
+			return result, nil
+		}
+		if _, duplicate := seenCursors[reply.NextCursor]; duplicate {
+			return nil, fmt.Errorf("repeated history cursor: %w", ErrHistoryUnavailable)
+		}
+		seenCursors[reply.NextCursor] = struct{}{}
+		cursor = reply.NextCursor
 	}
-	return decodeUserPrompts(thread.Raw)
+	return nil, fmt.Errorf("history page limit exceeded: %w", ErrHistoryUnavailable)
 }
 
 func decodeUserPrompts(raw json.RawMessage) ([]UserPrompt, error) {
@@ -47,6 +103,10 @@ func decodeUserPrompts(raw json.RawMessage) ([]UserPrompt, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read history turns: %w", err)
 	}
+	return decodeUserPromptTurns(turns)
+}
+
+func decodeUserPromptTurns(turns []json.RawMessage) ([]UserPrompt, error) {
 	result := make([]UserPrompt, 0)
 	seen := make(map[[2]string]struct{})
 	for _, rawTurn := range turns {

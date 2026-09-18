@@ -40,16 +40,17 @@ type Session struct {
 }
 
 type Hello struct {
-	WorkerID          string    `json:"worker_id"`
-	WorkerName        string    `json:"worker_name"`
-	Hostname          string    `json:"hostname"`
-	OS                string    `json:"os"`
-	Arch              string    `json:"arch"`
-	WorkerVersion     string    `json:"worker_version"`
-	ProtocolMin       int       `json:"protocol_min"`
-	ProtocolMax       int       `json:"protocol_max"`
-	LastAckedEventSeq uint64    `json:"last_acked_event_seq"`
-	Runtimes          []Runtime `json:"runtimes"`
+	WorkerID           string    `json:"worker_id"`
+	WorkerName         string    `json:"worker_name"`
+	Hostname           string    `json:"hostname"`
+	OS                 string    `json:"os"`
+	Arch               string    `json:"arch"`
+	WorkerVersion      string    `json:"worker_version"`
+	SupportsImageInput bool      `json:"supports_image_input,omitempty"`
+	ProtocolMin        int       `json:"protocol_min"`
+	ProtocolMax        int       `json:"protocol_max"`
+	LastAckedEventSeq  uint64    `json:"last_acked_event_seq"`
+	Runtimes           []Runtime `json:"runtimes"`
 }
 
 type HelloAck struct {
@@ -59,9 +60,10 @@ type HelloAck struct {
 }
 
 type Heartbeat struct {
-	WorkerID      string    `json:"worker_id"`
-	UptimeSeconds int64     `json:"uptime_seconds"`
-	Runtimes      []Runtime `json:"runtimes"`
+	WorkerID           string    `json:"worker_id"`
+	SupportsImageInput bool      `json:"supports_image_input,omitempty"`
+	UptimeSeconds      int64     `json:"uptime_seconds"`
+	Runtimes           []Runtime `json:"runtimes"`
 }
 
 type Operation string
@@ -99,6 +101,7 @@ type Arguments struct {
 	Codex             *CodexCommandPayload `json:"codex,omitempty"`
 	CWD               string               `json:"cwd,omitempty"`
 	Text              string               `json:"text,omitempty"`
+	Images            []Image              `json:"images,omitempty"`
 	ApprovalID        string               `json:"approval_id,omitempty"`
 	RequestID         string               `json:"request_id,omitempty"`
 	Decision          string               `json:"decision,omitempty"`
@@ -138,8 +141,14 @@ func (c Command) Validate() error {
 	if (c.Operation == Steer || c.Operation == Interrupt) && c.ExpectedTurnID == "" {
 		return errors.New("missing expected turn")
 	}
-	if (c.Operation == StartTurn || c.Operation == Steer) && c.Arguments.Text == "" {
-		return errors.New("missing text")
+	if err := ValidateImages(c.Arguments.Images); err != nil {
+		return err
+	}
+	if len(c.Arguments.Images) > 0 && c.Operation != StartTurn && c.Operation != Steer {
+		return errors.New("images require a turn input operation")
+	}
+	if (c.Operation == StartTurn || c.Operation == Steer) && c.Arguments.Text == "" && len(c.Arguments.Images) == 0 {
+		return errors.New("missing input")
 	}
 	if (c.Operation == ApprovalResponse || c.Operation == InputResponse) && (c.Arguments.RequestID == "" || c.Arguments.ApprovalID == "") {
 		return errors.New("missing request target")

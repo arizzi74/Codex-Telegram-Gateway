@@ -935,22 +935,12 @@ func codexLastResponse(ctx context.Context, client *codexadapter.Client, threadI
 	if args != "" {
 		return "", usageError("copy")
 	}
-	thread, err := client.ReadThread(ctx, threadID, true)
+	text, err := client.LastAgentResponse(ctx, threadID)
 	if err != nil {
 		return "", err
 	}
-	var wire struct {
-		Turns []struct{ Items []struct{ Type, Text string } }
-	}
-	if json.Unmarshal(thread.Raw, &wire) == nil {
-		for i := len(wire.Turns) - 1; i >= 0; i-- {
-			for j := len(wire.Turns[i].Items) - 1; j >= 0; j-- {
-				item := wire.Turns[i].Items[j]
-				if item.Type == "agentMessage" && item.Text != "" {
-					return item.Text, nil
-				}
-			}
-		}
+	if text != "" {
+		return text, nil
 	}
 	return "No agent response is available in this thread snapshot.", nil
 }

@@ -669,7 +669,7 @@ func (s *sessionActor) command(req actorCommand) {
 	var err error
 	switch c.Operation {
 	case protocol.Steer:
-		_, err = client.Steer(s.agent.ctx, c.ThreadID, c.ExpectedTurnID, c.Arguments.Text)
+		_, err = client.SteerWithImages(s.agent.ctx, c.ThreadID, c.ExpectedTurnID, c.Arguments.Text, c.Arguments.Images)
 	case protocol.Interrupt:
 		err = client.Interrupt(s.agent.ctx, c.ThreadID, c.ExpectedTurnID)
 	case protocol.ApprovalResponse:
@@ -750,7 +750,7 @@ func (s *sessionActor) start(c protocol.Command) {
 	if !s.resumeForCommand(c, client) {
 		return
 	}
-	turn, err := client.StartTurn(s.agent.ctx, s.session.ThreadID, c.Arguments.Text)
+	turn, err := client.StartTurnWithImages(s.agent.ctx, s.session.ThreadID, c.Arguments.Text, c.Arguments.Images)
 	if err != nil {
 		if !definiteRPCFailure(err) {
 			s.session.State = "unknown"

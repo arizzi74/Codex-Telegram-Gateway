@@ -43,6 +43,7 @@ type Hub struct {
 
 type peer struct {
 	workerID, connectionID uuid.UUID
+	supportsImageInput     bool
 	conn                   *websocket.Conn
 	ctx                    context.Context
 	cancel                 context.CancelFunc
@@ -118,7 +119,7 @@ func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		conn.Close(websocket.StatusPolicyViolation, "connection rejected")
 		return
 	}
-	p := &peer{workerID: worker.ID, connectionID: connectionID, conn: conn, ctx: ctx, cancel: cancel, writes: make(chan writeRequest, 128)}
+	p := &peer{workerID: worker.ID, connectionID: connectionID, supportsImageInput: hello.SupportsImageInput, conn: conn, ctx: ctx, cancel: cancel, writes: make(chan writeRequest, 128)}
 	h.mu.Lock()
 	old := h.peers[hello.WorkerID]
 	h.peers[hello.WorkerID] = p
@@ -293,6 +294,9 @@ func (h *Hub) SendCommand(ctx context.Context, c protocol.Command) error {
 	h.mu.RUnlock()
 	if p == nil {
 		return errors.New("worker is not connected")
+	}
+	if len(c.Arguments.Images) > 0 && !p.supportsImageInput {
+		return errors.New("worker must be updated before receiving image input")
 	}
 	if err := h.store.CheckConnection(ctx, p.workerID, p.connectionID); err != nil {
 		return err

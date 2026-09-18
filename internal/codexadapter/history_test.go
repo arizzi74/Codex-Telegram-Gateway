@@ -2,12 +2,16 @@ package codexadapter
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/iaia/telegramgw/internal/protocol"
 )
 
 func TestUserPromptsReadsOnlyRequestedThreadHistory(t *testing.T) {
@@ -22,37 +26,45 @@ func TestUserPromptsReadsOnlyRequestedThreadHistory(t *testing.T) {
 		prompts, err := client.UserPrompts(context.Background(), "thread-target")
 		done <- outcome{prompts, err}
 	}()
-	request := fake.next(t)
-	if got := method(t, request); got != "thread/read" {
-		t.Fatalf("history made mutating or unexpected RPC %q", got)
-	}
-	fields := params(t, request)
-	if len(fields) != 2 || string(fields["threadId"]) != `"thread-target"` || string(fields["includeTurns"]) != "true" {
-		t.Fatalf("thread/read parameters = %v", fields)
-	}
-	fake.respond(t, request, json.RawMessage(`{"thread":{"id":"thread-target","turns":[
+	pages := []json.RawMessage{json.RawMessage(`{"data":[
 		{"id":"turn-first","items":[
 			{"type":"developerMessage","content":[{"type":"text","text":"private developer content"}]},
 			{"type":"userMessage","id":"user-first","content":[{"type":"text","text":"  Check "},{"type":"text","text":"the build.\n"}]},
 			{"type":"agentMessage","id":"assistant","text":"private assistant content"},
 			{"type":"reasoning","id":"reasoning","content":["private reasoning"]},
-			{"type":"commandExecution","id":"command","aggregatedOutput":"private tool content"}
-		]},
+			{"type":"commandExecution","id":"command","aggregatedOutput":"private tool content"},
+			{"type":"userMessage","id":"user-steer","content":[{"type":"text","text":"Steer this turn."}]}
+		]}
+	],"nextCursor":"next-page"}`), json.RawMessage(`{"data":[
 		{"id":"turn-second","items":[
 			{"type":"userMessage","id":"user-second","content":[{"type":"text","text":"And the tests."}]}
 		]}
-	]}}`))
+	],"nextCursor":null}`)}
+	for i, page := range pages {
+		request := fake.next(t)
+		if got := method(t, request); got != "thread/turns/list" {
+			t.Fatalf("history made mutating or unexpected RPC %q", got)
+		}
+		fields := params(t, request)
+		if string(fields["threadId"]) != `"thread-target"` || string(fields["limit"]) != "1" || string(fields["itemsView"]) != `"full"` || string(fields["sortDirection"]) != `"asc"` {
+			t.Fatalf("thread/turns/list parameters = %v", fields)
+		}
+		if (i == 0 && len(fields) != 4) || (i == 1 && (len(fields) != 5 || string(fields["cursor"]) != `"next-page"`)) {
+			t.Fatalf("history cursor parameters = %v", fields)
+		}
+		fake.respond(t, request, page)
+	}
 	select {
 	case result := <-done:
-		want := []UserPrompt{{TurnID: "turn-first", ItemID: "user-first", Text: "  Check the build.\n"}, {TurnID: "turn-second", ItemID: "user-second", Text: "And the tests."}}
+		want := []UserPrompt{{TurnID: "turn-first", ItemID: "user-first", Text: "  Check the build.\n"}, {TurnID: "turn-first", ItemID: "user-steer", Text: "Steer this turn."}, {TurnID: "turn-second", ItemID: "user-second", Text: "And the tests."}}
 		if result.err != nil || !reflect.DeepEqual(result.prompts, want) {
 			t.Fatalf("UserPrompts = %#v, %v; want %#v", result.prompts, result.err, want)
 		}
 	case <-time.After(2 * time.Second):
-		t.Fatal("history did not finish after thread/read; an additional RPC may have been attempted")
+		t.Fatal("history did not finish after the final page")
 	}
 	// Closing the client unblocks the fake's input. No subscribe, resume,
-	// start, or steer message may have followed the one history read.
+	// start, or steer message may have followed the history reads.
 	if err := client.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -61,24 +73,40 @@ func TestUserPromptsReadsOnlyRequestedThreadHistory(t *testing.T) {
 	}
 }
 
-func TestUserPromptsRejectsDifferentThread(t *testing.T) {
-	for _, returnedID := range []string{"thread-other", ""} {
-		t.Run("returned="+returnedID, func(t *testing.T) {
+func TestUserPromptsRejectsIncompletePagination(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		pages []string
+		limit int
+	}{
+		{"missing data", []string{`{}`}, 3},
+		{"missing turn id", []string{`{"data":[{"items":[]}]}`}, 3},
+		{"summary loses steers", []string{`{"data":[{"id":"a","items":[],"itemsView":"summary"}]}`}, 3},
+		{"unloaded", []string{`{"data":[{"id":"a","items":[],"itemsView":"notLoaded"}]}`}, 3},
+		{"ignored limit", []string{`{"data":[{"id":"a","items":[]},{"id":"b","items":[]}]}`}, 3},
+		{"empty partial page", []string{`{"data":[],"nextCursor":"next"}`}, 3},
+		{"repeated cursor", []string{`{"data":[{"id":"a","items":[]}],"nextCursor":"next"}`, `{"data":[{"id":"b","items":[]}],"nextCursor":"next"}`}, 3},
+		{"repeated turn", []string{`{"data":[{"id":"a","items":[]}],"nextCursor":"next"}`, `{"data":[{"id":"a","items":[]}]}`}, 3},
+		{"page cap", []string{`{"data":[{"id":"a","items":[]}],"nextCursor":"next"}`}, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
 			client, fake := newFake(t)
 			initialize(t, client, fake)
 			done := make(chan error, 1)
 			go func() {
-				prompts, err := client.UserPrompts(context.Background(), "thread-target")
+				prompts, err := client.userPrompts(context.Background(), "thread-target", tc.limit)
 				if len(prompts) != 0 {
-					done <- errors.New("returned other thread's prompts")
+					done <- errors.New("returned incomplete history")
 					return
 				}
 				done <- err
 			}()
-			request := fake.next(t)
-			fake.respond(t, request, map[string]any{"thread": map[string]any{"id": returnedID, "turns": []any{}}})
-			if err := <-done; err == nil || !strings.Contains(err.Error(), "different history thread") {
-				t.Fatalf("wrong thread error = %v", err)
+			for _, page := range tc.pages {
+				request := fake.next(t)
+				fake.respond(t, request, json.RawMessage(page))
+			}
+			if err := <-done; !errors.Is(err, ErrHistoryUnavailable) {
+				t.Fatalf("incomplete history error = %v", err)
 			}
 		})
 	}
@@ -97,6 +125,59 @@ func TestUserPromptsReadFailureDoesNotResume(t *testing.T) {
 	_ = client.Close()
 	if fake.scan.Scan() {
 		t.Fatalf("unexpected fallback RPC: %s", fake.scan.Text())
+	}
+}
+
+func TestUserPromptsPagesLargeImagesWithoutClosingTransport(t *testing.T) {
+	client, fake := newFake(t)
+	initialize(t, client, fake)
+	// The small-message fake defaults to a one-second RPC deadline, which is
+	// too short for decoding maximum-size images under the race detector.
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	type outcome struct {
+		prompts []UserPrompt
+		err     error
+	}
+	done := make(chan outcome, 1)
+	go func() {
+		prompts, err := client.UserPrompts(ctx, "images")
+		if err != nil {
+			_ = client.Close() // Unblock the fake reader if pagination fails early.
+		}
+		done <- outcome{prompts, err}
+	}()
+	// Three maximum-size inputs would overflow the 32 MiB transport if returned
+	// in one history response, despite every individual upload being supported.
+	imageURL := "data:image/png;base64," + strings.Repeat("A", base64.StdEncoding.EncodedLen(protocol.MaxImageBytes))
+	for i := 0; i < 3; i++ {
+		request := fake.next(t)
+		if got := method(t, request); got != "thread/turns/list" || string(params(t, request)["limit"]) != "1" {
+			t.Fatalf("unbounded image history request: %s", got)
+		}
+		next := ""
+		if i < 2 {
+			next = fmt.Sprintf("page-%d", i+1)
+		}
+		fake.respond(t, request, map[string]any{"data": []any{map[string]any{
+			"id": fmt.Sprintf("turn-%d", i), "itemsView": "full", "items": []any{map[string]any{
+				"id": "image", "type": "userMessage", "content": []any{map[string]string{"type": "image", "url": imageURL}},
+			}},
+		}}, "nextCursor": next})
+	}
+	result := <-done
+	if result.err != nil || len(result.prompts) != 3 {
+		t.Fatalf("image history count=%d: %v", len(result.prompts), result.err)
+	}
+	for _, prompt := range result.prompts {
+		if prompt.Text != "[Image]" {
+			t.Fatal("history retained image data")
+		}
+	}
+	select {
+	case <-client.Done():
+		t.Fatalf("image history closed transport: %v", client.Err())
+	default:
 	}
 }
 

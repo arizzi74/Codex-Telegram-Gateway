@@ -411,8 +411,8 @@ func assertResumeCalls(t *testing.T, calls []codextest.Call, want int) {
 		if err := json.Unmarshal(call.Params, &params); err != nil {
 			t.Fatal(err)
 		}
-		if len(params) != 1 || params["threadId"] == "" {
-			t.Fatalf("resume received non-empty options: %s", call.Params)
+		if len(params) != 2 || params["threadId"] == "" || params["excludeTurns"] != true {
+			t.Fatalf("resume changed thread settings or requested history: %s", call.Params)
 		}
 		if params["threadId"] == "persisted-cold" {
 			t.Fatal("cold persisted thread was resumed")

@@ -177,7 +177,9 @@ Verification includes:
   background-terminal, MCP and committed installed-app operations.
 - A catalog exceeding 8 MiB no longer tears down the local adapter; direct
   JSONL and private WebSocket framing share a bounded 32 MiB ceiling. Gateway
-  WSS limits are unchanged. Plugin output is filtered and bounded.
+  WSS frames allow up to 16 MiB, including encoding and envelope overhead,
+  for image commands carrying at most 10 MiB of image bytes. Plugin output is
+  filtered and bounded.
 - An isolated two-server smoke proved a saved cold thread can be forked while
   the source is writer-locked in another server. No live model turn was sent.
 

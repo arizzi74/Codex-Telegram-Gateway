@@ -55,11 +55,11 @@ func TestHistoryCommandPreservesIdleColdAndRunningSessions(t *testing.T) {
 				t.Fatalf("history rewrote saved session: %#v, %v", sessions, err)
 			}
 			calls := historyOperationCalls(server.Calls())
-			if len(calls) != 1 || calls[0].Method != "thread/read" {
+			if len(calls) != 1 || calls[0].Method != "thread/turns/list" {
 				t.Fatalf("history made non-read RPCs: %#v", calls)
 			}
 			var params map[string]any
-			if err := json.Unmarshal(calls[0].Params, &params); err != nil || params["threadId"] != session.ThreadID || params["includeTurns"] != true {
+			if err := json.Unmarshal(calls[0].Params, &params); err != nil || params["threadId"] != session.ThreadID || params["itemsView"] != "full" || params["limit"] != float64(1) || params["sortDirection"] != "asc" {
 				t.Fatalf("history RPC = %#v, %v", params, err)
 			}
 		})
@@ -81,10 +81,10 @@ func TestHistoryCommandFailuresPreserveSessionAndHideRawErrors(t *testing.T) {
 			case "unavailable":
 				server.SetThreads([]map[string]any{{"id": session.ThreadID}}, nil)
 			case "unsupported":
-				server.SetMethodUnavailable("thread/read", true)
+				server.SetMethodUnavailable("thread/turns/list", true)
 				wantCode = protocol.CodexMethodUnsupported
 			case "rpc":
-				server.SetRPCError("thread/read", -32000, "secret saved prompt at /private/history")
+				server.SetRPCError("thread/turns/list", -32000, "secret saved prompt at /private/history")
 			case "workspace":
 				actor.session.CWD = t.TempDir()
 				wantCode, wantReads = protocol.InvalidWorkspace, 0
@@ -115,7 +115,7 @@ func TestHistoryCommandFailuresPreserveSessionAndHideRawErrors(t *testing.T) {
 			if actor.session != before || actor.activeCommand != active || actor.finalText != "keep final" {
 				t.Fatal("failed history read changed an active session")
 			}
-			if calls := historyOperationCalls(server.Calls()); len(calls) != wantReads || countCall(calls, "thread/read") != wantReads {
+			if calls := historyOperationCalls(server.Calls()); len(calls) != wantReads || countCall(calls, "thread/turns/list") != wantReads {
 				t.Fatalf("unexpected history RPCs: %#v", calls)
 			}
 		})

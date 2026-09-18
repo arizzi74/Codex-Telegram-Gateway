@@ -14,6 +14,10 @@ import (
 
 type webhookStore struct{ calls []registry.IncomingUpdate }
 
+func (s *webhookStore) PrepareTelegramImage(_ context.Context, in registry.IncomingUpdate) (registry.IncomingUpdate, error) {
+	return in, nil
+}
+
 func (s *webhookStore) AcceptTelegram(_ context.Context, in registry.IncomingUpdate) (registry.AcceptResult, error) {
 	s.calls = append(s.calls, in)
 	return registry.AcceptResult{}, nil

@@ -49,7 +49,7 @@ func TestAgentAcceptsDuplicateAndRejectsStaleGenerationWithoutRPC(t *testing.T) 
 	}
 }
 
-func TestAgentColdSessionResumesOnlyOnCommandWithThreadID(t *testing.T) {
+func TestAgentColdSessionResumesOnlyOnCommandWithThreadMetadata(t *testing.T) {
 	a, runtime, server, cleanup := testAgent(t)
 	defer cleanup()
 	session := installColdSession(a, runtime, "thread-cold")
@@ -67,8 +67,8 @@ func TestAgentColdSessionResumesOnlyOnCommandWithThreadID(t *testing.T) {
 			}
 		}
 	}
-	if len(resume) != 1 || resume["threadId"] != session.ThreadID {
-		t.Fatalf("cold resume parameters = %#v, want only threadId", resume)
+	if len(resume) != 2 || resume["threadId"] != session.ThreadID || resume["excludeTurns"] != true {
+		t.Fatalf("cold resume parameters = %#v, want threadId and excludeTurns", resume)
 	}
 }
 

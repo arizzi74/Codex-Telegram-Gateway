@@ -128,6 +128,33 @@ func TestUpdatePreparationReadsNativeThreadsOutsideDiscoveredSessions(t *testing
 	}
 }
 
+func TestUpdateIdleCheckUsesBoundedTurnStateAndFailsClosed(t *testing.T) {
+	for _, state := range []string{"completed", "inProgress", "unavailable"} {
+		t.Run(state, func(t *testing.T) {
+			a, _, server, cleanup := testAgent(t)
+			defer cleanup()
+			server.SetThreads([]map[string]any{{"id": "native-image-thread", "status": "idle", "turns": []map[string]any{{"id": "latest", "status": state}}}}, []string{"native-image-thread"})
+			server.SetMethodUnavailable("thread/turns/list", state == "unavailable")
+			err := a.manager.verifyUpdateIdle(context.Background())
+			if (err != nil) != (state != "completed") {
+				t.Fatalf("idle check for %s = %v", state, err)
+			}
+			for _, call := range server.Calls() {
+				var p map[string]any
+				if err := json.Unmarshal(call.Params, &p); err != nil {
+					t.Fatal(err)
+				}
+				if call.Method == "thread/read" && p["includeTurns"] != false {
+					t.Fatal("update check requested image history")
+				}
+				if call.Method == "thread/turns/list" && (p["limit"] != float64(1) || p["itemsView"] != "notLoaded") {
+					t.Fatal("update check requested unbounded turn items")
+				}
+			}
+		})
+	}
+}
+
 func TestUpdatePreparationRefusesInFlightTurnStart(t *testing.T) {
 	a, runtime, server, cleanup := testAgent(t)
 	defer cleanup()

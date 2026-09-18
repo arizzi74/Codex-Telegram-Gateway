@@ -7,6 +7,8 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+
+	"github.com/iaia/telegramgw/internal/protocol"
 )
 
 // Event is a server notification. Params and Raw are retained exactly enough
@@ -562,6 +564,7 @@ func (c *Client) StartThread(ctx context.Context, options ThreadOptions) (Thread
 }
 
 // ResumeThread loads an existing persisted thread before it receives a turn.
+// Only metadata is needed here; embedded image history can exceed RPC limits.
 func (c *Client) ResumeThread(ctx context.Context, threadID string, options ThreadOptions) (Thread, error) {
 	if threadID == "" {
 		return Thread{}, errors.New("thread id is required")
@@ -569,6 +572,7 @@ func (c *Client) ResumeThread(ctx context.Context, threadID string, options Thre
 	params := options.fields()
 	delete(params, "serviceName") // thread/resume does not accept serviceName.
 	params["threadId"] = threadID
+	params["excludeTurns"] = true
 	var reply struct {
 		Thread json.RawMessage `json:"thread"`
 	}
@@ -723,13 +727,23 @@ func (c *Client) ListAllThreadsComplete(ctx context.Context, pageSize, max int) 
 
 // StartTurn submits one text input and records the returned turn immediately.
 func (c *Client) StartTurn(ctx context.Context, threadID, text string) (Turn, error) {
+	return c.StartTurnWithImages(ctx, threadID, text, nil)
+}
+
+// StartTurnWithImages submits optional text and bounded inline image inputs.
+// File credentials and gateway-local paths never cross into the app-server.
+func (c *Client) StartTurnWithImages(ctx context.Context, threadID, text string, images []protocol.Image) (Turn, error) {
 	if threadID == "" {
 		return Turn{}, errors.New("thread id is required")
+	}
+	input, err := turnInput(text, images)
+	if err != nil {
+		return Turn{}, err
 	}
 	var reply struct {
 		Turn json.RawMessage `json:"turn"`
 	}
-	params := map[string]any{"threadId": threadID, "input": []map[string]string{{"type": "text", "text": text}}}
+	params := map[string]any{"threadId": threadID, "input": input}
 	if err := c.request(ctx, "turn/start", params, &reply, false); err != nil {
 		return Turn{}, err
 	}
@@ -751,16 +765,25 @@ func (c *Client) StartTurn(ctx context.Context, threadID, text string) (Turn, er
 
 // Steer appends text only to the explicitly expected in-flight turn.
 func (c *Client) Steer(ctx context.Context, threadID, expectedTurnID, text string) (Turn, error) {
+	return c.SteerWithImages(ctx, threadID, expectedTurnID, text, nil)
+}
+
+// SteerWithImages appends input only to the explicitly expected in-flight turn.
+func (c *Client) SteerWithImages(ctx context.Context, threadID, expectedTurnID, text string, images []protocol.Image) (Turn, error) {
 	if threadID == "" || expectedTurnID == "" {
 		return Turn{}, errors.New("thread id and expected turn id are required")
 	}
 	if !c.matchesActive(threadID, expectedTurnID) {
 		return Turn{}, ErrStaleTurn
 	}
+	input, err := turnInput(text, images)
+	if err != nil {
+		return Turn{}, err
+	}
 	var reply struct {
 		TurnID string `json:"turnId"`
 	}
-	params := map[string]any{"threadId": threadID, "expectedTurnId": expectedTurnID, "input": []map[string]string{{"type": "text", "text": text}}}
+	params := map[string]any{"threadId": threadID, "expectedTurnId": expectedTurnID, "input": input}
 	if err := c.request(ctx, "turn/steer", params, &reply, false); err != nil {
 		return Turn{}, err
 	}
@@ -768,6 +791,26 @@ func (c *Client) Steer(ctx context.Context, threadID, expectedTurnID, text strin
 		return Turn{}, errors.New("turn/steer response omitted turn id")
 	}
 	return Turn{ID: reply.TurnID, ThreadID: threadID}, nil
+}
+
+func turnInput(text string, images []protocol.Image) ([]map[string]string, error) {
+	if err := protocol.ValidateImages(images); err != nil {
+		return nil, err
+	}
+	if text == "" && len(images) == 0 {
+		return nil, errors.New("text or an image is required")
+	}
+	input := make([]map[string]string, 0, 1+len(images))
+	if text != "" {
+		input = append(input, map[string]string{"type": "text", "text": text})
+	}
+	for _, image := range images {
+		input = append(input, map[string]string{
+			"type": "image",
+			"url":  "data:" + image.MIMEType + ";base64," + base64.StdEncoding.EncodeToString(image.Data),
+		})
+	}
+	return input, nil
 }
 
 // Interrupt asks app-server to interrupt the explicitly expected active turn.

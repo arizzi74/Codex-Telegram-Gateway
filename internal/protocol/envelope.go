@@ -12,7 +12,7 @@ import (
 )
 
 const Version = 1
-const MaxFrameBytes = 2 << 20
+const MaxFrameBytes = 16 << 20
 
 type Envelope struct {
 	Version   int             `json:"version"`
@@ -28,7 +28,17 @@ func NewEnvelope(kind string, payload any) (Envelope, error) {
 		return Envelope{}, err
 	}
 	e := Envelope{Version: Version, Type: kind, MessageID: uuid.NewString(), SentAt: time.Now().UTC(), Payload: body}
-	return e, e.Validate()
+	if err := e.Validate(); err != nil {
+		return Envelope{}, err
+	}
+	frame, err := json.Marshal(e)
+	if err != nil {
+		return Envelope{}, err
+	}
+	if len(frame) > MaxFrameBytes {
+		return Envelope{}, errors.New("frame too large")
+	}
+	return e, nil
 }
 
 func (e Envelope) Validate() error {

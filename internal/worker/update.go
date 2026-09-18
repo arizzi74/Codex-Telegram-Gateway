@@ -369,7 +369,7 @@ func (m *RuntimeManager) verifyUpdateIdle(ctx context.Context) error {
 				if count > discoveryLimit {
 					return errors.New("worker update: too many loaded threads to verify")
 				}
-				thread, err := runtime.client.ReadThread(ctx, entry.ID, true)
+				thread, err := runtime.client.ReadThreadState(ctx, entry.ID)
 				if err != nil {
 					return fmt.Errorf("worker update: cannot verify native thread: %w", err)
 				}

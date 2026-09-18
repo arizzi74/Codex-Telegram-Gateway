@@ -384,7 +384,7 @@ func (m *RuntimeManager) discover(ctx context.Context, runtime protocol.Runtime,
 		indexed[thread.ID] = index
 	}
 	for id := range loaded {
-		thread, readErr := client.ReadThread(ctx, id, true)
+		thread, readErr := client.ReadThreadState(ctx, id)
 		if readErr != nil {
 			if errors.Is(readErr, codexadapter.ErrMethodUnavailable) {
 				m.markRuntimeDegraded(runtime, readErr)
@@ -494,7 +494,7 @@ func (m *RuntimeManager) discover(ctx context.Context, runtime protocol.Runtime,
 	return nil
 }
 
-var requiredDiscoveryMethods = [...]string{"thread/list", "thread/loaded/list", "thread/read", "thread/resume"}
+var requiredDiscoveryMethods = [...]string{"thread/list", "thread/loaded/list", "thread/read", "thread/turns/list", "thread/resume"}
 
 func (m *RuntimeManager) beginCapabilityRetry(runtime protocol.Runtime, client *codexadapter.Client) bool {
 	m.mu.Lock()
@@ -569,7 +569,7 @@ func loadedThreadIDs(ctx context.Context, client *codexadapter.Client) (map[stri
 }
 
 // subscribeLoadedThread performs the only allowed reconciliation resume: an
-// already-loaded, workspace-validated thread with no options beyond threadId.
+// already-loaded, workspace-validated thread without overriding its settings.
 // The per-managed-runtime map resets when a new client/generation is installed.
 func (m *RuntimeManager) subscribeLoadedThread(ctx context.Context, runtime protocol.Runtime, client *codexadapter.Client, threadID string, retryUnavailable bool) (codexadapter.Thread, bool, error) {
 	resumeUnavailable := methodKnownUnavailable(client, "thread/resume")

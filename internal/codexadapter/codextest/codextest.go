@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"strconv"
 	"sync"
 	"time"
 
@@ -94,6 +95,9 @@ func New(ctx context.Context) (*codexadapter.Client, *Server, error) {
 	inR, inW := io.Pipe()
 	outR, outW := io.Pipe()
 	s := &Server{in: bufio.NewScanner(inR), out: json.NewEncoder(outW), raw: outW, unavailable: map[string]bool{}, rpcErrors: map[string]rpcError{}, delays: map[string]time.Duration{}, close: func() { _ = inR.Close(); _ = inW.Close(); _ = outR.Close(); _ = outW.Close() }}
+	// Match the production adapter's JSONL bound so integration tests can
+	// exercise image requests larger than Scanner's default 64 KiB limit.
+	s.in.Buffer(make([]byte, 64*1024), 32<<20)
 	go s.serve()
 	c := codexadapter.New(codexadapter.Transport{In: inW, Out: outR, Close: func() error { s.close(); return nil }}, codexadapter.Config{})
 	if err := c.Initialize(ctx); err != nil {
@@ -187,16 +191,71 @@ func (s *Server) serve() {
 			result = map[string]any{"thread": map[string]any{"id": "thread-new"}}
 		case "thread/resume":
 			var p struct {
-				ThreadID string `json:"threadId"`
+				ThreadID     string `json:"threadId"`
+				ExcludeTurns bool   `json:"excludeTurns"`
 			}
 			_ = json.Unmarshal(request.Params, &p)
-			result = map[string]any{"thread": s.thread(p.ThreadID)}
+			thread := s.thread(p.ThreadID)
+			if p.ExcludeTurns {
+				delete(thread, "turns")
+			}
+			result = map[string]any{"thread": thread}
 		case "thread/read":
 			var p struct {
-				ThreadID string `json:"threadId"`
+				ThreadID     string `json:"threadId"`
+				IncludeTurns bool   `json:"includeTurns"`
 			}
 			_ = json.Unmarshal(request.Params, &p)
-			result = map[string]any{"thread": s.thread(p.ThreadID)}
+			thread := s.thread(p.ThreadID)
+			if !p.IncludeTurns {
+				delete(thread, "turns")
+			}
+			result = map[string]any{"thread": thread}
+		case "thread/turns/list":
+			var p struct {
+				ThreadID      string `json:"threadId"`
+				Cursor        string `json:"cursor"`
+				Limit         int    `json:"limit"`
+				SortDirection string `json:"sortDirection"`
+				ItemsView     string `json:"itemsView"`
+			}
+			_ = json.Unmarshal(request.Params, &p)
+			thread := s.thread(p.ThreadID)
+			if p.ItemsView == "notLoaded" {
+				result = map[string]any{"data": []json.RawMessage{}, "nextCursor": ""}
+			}
+			if raw, ok := thread["turns"]; ok {
+				encoded, _ := json.Marshal(raw)
+				var turns []json.RawMessage
+				_ = json.Unmarshal(encoded, &turns)
+				if p.SortDirection == "desc" {
+					for left, right := 0, len(turns)-1; left < right; left, right = left+1, right-1 {
+						turns[left], turns[right] = turns[right], turns[left]
+					}
+				}
+				start, _ := strconv.Atoi(p.Cursor)
+				if p.Limit < 1 {
+					p.Limit = 1
+				}
+				if start < 0 || start > len(turns) {
+					start = len(turns)
+				}
+				end := min(start+p.Limit, len(turns))
+				next := ""
+				if end < len(turns) {
+					next = strconv.Itoa(end)
+				}
+				data := append([]json.RawMessage{}, turns[start:end]...)
+				if p.ItemsView == "notLoaded" {
+					for i, rawTurn := range data {
+						var turn map[string]any
+						_ = json.Unmarshal(rawTurn, &turn)
+						turn["items"], turn["itemsView"] = []any{}, "notLoaded"
+						data[i], _ = json.Marshal(turn)
+					}
+				}
+				result = map[string]any{"data": data, "nextCursor": next}
+			}
 		case "turn/start":
 			var p struct {
 				ThreadID string `json:"threadId"`

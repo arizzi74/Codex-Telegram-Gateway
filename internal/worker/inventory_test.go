@@ -108,7 +108,7 @@ func TestDiscoveryHidesHelpersAndObsoleteInventory(t *testing.T) {
 }
 
 func TestDiscoveryDoesNotHideSessionsAfterFailedOrIncompleteScan(t *testing.T) {
-	for _, failure := range []string{"thread/list", "thread/loaded/list", "thread/read", "limit", "loaded_limit"} {
+	for _, failure := range []string{"thread/list", "thread/loaded/list", "thread/read", "thread/turns/list", "limit", "loaded_limit"} {
 		t.Run(failure, func(t *testing.T) {
 			a, runtime, server, cleanup := testAgent(t)
 			defer cleanup()

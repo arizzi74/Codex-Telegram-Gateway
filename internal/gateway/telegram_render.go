@@ -712,6 +712,16 @@ func codexHelpText() string {
 }
 func telegramErrorText(code string) string {
 	switch code {
+	case "image_too_large":
+		return "The image is too large. Send an image of 10 MiB or less."
+	case "image_download_failed":
+		return "The image could not be downloaded from Telegram. Please send it again."
+	case "image_unsupported":
+		return "This attachment is not a supported image. Send a JPEG, PNG, WebP or GIF image, with an optional caption."
+	case "image_worker_upgrade":
+		return "The selected worker needs an update before it can receive images. Please resend the image after the worker updates."
+	case "image_input_reply":
+		return "This input request needs a text answer. Send the image as a separate message to the selected session."
 	case "unknown_command":
 		return "Unknown command. Use /tghelp for gateway controls or /help for Codex commands."
 	case "command_too_long":

@@ -82,7 +82,9 @@ func (s *Store) externalHistoryPrompts(runtimeID, threadID string, prompts []cod
 			text, turn := c.Arguments.Text, record.Result.TurnID
 			switch c.Operation {
 			case protocol.StartTurn:
+				text += strings.Repeat("[Image]", len(c.Arguments.Images))
 			case protocol.Steer:
+				text += strings.Repeat("[Image]", len(c.Arguments.Images))
 				if turn == "" {
 					turn = c.ExpectedTurnID
 				}

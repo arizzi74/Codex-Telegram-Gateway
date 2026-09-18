@@ -93,6 +93,32 @@ with recovery instructions. Close that other client before retrying, use
 `/fork` to branch the saved conversation, or `/tgnew` to begin fresh.
 The gateway never silently redirects a failed command to a different chat.
 
+## Images
+
+After selecting a session, send a photo or upload an image as a file. JPEG,
+PNG, WebP and GIF files up to 10 MiB are supported. A caption accompanies the
+image as prompt text; an image without a caption also starts a turn. Captions
+beginning with `/` remain prompt text. Send slash commands separately.
+
+For a photo with multiple resolutions, the gateway selects the largest version
+that fits its size limit. Each image message is a separate submission; albums
+are not combined into one turn. Video, audio, voice messages, stickers,
+animations and non-image documents produce an unsupported-attachment reply.
+Reply to input requests with text, and send images separately.
+
+The gateway downloads images using Telegram's
+[getFile API](https://core.telegram.org/bots/api#getfile), checks their content
+type and byte size, and stores the bytes with the accepted command. The worker
+passes those bytes to Codex; Telegram credentials and download URLs stay on the
+gateway. Image bytes are retained with command records in the gateway and
+worker databases, like prompt text. Download or validation failures produce a
+reply with instructions to retry or use a supported file.
+
+Both gateway and worker need v0.5.13 or later. During a rolling upgrade, an old
+worker produces an update-required reply instead of receiving only the caption.
+Images sent to earlier gateway versions were ignored before command storage;
+resend them after the upgrade.
+
 ## Saved prompt history
 
 Use `/tghistory` after selecting a session to display prompts previously entered
@@ -100,6 +126,9 @@ in Codex. Each prompt appears as a separate bot message labelled **You · Codex*
 The bot remains the Telegram sender; these messages are copies of saved input.
 Reading history never submits the prompts again, starts a turn, resumes a cold
 thread, or interrupts work already running.
+History is fetched one turn at a time so images from earlier turns do not
+accumulate in a single app-server response. This requires a Codex runtime with
+`thread/turns/list` support; older runtimes receive an update-required error.
 
 The newest page contains up to 10 prompts by default, shown oldest first within
 that page. `/tghistory 25` requests a larger page. Use **Older prompts** to read

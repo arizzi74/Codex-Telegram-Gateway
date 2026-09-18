@@ -21,6 +21,57 @@ import (
 	"github.com/iaia/telegramgw/internal/protocol"
 )
 
+func TestConnectionAdvertisesImageInputThroughoutConnection(t *testing.T) {
+	workerID := uuid.NewString()
+	store, cfg := testConnectionStore(t, workerID)
+	defer store.Close()
+	observed := make(chan struct{}, 1)
+	server := newWorkerTLSServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.CloseNow()
+		helloEnvelope, err := readWorkerEnvelope(r.Context(), conn)
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		hello, err := protocol.Payload[protocol.Hello](helloEnvelope)
+		if err != nil || helloEnvelope.Type != "hello" || !hello.SupportsImageInput {
+			t.Errorf("hello did not advertise image input: %#v, %v", hello, err)
+			return
+		}
+		if err := serverEnvelope(r.Context(), conn, "hello_ack", protocol.HelloAck{ConnectionID: uuid.NewString(), HeartbeatIntervalSeconds: 1}); err != nil {
+			t.Error(err)
+			return
+		}
+		heartbeatEnvelope, err := readWorkerEnvelope(r.Context(), conn)
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		heartbeat, err := protocol.Payload[protocol.Heartbeat](heartbeatEnvelope)
+		if err != nil || heartbeatEnvelope.Type != "heartbeat" || !heartbeat.SupportsImageInput {
+			t.Errorf("heartbeat lost image input capability: %#v, %v", heartbeat, err)
+			return
+		}
+		observed <- struct{}{}
+	}))
+	defer server.Close()
+	c := testConnection(t, cfg, store, server.URL, server.Client(), func(context.Context, protocol.Command) (protocol.CommandAck, error) {
+		return protocol.CommandAck{}, nil
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	_ = c.connect(ctx)
+	select {
+	case <-observed:
+	default:
+		t.Fatal("connection did not advertise image support in hello and heartbeat")
+	}
+}
+
 func TestConnectionReplaysOutboxAfterReconnectAndAcknowledges(t *testing.T) {
 	workerID := uuid.NewString()
 	store, cfg := testConnectionStore(t, workerID)

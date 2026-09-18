@@ -22,12 +22,31 @@ type TelegramChat struct {
 	ID int64 `json:"id"`
 }
 type TelegramMessage struct {
-	ID      int64            `json:"message_id"`
-	From    *TelegramUser    `json:"from"`
-	Chat    TelegramChat     `json:"chat"`
-	TopicID int64            `json:"message_thread_id"`
-	Text    string           `json:"text"`
-	ReplyTo *TelegramMessage `json:"reply_to_message"`
+	ID        int64             `json:"message_id"`
+	From      *TelegramUser     `json:"from"`
+	Chat      TelegramChat      `json:"chat"`
+	TopicID   int64             `json:"message_thread_id"`
+	Text      string            `json:"text"`
+	Caption   string            `json:"caption"`
+	Photo     []TelegramPhoto   `json:"photo"`
+	Document  *TelegramDocument `json:"document"`
+	Animation json.RawMessage   `json:"animation"`
+	Video     json.RawMessage   `json:"video"`
+	Audio     json.RawMessage   `json:"audio"`
+	Voice     json.RawMessage   `json:"voice"`
+	VideoNote json.RawMessage   `json:"video_note"`
+	Sticker   json.RawMessage   `json:"sticker"`
+	ReplyTo   *TelegramMessage  `json:"reply_to_message"`
+}
+type TelegramPhoto struct {
+	FileID   string `json:"file_id"`
+	Width    int64  `json:"width"`
+	Height   int64  `json:"height"`
+	FileSize int64  `json:"file_size"`
+}
+type TelegramDocument struct {
+	FileID   string `json:"file_id"`
+	FileSize int64  `json:"file_size"`
 }
 type TelegramCallback struct {
 	ID      string           `json:"id"`

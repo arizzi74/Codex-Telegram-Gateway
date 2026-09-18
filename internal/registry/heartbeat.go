@@ -83,9 +83,10 @@ func (s *Store) RegisterConnection(ctx context.Context, token string, connection
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 	helloMetadata, err := json.Marshal(struct {
-		ProtocolMin int `json:"protocol_min"`
-		ProtocolMax int `json:"protocol_max"`
-	}{hello.ProtocolMin, hello.ProtocolMax})
+		ProtocolMin        int  `json:"protocol_min"`
+		ProtocolMax        int  `json:"protocol_max"`
+		SupportsImageInput bool `json:"supports_image_input,omitempty"`
+	}{hello.ProtocolMin, hello.ProtocolMax, hello.SupportsImageInput})
 	if err != nil {
 		return Worker{}, fmt.Errorf("registry: marshal hello metadata: %w", err)
 	}

@@ -106,6 +106,10 @@ Use `/tghistory` to display saved Codex prompts as separate **You · Codex** bot
 messages, with an **Older prompts** button for earlier pages. This reads the
 selected session's history without running those prompts again.
 
+Send a photo or a JPEG, PNG, WebP or GIF image file to the selected session,
+with an optional caption. Images can be up to 10 MiB; both the gateway and
+worker must support image input (v0.5.13 or later).
+
 Ordinary messages submit turns to the selection frozen when each message is
 accepted, without a separate “Queued for…” acknowledgement. Codex's commentary
 and tool calls appear temporarily while the turn runs. The latest tool call
