@@ -623,11 +623,7 @@ func (m *Manager) AutoUpdate(ctx context.Context, l *Layout, enabled bool) error
 		prefix := systemctlPrefix(l)
 		if enabled {
 			service := "[Unit]\nDescription=Update Codex Telegram " + l.Component + " from GitHub Releases\nWants=network-online.target\nAfter=network-online.target\n\n[Service]\nType=oneshot\nExecStart=" + l.Command + " update " + l.Component + "\nSuccessExitStatus=75\nUMask=0077\nTimeoutStartSec=15min\n"
-			calendar := "*-*-* *:00/5:00"
-			if l.Component == "worker" {
-				calendar = "*-*-* *:02/5:00"
-			}
-			timer := "[Unit]\nDescription=Check every five minutes for Codex Telegram " + l.Component + " releases\n\n[Timer]\nOnCalendar=" + calendar + "\nRandomizedDelaySec=0\nAccuracySec=1s\nPersistent=true\n\n[Install]\nWantedBy=timers.target\n"
+			timer := "[Unit]\nDescription=Check daily for Codex Telegram " + l.Component + " releases\n\n[Timer]\nOnCalendar=daily\nRandomizedDelaySec=30min\nPersistent=true\n\n[Install]\nWantedBy=timers.target\n"
 			if err := AtomicWrite(filepath.Join(l.UnitDir, label+".service"), []byte(service), 0644, nil); err != nil {
 				return err
 			}
@@ -649,13 +645,9 @@ func (m *Manager) AutoUpdate(ctx context.Context, l *Layout, enabled bool) error
 		domain := "gui/" + strconv.Itoa(os.Getuid())
 		_, _ = m.Run(ctx, "launchctl", "bootout", domain+"/"+label)
 		if enabled {
-			calendar := make([]any, 0, 12)
-			for minute := 2; minute < 60; minute += 5 {
-				calendar = append(calendar, map[string]any{"Minute": minute})
-			}
 			value := map[string]any{
 				"Label": label, "ProgramArguments": []string{l.Command, "update", "worker"},
-				"StartCalendarInterval": calendar,
+				"StartCalendarInterval": map[string]any{"Hour": 4, "Minute": 15},
 				"EnvironmentVariables":  map[string]any{"HOME": l.Home, "PATH": l.Bin + ":/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"},
 			}
 			if err := writePlist(plist, value); err != nil {
@@ -673,10 +665,7 @@ func (m *Manager) AutoUpdate(ctx context.Context, l *Layout, enabled bool) error
 		if enabled {
 			state = "enabled"
 		}
-		fmt.Fprintf(m.Out, "Automatic update checks every five minutes %s for %s.\n", state, l.Component)
-		if enabled {
-			fmt.Fprintln(m.Out, "Gateway checks at minutes 00, 05, 10, ...; workers check two minutes later at 02, 07, 12, ... (local time).")
-		}
+		fmt.Fprintf(m.Out, "Daily automatic updates %s for %s.\n", state, l.Component)
 	}
 	return nil
 }
@@ -709,14 +698,6 @@ func encodePlistValue(out *bytes.Buffer, value any) error {
 	case int:
 		fmt.Fprintf(out, "<integer>%d</integer>", v)
 	case []string:
-		out.WriteString("<array>")
-		for _, item := range v {
-			if err := encodePlistValue(out, item); err != nil {
-				return err
-			}
-		}
-		out.WriteString("</array>")
-	case []any:
 		out.WriteString("<array>")
 		for _, item := range v {
 			if err := encodePlistValue(out, item); err != nil {

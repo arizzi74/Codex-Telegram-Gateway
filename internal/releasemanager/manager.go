@@ -84,8 +84,7 @@ Gateway setup reuses ./gateway.json and ./secrets.env or prompts for settings.
 It generates the webhook secret; HTTPS must be configured separately.
 Worker installation requires an installed, authenticated Codex executable.
 Worker setup reuses ./worker.json or prompts for enrollment and workspace details.
-Setup enables update checks every five minutes and adopts existing services without restarting them.
-Gateway checks run at minutes 00, 05, 10, ...; worker checks at 02, 07, 12, ... (local time).
+Setup enables daily updates and adopts existing services without restarting them.
 `
 
 func setupComponent(args []string, uid int) (string, error) {
@@ -131,7 +130,7 @@ func parseOptions(args []string) (options, error) {
 		if result.Action == "update" {
 			flags.BoolVar(&result.Check, "check", false, "check without installing")
 		} else {
-			flags.BoolVar(&result.AutoUpdate, "auto-update", false, "enable automatic update checks every five minutes")
+			flags.BoolVar(&result.AutoUpdate, "auto-update", false, "enable daily updates")
 		}
 		if err := flags.Parse(args[2:]); err != nil {
 			return result, errors.New("invalid installer arguments; use --help")

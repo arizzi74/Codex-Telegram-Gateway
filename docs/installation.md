@@ -53,8 +53,7 @@ curl -fsSL https://raw.githubusercontent.com/arizzi74/Codex-Telegram-Gateway/mai
 ```
 
 Running with sudo selects gateway setup; running without sudo selects worker
-setup. No installer arguments are needed. Automatic update checks run every five
-minutes, at minutes `00`, `05`, `10`, … in the gateway's local time.
+setup. No installer arguments are needed. Daily automatic updates are enabled.
 
 - An existing gateway in the standard location is adopted without replacing
   its configuration or restarting its service.
@@ -116,9 +115,8 @@ Run as the developer account that owns Codex and the workspaces:
 curl -fsSL https://raw.githubusercontent.com/arizzi74/Codex-Telegram-Gateway/main/scripts/install.sh | sh
 ```
 
-No installer arguments are needed. The default is worker setup with automatic
-update checks every five minutes, at minutes `02`, `07`, `12`, … in the worker's
-local time, two minutes after gateway checks:
+No installer arguments are needed. The default is worker setup with daily
+automatic updates enabled:
 
 - If a worker is already installed in the standard location, setup adopts it
   without changing its configuration or restarting its sessions.
@@ -236,12 +234,7 @@ again on macOS, before retrying the update.
 
 ## Automatic updates
 
-Guided gateway and worker setup enable scheduled checks for stable releases every
-five minutes automatically. Gateway checks run at minutes `00`, `05`, `10`, …;
-worker checks run two minutes later at `02`, `07`, `12`, … in each machine's local
-time. Linux systemd timers use one-second accuracy with no random delay. macOS
-workers use the same minute schedule in launchd. After sleep or downtime, missed
-checks may run when the machine resumes instead of preserving the offset.
+Guided gateway and worker setup enable a daily scheduled check for stable releases automatically.
 For explicit `install` and `adopt` commands, pass `--auto-update` to enable it.
 To manage it later:
 

@@ -77,7 +77,7 @@ func (m *Manager) setupWorker(ctx context.Context, l *Layout, cwd string, openPr
 	if err != nil {
 		return err
 	}
-	fmt.Fprintln(m.Out, "Set up a worker using the worker ID and enrollment token from your gateway. Automatic update checks every five minutes will be enabled, at minutes 02, 07, 12, ... (local time), two minutes after gateway checks.")
+	fmt.Fprintln(m.Out, "Set up a worker using the worker ID and enrollment token from your gateway. Daily automatic updates will be enabled.")
 	gateway, err := prompt.Ask(ctx, "Gateway HTTPS address (or full WSS URL)", "", false)
 	if err != nil {
 		return err

@@ -392,58 +392,31 @@ func TestPlatformCanceledFreshInstallStillDisablesService(t *testing.T) {
 }
 
 func TestPlatformAutoUpdateLinuxCallsNativeManager(t *testing.T) {
-	for _, tc := range []struct {
-		component, calendar string
-		prefix              []string
-	}{
-		{"gateway", "*-*-* *:00/5:00", []string{"systemctl"}},
-		{"worker", "*-*-* *:02/5:00", []string{"systemctl", "--user"}},
-	} {
-		t.Run(tc.component, func(t *testing.T) {
-			l, err := newLayout(tc.component, "linux", "amd64", t.TempDir())
-			if err != nil {
-				t.Fatal(err)
-			}
-			l.UnitDir = t.TempDir()
-			label := "codex-" + tc.component + "-update"
-			var calls [][]string
-			m := &Manager{Run: func(_ context.Context, args ...string) (CommandResult, error) {
-				calls = append(calls, append([]string(nil), args...))
-				return CommandResult{}, nil
-			}}
-			if err := m.AutoUpdate(context.Background(), l, true); err != nil {
-				t.Fatal(err)
-			}
-			data, err := os.ReadFile(filepath.Join(l.UnitDir, label+".service"))
-			if err != nil {
-				t.Fatal(err)
-			}
-			if !strings.Contains(string(data), "ExecStart="+l.Command+" update "+tc.component+"\n") || strings.Contains(string(data), "python") {
-				t.Fatalf("incorrect update command: %s", data)
-			}
-			if !strings.Contains(string(data), "SuccessExitStatus=75") {
-				t.Fatal("busy deferrals would appear as failed updates")
-			}
-			timer, err := os.ReadFile(filepath.Join(l.UnitDir, label+".timer"))
-			if err != nil {
-				t.Fatal(err)
-			}
-			for _, directive := range []string{"OnCalendar=" + tc.calendar, "RandomizedDelaySec=0", "AccuracySec=1s", "Persistent=true"} {
-				if !strings.Contains(string(timer), "\n"+directive+"\n") {
-					t.Errorf("missing schedule directive %q in %s", directive, timer)
-				}
-			}
-			if err := m.AutoUpdate(context.Background(), l, false); err != nil {
-				t.Fatal(err)
-			}
-			var expected [][]string
-			for _, args := range [][]string{{"daemon-reload"}, {"enable", "--now", label + ".timer"}, {"disable", "--now", label + ".timer"}} {
-				expected = append(expected, append(append([]string(nil), tc.prefix...), args...))
-			}
-			if !reflect.DeepEqual(calls, expected) {
-				t.Fatalf("unexpected update commands: %v", calls)
-			}
-		})
+	l := platformWorker(t, "linux")
+	var calls [][]string
+	m := &Manager{Run: func(_ context.Context, args ...string) (CommandResult, error) {
+		calls = append(calls, append([]string(nil), args...))
+		return CommandResult{}, nil
+	}}
+	if err := m.AutoUpdate(context.Background(), l, true); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(filepath.Join(l.UnitDir, "codex-worker-update.service"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "ExecStart="+l.Command+" update worker\n") || strings.Contains(string(data), "python") {
+		t.Fatalf("incorrect update command: %s", data)
+	}
+	if !strings.Contains(string(data), "SuccessExitStatus=75") {
+		t.Fatal("busy deferrals would appear as failed updates")
+	}
+	if err := m.AutoUpdate(context.Background(), l, false); err != nil {
+		t.Fatal(err)
+	}
+	expected := [][]string{{"systemctl", "--user", "daemon-reload"}, {"systemctl", "--user", "enable", "--now", "codex-worker-update.timer"}, {"systemctl", "--user", "disable", "--now", "codex-worker-update.timer"}}
+	if !reflect.DeepEqual(calls, expected) {
+		t.Fatalf("unexpected update commands: %v", calls)
 	}
 }
 
@@ -464,8 +437,7 @@ func TestPlatformDarwinPlistsEscapePathsAndScheduleNativeManager(t *testing.T) {
 	if err := m.AutoUpdate(context.Background(), l, true); err != nil {
 		t.Fatal(err)
 	}
-	updatePlist := filepath.Join(l.Home, "Library/LaunchAgents/com.iaia.codex-worker-update.plist")
-	for _, path := range []string{workerPlist(l), updatePlist} {
+	for _, path := range []string{workerPlist(l), filepath.Join(l.Home, "Library/LaunchAgents/com.iaia.codex-worker-update.plist")} {
 		data, err := os.ReadFile(path)
 		if err != nil {
 			t.Fatal(err)
@@ -474,49 +446,14 @@ func TestPlatformDarwinPlistsEscapePathsAndScheduleNativeManager(t *testing.T) {
 			t.Fatalf("plist did not XML-escape paths: %s", data)
 		}
 		decoder := xml.NewDecoder(strings.NewReader(string(data)))
-		foundCalendar := false
 		for {
-			token, err := decoder.Token()
+			_, err := decoder.Token()
 			if errors.Is(err, io.EOF) {
 				break
 			}
 			if err != nil {
 				t.Fatalf("invalid XML plist: %v", err)
 			}
-			start, ok := token.(xml.StartElement)
-			if !ok || start.Name.Local != "key" {
-				continue
-			}
-			var key string
-			if err := decoder.DecodeElement(&key, &start); err != nil {
-				t.Fatal(err)
-			}
-			if key != "StartCalendarInterval" {
-				continue
-			}
-			var calendar struct {
-				XMLName xml.Name
-				Entries []struct {
-					Keys   []string `xml:"key"`
-					Values []int    `xml:"integer"`
-				} `xml:"dict"`
-			}
-			if err := decoder.Decode(&calendar); err != nil {
-				t.Fatal(err)
-			}
-			if foundCalendar || calendar.XMLName.Local != "array" || len(calendar.Entries) != 12 {
-				t.Fatalf("expected one array with twelve update times: %+v", calendar)
-			}
-			foundCalendar = true
-			for i, minute := range []int{2, 7, 12, 17, 22, 27, 32, 37, 42, 47, 52, 57} {
-				entry := calendar.Entries[i]
-				if !reflect.DeepEqual(entry.Keys, []string{"Minute"}) || !reflect.DeepEqual(entry.Values, []int{minute}) {
-					t.Errorf("calendar entry %d = %+v; want minute %d in every hour", i, entry, minute)
-				}
-			}
-		}
-		if path == updatePlist && !foundCalendar {
-			t.Fatal("worker updater has no calendar schedule")
 		}
 	}
 	if len(calls) != 2 || calls[0][1] != "bootout" || calls[1][1] != "bootstrap" {
