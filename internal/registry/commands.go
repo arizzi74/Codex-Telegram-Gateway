@@ -40,15 +40,16 @@ type IncomingUpdate struct {
 // AcceptResult is a durable UI response descriptor. The Telegram renderer owns
 // presentation; the registry only records a bounded view/result code.
 type AcceptResult struct {
-	Duplicate  bool   `json:"duplicate,omitempty"`
-	View       string `json:"view,omitempty"`
-	Action     string `json:"action,omitempty"`
-	SessionID  string `json:"session_id,omitempty"`
-	RuntimeID  string `json:"runtime_id,omitempty"`
-	CommandID  string `json:"command_id,omitempty"`
-	ApprovalID string `json:"approval_id,omitempty"`
-	QuestionID string `json:"question_id,omitempty"`
-	ErrorCode  string `json:"error_code,omitempty"`
+	Duplicate   bool   `json:"duplicate,omitempty"`
+	View        string `json:"view,omitempty"`
+	Action      string `json:"action,omitempty"`
+	SessionID   string `json:"session_id,omitempty"`
+	RuntimeID   string `json:"runtime_id,omitempty"`
+	SessionPage int    `json:"session_page,omitempty"`
+	CommandID   string `json:"command_id,omitempty"`
+	ApprovalID  string `json:"approval_id,omitempty"`
+	QuestionID  string `json:"question_id,omitempty"`
+	ErrorCode   string `json:"error_code,omitempty"`
 }
 
 // SessionStatus is the compact, current read model used by Telegram status

@@ -6,8 +6,10 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
+	"unicode/utf16"
 
 	"github.com/google/uuid"
 	"github.com/iaia/telegramgw/internal/protocol"
@@ -16,6 +18,11 @@ import (
 )
 
 const callbackLifetime = 15 * time.Minute
+
+const (
+	sessionPageSize         = 10
+	sessionKeyboardMaxBytes = 4096
+)
 
 type telegramRenderStore interface {
 	ListWorkers(context.Context) ([]registry.Worker, error)
@@ -94,7 +101,7 @@ func (s *Sender) renderUIResponse(ctx context.Context, row registry.Delivery) (s
 		if err != nil {
 			return "", nil, err
 		}
-		return s.renderSessions(ctx, row, runtimeID, inventory)
+		return s.renderSessions(ctx, row, runtimeID, inventory, response.SessionPage)
 	case "selected":
 		_, session, runtime, worker, err := s.selectedIdentity(ctx, response.SessionID, response.RuntimeID)
 		if err != nil {
@@ -184,21 +191,39 @@ func (s *Sender) renderRuntimePicker(ctx context.Context, row registry.Delivery,
 	return "Choose a runtime to " + verb + ".", keyboard, nil
 }
 
-func (s *Sender) renderSessions(ctx context.Context, row registry.Delivery, runtimeID uuid.UUID, inv renderInventory) (string, *TelegramKeyboard, error) {
+func (s *Sender) renderSessions(ctx context.Context, row registry.Delivery, runtimeID uuid.UUID, inv renderInventory, page int) (string, *TelegramKeyboard, error) {
+	if page < 0 {
+		return "", nil, errors.New("render sessions: invalid page")
+	}
 	runtime, ok := inv.runtimeByID[runtimeID.String()]
 	if !ok {
 		return "", nil, errors.New("render sessions: runtime is unavailable")
 	}
 	worker := inv.workerByID[runtime.WorkerID]
-	sessions := inv.sessionsByRun[runtime.ID]
+	sessions := append([]protocol.Session(nil), inv.sessionsByRun[runtime.ID]...)
+	// Activity updates must not shuffle sessions between pages. Names and IDs
+	// give the picker a stable order even while turns and heartbeats continue.
+	sort.Slice(sessions, func(i, j int) bool {
+		left, right := strings.ToLower(sessionLabel(sessions[i])), strings.ToLower(sessionLabel(sessions[j]))
+		if left != right {
+			return left < right
+		}
+		return sessions[i].ID < sessions[j].ID
+	})
+	pages := max(1, (len(sessions)+sessionPageSize-1)/sessionPageSize)
+	page = min(page, pages-1)
+	start := page * sessionPageSize
+	end := min(start+sessionPageSize, len(sessions))
 	var text strings.Builder
-	text.WriteString("Sessions · " + workerLabel(worker) + " / " + runtimeLabel(runtime))
+	text.WriteString("Sessions · " + s.sessionListField(workerLabel(worker), 64, 256) + " / " + s.sessionListField(runtimeLabel(runtime), 64, 256))
+	fmt.Fprintf(&text, "\nPage %d of %d · %d sessions", page+1, pages, len(sessions))
 	keyboard := &TelegramKeyboard{}
 	if len(sessions) == 0 {
 		text.WriteString("\n\nNo sessions found.")
 	}
-	for _, session := range sessions {
-		text.WriteString("\n\n" + sessionIcon(session) + " " + sessionLabel(session) + "\n" + titleCase(session.State) + " · " + sessionAvailability(session) + " · " + displayValue(session.CWD))
+	for _, session := range sessions[start:end] {
+		label := s.sessionListLabel(session)
+		text.WriteString("\n\n" + sessionIcon(session) + " " + s.sessionListField(label, 80, 320) + "\n" + s.sessionListField(titleCase(session.State), 24, 96) + " · " + sessionAvailability(session) + " · " + s.sessionListField(displayValue(session.CWD), 160, 640))
 		sessionID, err := requiredUUID("session", session.ID)
 		if err != nil {
 			return "", nil, err
@@ -211,7 +236,24 @@ func (s *Sender) renderSessions(ctx context.Context, row registry.Delivery, runt
 		if err != nil {
 			return "", nil, fmt.Errorf("render session status callback: %w", err)
 		}
-		keyboard.Rows = append(keyboard.Rows, []TelegramButton{{Text: "Connect · " + sessionLabel(session), Data: connect}, {Text: "Status", Data: status}})
+		keyboard.Rows = append(keyboard.Rows, []TelegramButton{{Text: s.sessionListField("Connect · "+label, 36, 36), Data: connect}, {Text: "Status", Data: status}})
+	}
+	var navigation []TelegramButton
+	for _, target := range []struct {
+		label string
+		page  int
+	}{{"‹ Previous", page - 1}, {"Next ›", page + 1}} {
+		if target.page < 0 || target.page >= pages {
+			continue
+		}
+		token, err := s.callback(ctx, row, registry.Callback{Action: "sessions", RuntimeID: runtimeID, Generation: int64(runtime.Generation), SessionPage: target.page})
+		if err != nil {
+			return "", nil, fmt.Errorf("render session page callback: %w", err)
+		}
+		navigation = append(navigation, TelegramButton{Text: target.label, Data: token})
+	}
+	if len(navigation) > 0 {
+		keyboard.Rows = append(keyboard.Rows, navigation)
 	}
 	create, err := s.callback(ctx, row, registry.Callback{Action: "new", RuntimeID: runtimeID, Generation: int64(runtime.Generation)})
 	if err != nil {
@@ -219,6 +261,40 @@ func (s *Sender) renderSessions(ctx context.Context, row registry.Delivery, runt
 	}
 	keyboard.Rows = append(keyboard.Rows, []TelegramButton{{Text: "New session", Data: create}})
 	return text.String(), keyboard, nil
+}
+
+// Bound fields independently so each page fits one message and its keyboard
+// remains small even with Unicode, control characters and JSON escaping.
+// Redact before truncation to avoid exposing part of a configured secret.
+func (s *Sender) sessionListField(value string, maxUnits, maxBytes int) string {
+	if s.options.Redactor != nil {
+		value = s.options.Redactor.Redact(value)
+	}
+	value = strings.Join(strings.Fields(value), " ")
+	if len(value) <= maxBytes && telegramTextLength(value) <= maxUnits {
+		return value
+	}
+	units, size := 0, 0
+	for index, r := range value {
+		next := len(string(r))
+		if units+utf16.RuneLen(r) > maxUnits-1 || size+next > maxBytes-len("…") {
+			return value[:index] + "…"
+		}
+		units += utf16.RuneLen(r)
+		size += next
+	}
+	return value
+}
+
+func (s *Sender) sessionListLabel(session protocol.Session) string {
+	if s.options.Redactor != nil {
+		// sessionLabel also shortens fallback previews. Mask the original value
+		// before that shortening, as well as before the page-specific bounds.
+		session.Name = s.options.Redactor.Redact(session.Name)
+		session.Preview = s.options.Redactor.Redact(session.Preview)
+		session.CWD = s.options.Redactor.Redact(session.CWD)
+	}
+	return sessionLabel(session)
 }
 
 func (s *Sender) renderStatus(ctx context.Context, response registry.AcceptResult) (string, *TelegramKeyboard, error) {

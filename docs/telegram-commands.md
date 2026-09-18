@@ -11,7 +11,7 @@ menu names, so `/debug_config` is the menu spelling of `/debug-config`; both wor
 | --- | --- |
 | `/tgstart`, `/tghelp` | Show gateway help. |
 | `/tginstances` | List workers and their runtimes. |
-| `/tgsessions [runtime]` | List sessions and selection buttons. |
+| `/tgsessions [runtime]` | Browse sessions, 10 per page, with selection and Previous/Next buttons. |
 | `/tgconnect NAME_OR_ID` | Select a session without starting a turn. |
 | `/tgstatus [session]` | Show gateway connectivity, queued commands and approvals. |
 | `/tghistory [count]` | Show saved Codex prompts for the selected session; defaults to 10, maximum 50 per page. |
@@ -20,6 +20,12 @@ menu names, so `/debug_config` is the menu spelling of `/debug-config`; both wor
 | `/tgsteer TEXT` | Guide the exact active turn. |
 | `/tginterrupt` | Interrupt the exact active turn. |
 | `/tginput APPROVAL_ID QUESTION_ID ANSWER` | Answer an input request; replying to its message is easier. |
+
+Session lists are ordered by name. Long names and workspace paths are shortened
+in the list; use a session's **Status** button for full details. Page buttons are
+bound to your user, chat, topic, and runtime generation, and do not change the
+selected session or start any work. Run `/tgsessions` again if a button expires
+or the worker restarts.
 
 ## Codex controls
 

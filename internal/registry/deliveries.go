@@ -28,6 +28,9 @@ type DeliveryChunk struct {
 	Payload json.RawMessage
 }
 
+// ErrDeliveryLeaseChanged tells a sender to leave a newer claim untouched.
+var ErrDeliveryLeaseChanged = errors.New("registry: delivery lease changed")
+
 // ClaimDeliveries atomically leases due rows in one UPDATE statement. SQLite
 // serializes concurrent writers, so senders cannot claim the same live lease.
 // A crashed sender's lease becomes eligible again after 30 seconds.
@@ -166,6 +169,51 @@ func (s *Store) PrepareDeliveryChunks(ctx context.Context, id string, messages [
 			if _, err = tx.Exec(ctx, `INSERT INTO telegram_delivery_chunks(delivery_id,chunk_index,payload) VALUES($1,$2,$3)`, id, index, payload); err != nil {
 				return nil, err
 			}
+		}
+	}
+	if err = tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+	return s.DeliveryChunks(ctx, id)
+}
+
+// ReplaceUnsentSessionDeliveryChunks repairs a legacy session picker that is
+// too large for Telegram. Only its unsent tail may change; every accepted
+// message and its checkpoint survive. The lease attempt fences stale senders,
+// including a sender whose render overlapped a newer delivery claim.
+func (s *Store) ReplaceUnsentSessionDeliveryChunks(ctx context.Context, id string, attempt int, messages []json.RawMessage) ([]DeliveryChunk, error) {
+	if len(messages) < 1 || len(messages) > 1000 {
+		return nil, errors.New("registry: invalid delivery chunk count")
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback(ctx)
+	var eligible bool
+	if err = tx.QueryRow(ctx, `SELECT EXISTS (
+		SELECT 1 FROM telegram_deliveries
+		WHERE delivery_id=$1 AND kind='ui_response'
+		  AND json_extract(payload,'$.view')='sessions'
+		  AND COALESCE(json_extract(payload,'$.error_code'),'')=''
+		  AND status='sending' AND attempt_count=$2 AND next_attempt_at>`+sqliteNow+`
+		  AND EXISTS (SELECT 1 FROM telegram_delivery_chunks WHERE delivery_id=$1 AND status='pending')
+	)`, id, attempt).Scan(&eligible); err != nil {
+		return nil, err
+	}
+	if !eligible {
+		return nil, ErrDeliveryLeaseChanged
+	}
+	if _, err = tx.Exec(ctx, `DELETE FROM telegram_delivery_chunks WHERE delivery_id=$1 AND status='pending'`, id); err != nil {
+		return nil, err
+	}
+	var nextIndex int
+	if err = tx.QueryRow(ctx, `SELECT COALESCE(max(chunk_index)+1,0) FROM telegram_delivery_chunks WHERE delivery_id=$1`, id).Scan(&nextIndex); err != nil {
+		return nil, err
+	}
+	for index, payload := range messages {
+		if _, err = tx.Exec(ctx, `INSERT INTO telegram_delivery_chunks(delivery_id,chunk_index,payload) VALUES($1,$2,$3)`, id, nextIndex+index, payload); err != nil {
+			return nil, err
 		}
 	}
 	if err = tx.Commit(ctx); err != nil {

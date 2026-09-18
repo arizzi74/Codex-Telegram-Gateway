@@ -33,6 +33,12 @@ type SenderOptions struct {
 	OwnerID  int64
 	Redactor *auth.Redactor
 }
+
+// SessionDeliveryRepairStore supports upgrading oversized, previously frozen
+// session pickers without replaying messages already accepted by Telegram.
+type SessionDeliveryRepairStore interface {
+	ReplaceUnsentSessionDeliveryChunks(context.Context, string, int, []json.RawMessage) ([]registry.DeliveryChunk, error)
+}
 type Sender struct {
 	store   DeliveryStore
 	api     TelegramAPI
@@ -85,6 +91,9 @@ func (s *Sender) flush(ctx context.Context) error {
 	}
 	for _, row := range rows {
 		if err := s.sendDelivery(ctx, row); err != nil {
+			if errors.Is(err, registry.ErrDeliveryLeaseChanged) {
+				return err
+			}
 			delay := telegramRetryDelay(row.Attempt, err)
 			if retryErr := s.store.RetryDelivery(ctx, row.ID, delay, "Telegram delivery deferred"); retryErr != nil {
 				return retryErr
@@ -103,33 +112,21 @@ func (s *Sender) sendDelivery(ctx context.Context, row registry.Delivery) error 
 	if err != nil {
 		return err
 	}
-	if len(checkpoints) == 0 {
-		renderCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
-		parts, keyboard, err := s.renderDeliveryParts(renderCtx, row)
-		cancel()
+	repair := oversizedSessionDelivery(row, checkpoints)
+	if len(checkpoints) == 0 || repair {
+		messages, err := s.renderDeliveryMessages(ctx, row)
 		if err != nil {
 			return err
 		}
-		if len(parts) == 0 {
-			return errors.New("empty Telegram delivery")
+		if repair {
+			store, ok := s.store.(SessionDeliveryRepairStore)
+			if !ok {
+				return errors.New("Telegram session delivery needs keyboard repair")
+			}
+			checkpoints, err = store.ReplaceUnsentSessionDeliveryChunks(ctx, row.ID, row.Attempt, messages)
+		} else {
+			checkpoints, err = s.store.PrepareDeliveryChunks(ctx, row.ID, messages)
 		}
-		messages := make([]json.RawMessage, 0, len(parts))
-		for index, part := range parts {
-			message := SendMessage{ChatID: row.ChatID, TopicID: row.TopicID, Text: part, DisableNotification: isProgressDelivery(row.Kind)}
-			if row.Kind == "tool_progress_message" {
-				message.Entities = []TelegramEntity{{Type: "pre", Length: telegramTextLength(part)}}
-			}
-			// Put controls after their complete explanation.
-			if index == len(parts)-1 {
-				message.Keyboard = keyboard
-			}
-			raw, err := json.Marshal(message)
-			if err != nil {
-				return err
-			}
-			messages = append(messages, raw)
-		}
-		checkpoints, err = s.store.PrepareDeliveryChunks(ctx, row.ID, messages)
 		if err != nil {
 			return err
 		}
@@ -169,6 +166,66 @@ func (s *Sender) sendDelivery(ctx context.Context, row registry.Delivery) error 
 		}
 	}
 	return nil
+}
+
+func (s *Sender) renderDeliveryMessages(ctx context.Context, row registry.Delivery) ([]json.RawMessage, error) {
+	renderCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	parts, keyboard, err := s.renderDeliveryParts(renderCtx, row)
+	if err != nil {
+		return nil, err
+	}
+	if len(parts) == 0 {
+		return nil, errors.New("empty Telegram delivery")
+	}
+	messages := make([]json.RawMessage, 0, len(parts))
+	for index, part := range parts {
+		message := SendMessage{ChatID: row.ChatID, TopicID: row.TopicID, Text: part, DisableNotification: isProgressDelivery(row.Kind)}
+		if row.Kind == "tool_progress_message" {
+			message.Entities = []TelegramEntity{{Type: "pre", Length: telegramTextLength(part)}}
+		}
+		// Put controls after their complete explanation.
+		if index == len(parts)-1 {
+			message.Keyboard = keyboard
+		}
+		raw, err := json.Marshal(message)
+		if err != nil {
+			return nil, err
+		}
+		messages = append(messages, raw)
+	}
+	return messages, nil
+}
+
+func oversizedSessionDelivery(row registry.Delivery, chunks []registry.DeliveryChunk) bool {
+	if row.Kind != "ui_response" {
+		return false
+	}
+	var response registry.AcceptResult
+	if json.Unmarshal(row.Payload, &response) != nil || response.View != "sessions" || response.ErrorCode != "" {
+		return false
+	}
+	for _, chunk := range chunks {
+		if chunk.Sent {
+			continue
+		}
+		var message SendMessage
+		if json.Unmarshal(chunk.Payload, &message) != nil || message.Keyboard == nil {
+			continue
+		}
+		markup, err := json.Marshal(message.Keyboard)
+		if err != nil {
+			continue
+		}
+		buttons := 0
+		for _, row := range message.Keyboard.Rows {
+			buttons += len(row)
+		}
+		if len(markup) > sessionKeyboardMaxBytes || buttons > 2*sessionPageSize+3 {
+			return true
+		}
+	}
+	return false
 }
 
 func telegramRetryDelay(attempt int, err error) time.Duration {

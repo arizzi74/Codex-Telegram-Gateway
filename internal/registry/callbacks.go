@@ -21,6 +21,7 @@ type Callback struct {
 	UserID, ChatID, TopicID                     int64
 	SessionID, RuntimeID, ApprovalID            uuid.UUID
 	Generation                                  int64
+	SessionPage                                 int `json:"session_page,omitempty"`
 	ExpiresAt                                   time.Time
 	History                                     *protocol.HistoryRequest
 }
@@ -30,6 +31,7 @@ type callbackPayload struct {
 	ChatID, TopicID int64
 	RuntimeID       string                   `json:"runtime_id,omitempty"`
 	Generation      int64                    `json:"generation,omitempty"`
+	SessionPage     int                      `json:"session_page,omitempty"`
 	Decision        string                   `json:"decision,omitempty"`
 	QuestionID      string                   `json:"question_id,omitempty"`
 	Answer          string                   `json:"answer,omitempty"`
@@ -40,10 +42,13 @@ func (s *Store) CreateCallback(ctx context.Context, callback Callback) (string, 
 	if callback.Action == "" || callback.BotID == "" || callback.UserID == 0 || callback.ChatID == 0 || callback.TopicID < 0 || callback.ExpiresAt.IsZero() || !callback.ExpiresAt.After(time.Now()) {
 		return "", errors.New("registry: invalid callback")
 	}
+	if !validSessionPage(callback.Action, callback.SessionPage) {
+		return "", errors.New("registry: invalid callback session page")
+	}
 	if callback.Action == "history" && (callback.SessionID == uuid.Nil || callback.RuntimeID == uuid.Nil || callback.Generation <= 0 || callback.History.Validate() != nil) {
 		return "", errors.New("registry: invalid history callback")
 	}
-	payload, err := json.Marshal(callbackPayload{BotID: callback.BotID, ChatID: callback.ChatID, TopicID: callback.TopicID, RuntimeID: uuidText(callback.RuntimeID), Generation: callback.Generation, Decision: callback.Decision, QuestionID: callback.QuestionID, Answer: callback.Answer, History: callback.History})
+	payload, err := json.Marshal(callbackPayload{BotID: callback.BotID, ChatID: callback.ChatID, TopicID: callback.TopicID, RuntimeID: uuidText(callback.RuntimeID), Generation: callback.Generation, SessionPage: callback.SessionPage, Decision: callback.Decision, QuestionID: callback.QuestionID, Answer: callback.Answer, History: callback.History})
 	if err != nil {
 		return "", err
 	}
@@ -70,6 +75,10 @@ func (s *Store) CreateCallback(ctx context.Context, callback Callback) (string, 
 		}
 	}
 	return "", errors.New("registry: generate unique callback token")
+}
+
+func validSessionPage(action string, page int) bool {
+	return page >= 0 && page <= 1_000_000 && (page == 0 || action == "sessions")
 }
 
 func callbackToken() (string, error) {
@@ -107,7 +116,7 @@ func (s *Store) consumeCallback(ctx context.Context, tx *dbTx, in IncomingUpdate
 		return AcceptResult{}, ErrCallbackInvalid
 	}
 	var context callbackPayload
-	if err := json.Unmarshal(payload, &context); err != nil || context.BotID != in.BotID || context.ChatID != in.ChatID || context.TopicID != in.TopicID {
+	if err := json.Unmarshal(payload, &context); err != nil || context.BotID != in.BotID || context.ChatID != in.ChatID || context.TopicID != in.TopicID || !validSessionPage(action, context.SessionPage) {
 		return AcceptResult{}, ErrCallbackInvalid
 	}
 	markUsed := func() error {
@@ -198,7 +207,7 @@ func (s *Store) consumeCallback(ctx context.Context, tx *dbTx, in IncomingUpdate
 		if err := markUsed(); err != nil {
 			return AcceptResult{}, err
 		}
-		return AcceptResult{View: "sessions", RuntimeID: runtime.runtimeID.String()}, nil
+		return AcceptResult{View: "sessions", RuntimeID: runtime.runtimeID.String(), SessionPage: context.SessionPage}, nil
 	case "new":
 		if context.RuntimeID == "" {
 			return AcceptResult{}, ErrCallbackInvalid
