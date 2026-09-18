@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 
 	"github.com/iaia/telegramgw/internal/codexadapter"
@@ -42,10 +43,12 @@ func run(args []string, stdout, stderr io.Writer) error {
 
 func usage(out io.Writer) error {
 	_, err := fmt.Fprint(out, `Usage:
-  codex-local attach --socket PATH [THREAD]
+  codex-local attach --socket PATH [--latest | THREAD]
   codex-local start
 
 attach opens the local Codex TUI against an existing private Unix socket.
+--latest resumes the most recently updated session in the current directory,
+including sessions created through Telegram.
 start creates an owned private app-server and JSONL proxy for the current
 directory, resumes the latest session in this directory (or creates one), launches the
 interactive CLI on the same thread, then stops both children when the
@@ -58,6 +61,7 @@ func attach(args []string, stdout, stderr io.Writer) error {
 	flags := flag.NewFlagSet("attach", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	socket := flags.String("socket", "", "private app-server Unix socket")
+	latest := flags.Bool("latest", false, "resume the latest session in the current directory")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -71,7 +75,23 @@ func attach(args []string, stdout, stderr io.Writer) error {
 	if len(remaining) > 1 {
 		return errors.New("attach accepts at most one thread id")
 	}
-	return runCodex(context.Background(), attachCommand(*socket, first(remaining)), "", stdout, stderr)
+	if len(remaining) != 0 && strings.HasPrefix(remaining[0], "-") {
+		return fmt.Errorf("unknown attach option %q", remaining[0])
+	}
+	if *latest && len(remaining) != 0 {
+		return errors.New("--latest cannot be combined with a thread id")
+	}
+	command := attachCommand(*socket, first(remaining))
+	if *latest {
+		cwd, err := os.Getwd()
+		if err != nil {
+			return fmt.Errorf("read current directory: %w", err)
+		}
+		// A remote TUI otherwise takes its default directory from the app
+		// server, which can differ from the terminal's current directory.
+		command = []string{"--remote", "unix://" + *socket, "--cd", cwd, "resume", "--last", "--include-non-interactive"}
+	}
+	return runCodex(context.Background(), command, "", stdout, stderr)
 }
 
 func start(args []string, stdout, stderr io.Writer) error {

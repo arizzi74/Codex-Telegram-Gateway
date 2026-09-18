@@ -145,6 +145,9 @@ codex-worker attach SESSION_NAME_OR_THREAD_ID
 # Choose a session on the single worker runtime interactively:
 codex-worker attach
 
+# Resume the most recently updated session in the current directory:
+codex-worker attach --latest
+
 # Start a private app-server, resume this directory's latest session,
 # and open the terminal on that same server:
 codex-local start
@@ -154,6 +157,10 @@ codex-local attach --socket /absolute/private/app.sock THREAD_ID
 ```
 
 Use `codex-worker attach` to share a worker-managed session with Telegram.
+`--latest` skips the picker and searches the current directory's saved sessions,
+including sessions created through Telegram. If none exists, Codex opens a new
+session in that directory. With multiple worker runtimes, specify a session
+name or thread ID instead.
 Closing the attached terminal leaves the worker and its app server running.
 An idle attached CLI can reconnect across automatic worker updates. Active turns,
 requests and approvals still defer an update; see the

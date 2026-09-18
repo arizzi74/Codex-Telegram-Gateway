@@ -1,8 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -14,8 +17,68 @@ func TestAttachCommandUsesRemoteResume(t *testing.T) {
 	if got, want := attachCommand("/tmp/private.sock", "thr_1"), []string{"--remote", "unix:///tmp/private.sock", "resume", "thr_1"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("attach args = %#v, want %#v", got, want)
 	}
-	if got, want := attachCommand("/tmp/private.sock", "--last"), []string{"--remote", "unix:///tmp/private.sock", "resume", "--last"}; !reflect.DeepEqual(got, want) {
-		t.Fatalf("last args = %#v, want %#v", got, want)
+	if got, want := attachCommand("/tmp/private.sock", ""), []string{"--remote", "unix:///tmp/private.sock", "resume"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("picker args = %#v, want %#v", got, want)
+	}
+}
+
+func TestAttachLaunchesCodexInCurrentDirectory(t *testing.T) {
+	binDir := t.TempDir()
+	// An actual child process records the arguments and working directory seen
+	// by Codex, without connecting to a worker or starting an app server.
+	if err := os.WriteFile(filepath.Join(binDir, "codex"), []byte("#!/bin/sh\nprintf '%s\\n' \"$PWD\" \"$@\"\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir)
+	t.Chdir(t.TempDir())
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	socket := filepath.Join(t.TempDir(), "existing.sock")
+	for _, tc := range []struct {
+		name string
+		args []string
+		want []string
+	}{
+		{"latest", []string{"--socket", socket, "--latest"}, []string{"--cd", cwd, "resume", "--last", "--include-non-interactive"}},
+		{"latest before socket", []string{"--latest", "--socket", socket}, []string{"--cd", cwd, "resume", "--last", "--include-non-interactive"}},
+		{"picker", []string{"--socket", socket}, []string{"resume"}},
+		{"explicit thread", []string{"--socket", socket, "thr_1"}, []string{"resume", "thr_1"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			if err := run(append([]string{"attach"}, tc.args...), &stdout, &stderr); err != nil {
+				t.Fatalf("attach: %v; stderr: %s", err, stderr.String())
+			}
+			want := append([]string{cwd, "--remote", "unix://" + socket}, tc.want...)
+			if got := strings.Split(strings.TrimSuffix(stdout.String(), "\n"), "\n"); !reflect.DeepEqual(got, want) {
+				t.Fatalf("Codex child received %#v, want %#v", got, want)
+			}
+		})
+	}
+	for _, tc := range []struct {
+		name string
+		args []string
+	}{
+		{"missing socket", []string{"--latest"}},
+		{"relative socket", []string{"--socket", "relative.sock", "--latest"}},
+		{"latest and thread", []string{"--socket", socket, "--latest", "thr_1"}},
+		{"latest after thread", []string{"--socket", socket, "thr_1", "--latest"}},
+		{"extra thread", []string{"--socket", socket, "thr_1", "thr_2"}},
+		{"unknown flag", []string{"--socket", socket, "--unknown"}},
+		{"unknown flag after thread", []string{"--socket", socket, "thr_1", "--unknown"}},
+		{"flag after delimiter", []string{"--socket", socket, "--", "--unknown"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			if err := run(append([]string{"attach"}, tc.args...), &stdout, &stderr); err == nil {
+				t.Fatal("invalid attach arguments succeeded")
+			}
+			if stdout.Len() != 0 {
+				t.Fatalf("invalid attach arguments launched Codex: %s", stdout.String())
+			}
+		})
 	}
 }
 

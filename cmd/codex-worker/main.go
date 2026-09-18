@@ -55,7 +55,7 @@ func run(args []string, logger *slog.Logger) error {
 		return nil
 	}
 	if args[0] == "help" || args[0] == "--help" {
-		fmt.Println("codex-worker [--config PATH] run|status|doctor|attach [SESSION]|config export|update prepare|update abort --token TOKEN")
+		fmt.Println("codex-worker [--config PATH] run|status|doctor|attach [SESSION|--latest]|config export|update prepare|update abort --token TOKEN")
 		return nil
 	}
 	cfg, err := config.LoadWorker(path)
@@ -121,47 +121,15 @@ func run(args []string, logger *slog.Logger) error {
 		if time.Since(status.UpdatedAt) > 20*time.Second {
 			return errors.New("worker status is stale; inspect the worker before attaching")
 		}
-		var session *struct{ thread, runtime string }
-		if len(args) > 2 {
-			return errors.New("attach takes one session name or thread ID")
-		}
-		if len(args) == 2 {
-			for _, s := range status.Sessions {
-				if s.ID == args[1] || s.ThreadID == args[1] || s.Name == args[1] {
-					if session != nil {
-						return errors.New("session name is ambiguous; use the thread ID")
-					}
-					session = &struct{ thread, runtime string }{s.ThreadID, s.RuntimeID}
-				}
-			}
-			if session == nil {
-				return errors.New("session not found")
-			}
-		}
-		var socket string
-		for _, r := range status.Runtimes {
-			if session != nil && r.ID != session.runtime {
-				continue
-			}
-			if r.LocalSocket != "" {
-				if socket != "" {
-					return errors.New("multiple runtimes; specify a session")
-				}
-				socket = r.LocalSocket
-			}
-		}
-		if socket == "" {
-			return errors.New("runtime has no local attachment socket")
+		cliArgs, err := attachmentArgs(status, args[1:])
+		if err != nil {
+			return err
 		}
 		executable, err := os.Executable()
 		if err != nil {
 			return err
 		}
 		helper := filepath.Join(filepath.Dir(executable), "codex-local")
-		cliArgs := []string{"attach", "--socket", socket}
-		if session != nil {
-			cliArgs = append(cliArgs, session.thread)
-		}
 		cmd := exec.CommandContext(ctx, helper, cliArgs...)
 		cmd.Stdin = os.Stdin
 		cmd.Stdout = os.Stdout

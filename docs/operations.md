@@ -76,6 +76,13 @@ Run `codex-worker --config ~/.config/codex-worker/config.json doctor` before
 starting a new worker. Use `codex-worker ... status` for the local durable
 state. For an interactive local attachment to a running session, use
 `codex-worker --config ~/.config/codex-worker/config.json attach SESSION_OR_THREAD`.
+Use `codex-worker attach --latest` to skip the picker and resume the most recently
+updated saved session in the exact current directory, including Telegram-created
+sessions. The helper explicitly supplies the current directory to the remote
+Codex CLI. If no session exists there, Codex opens a new one in that directory.
+This option requires a single attachable worker runtime; with multiple runtimes,
+select a session by name or thread ID. `--latest` cannot be combined with a
+session argument.
 For an isolated one-off local Codex process, run `codex-local start` from the
 working directory.
 
