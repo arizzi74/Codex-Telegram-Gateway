@@ -189,6 +189,173 @@ func TestRuntimeDiscoveryUnavailableResumeDegradesWithoutFatalHook(t *testing.T)
 	assertResumeCalls(t, fixture.Calls(), 1)
 }
 
+func TestRuntimeDiscoveryRecoversUnavailableCapabilities(t *testing.T) {
+	for _, method := range requiredDiscoveryMethods {
+		t.Run(method, func(t *testing.T) {
+			m, runtime, client, fixture, root := recoveryFixture(t)
+			fixture.SetMethodUnavailable(method, true)
+			if err := m.discover(context.Background(), runtime, client); err != nil {
+				t.Fatal(err)
+			}
+			assertRuntimeState(t, m, "degraded")
+			if client.Supports(method) {
+				t.Fatal("missing method remained available")
+			}
+			calls := len(fixture.Calls())
+			fixture.SetMethodUnavailable(method, false)
+			if err := m.discover(context.Background(), runtime, client); err != nil {
+				t.Fatal(err)
+			}
+			if got := len(fixture.Calls()); got != calls {
+				t.Fatalf("discovery retried before retry interval: %d -> %d", calls, got)
+			}
+			assertRuntimeState(t, m, "degraded")
+			allowCapabilityRetry(m, runtime)
+			if err := m.discover(context.Background(), runtime, client); err != nil {
+				t.Fatal(err)
+			}
+			assertRuntimeState(t, m, "running")
+			if !client.Supports(method) {
+				t.Fatal("successful RPC did not restore availability")
+			}
+			current, snapshot, found := m.Client(runtime.ID)
+			if !found || current != client || snapshot.Generation != runtime.Generation {
+				t.Fatal("capability recovery replaced the active client/generation")
+			}
+			// Reconciliation must preserve actual active work; recovery is not
+			// permission to declare a running thread idle or to interrupt it.
+			sessions, err := m.store.ListSessions(runtime.ID)
+			if err != nil || len(sessions) != 1 || sessions[0].CWD != root || sessions[0].State != "running" || sessions[0].ActiveTurnID != "active-turn" {
+				t.Fatalf("recovery lost the active thread: %#v, %v", sessions, err)
+			}
+			for _, call := range fixture.Calls() {
+				if call.Method == "turn/start" || call.Method == "turn/interrupt" {
+					t.Fatalf("recovery mutated active work: %s", call.Method)
+				}
+			}
+		})
+	}
+}
+
+func TestRuntimeDiscoveryPersistentMissingCapabilityRemainsDegraded(t *testing.T) {
+	for _, method := range requiredDiscoveryMethods {
+		t.Run(method, func(t *testing.T) {
+			m, runtime, client, fixture, _ := recoveryFixture(t)
+			fixture.SetMethodUnavailable(method, true)
+			for attempt := 0; attempt < 3; attempt++ {
+				allowCapabilityRetry(m, runtime)
+				if err := m.discover(context.Background(), runtime, client); err != nil {
+					t.Fatal(err)
+				}
+				assertRuntimeState(t, m, "degraded")
+				if client.Supports(method) {
+					t.Fatal("still-unavailable method was restored")
+				}
+				calls := len(fixture.Calls())
+				if err := m.discover(context.Background(), runtime, client); err != nil {
+					t.Fatal(err)
+				}
+				if len(fixture.Calls()) != calls {
+					t.Fatal("persistent missing method bypassed retry interval")
+				}
+			}
+			events, err := m.store.OutboxAfter(0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			degraded := 0
+			for _, event := range events {
+				if event.Kind == "runtime_degraded" {
+					degraded++
+				}
+			}
+			if degraded != 1 {
+				t.Fatalf("retries repeated degraded notification: %d", degraded)
+			}
+		})
+	}
+}
+
+func TestRuntimeDiscoveryRequiresSuccessfulReadForRecovery(t *testing.T) {
+	m, runtime, client, fixture, root := recoveryFixture(t)
+	fixture.SetMethodUnavailable("thread/read", true)
+	if err := m.discover(context.Background(), runtime, client); err != nil {
+		t.Fatal(err)
+	}
+	fixture.SetMethodUnavailable("thread/read", false)
+	fixture.SetThreads(nil, nil)
+	allowCapabilityRetry(m, runtime)
+	if err := m.discover(context.Background(), runtime, client); err != nil {
+		t.Fatal(err)
+	}
+	assertRuntimeState(t, m, "degraded")
+	if client.Supports("thread/read") {
+		t.Fatal("empty discovery forgot the unverified read capability")
+	}
+	fixture.SetThreads([]map[string]any{{"id": "loaded", "cwd": root, "status": "idle"}}, []string{"loaded"})
+	fixture.SetRPCError("thread/read", -32000, "temporary error")
+	allowCapabilityRetry(m, runtime)
+	if err := m.discover(context.Background(), runtime, client); err == nil {
+		t.Fatal("failed recovery read was ignored")
+	}
+	assertRuntimeState(t, m, "degraded")
+	fixture.SetRPCError("thread/read", 0, "")
+	fixture.SetRPCError("thread/resume", -32000, "temporary error")
+	allowCapabilityRetry(m, runtime)
+	if err := m.discover(context.Background(), runtime, client); err == nil {
+		t.Fatal("partial recovery ignored failed subscription")
+	}
+	assertRuntimeState(t, m, "degraded")
+	if !client.Supports("thread/read") {
+		t.Fatal("successful read did not restore the read capability")
+	}
+	fixture.SetRPCError("thread/resume", 0, "")
+	if err := m.discover(context.Background(), runtime, client); err != nil {
+		t.Fatal(err)
+	}
+	assertRuntimeState(t, m, "running")
+}
+
+func recoveryFixture(t *testing.T) (*RuntimeManager, protocol.Runtime, *codexadapter.Client, *codextest.Server, string) {
+	t.Helper()
+	root := t.TempDir()
+	store, err := OpenStore(filepath.Join(t.TempDir(), "state.db"), uuid.NewString())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	m, err := NewRuntimeManager(config.WorkerConfig{AllowedWorkspaceRoots: []string{root}}, store, slog.New(slog.NewTextHandler(io.Discard, nil)), RuntimeHooks{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime, err := store.BeginRuntime("main", "Main", root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime.State = "running"
+	client, fixture, err := codextest.New(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = client.Close() })
+	fixture.SetThreads([]map[string]any{{"id": "loaded", "cwd": root, "status": "active", "turns": []map[string]any{{"id": "active-turn", "status": "inProgress"}}}}, []string{"loaded"})
+	m.install(runtime, client)
+	return m, runtime, client, fixture, root
+}
+
+func allowCapabilityRetry(m *RuntimeManager, runtime protocol.Runtime) {
+	m.mu.Lock()
+	m.runtimes[runtime.ID].capabilityRetryAt = time.Time{}
+	m.mu.Unlock()
+}
+
+func assertRuntimeState(t *testing.T, m *RuntimeManager, want string) {
+	t.Helper()
+	if snapshot := m.Snapshot(); len(snapshot) != 1 || snapshot[0].State != want {
+		t.Fatalf("runtime state = %#v, want %s", snapshot, want)
+	}
+}
+
 func TestRuntimeClientCrashStartsNextGeneration(t *testing.T) {
 	root := t.TempDir()
 	store, err := OpenStore(filepath.Join(t.TempDir(), "state.db"), uuid.NewString())

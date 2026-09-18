@@ -143,8 +143,11 @@ sh /tmp/codex-telegramgw-install.sh install worker \
   --auto-update
 ```
 
-The installer checks the configured Codex executable but does not install or
-update Codex itself. That runtime continues to use its own update mechanism.
+The installer requires an existing, authenticated Codex executable. Once worker
+automatic updates are enabled, the updater also checks the official stable Codex
+release channel once per UTC day. User-owned standalone installations are
+updated through the native `codex update` command. Installations managed by npm,
+Homebrew, or a manually pinned release retain their existing update mechanism.
 
 ## Adopt an existing installation
 
@@ -180,6 +183,10 @@ sudo codex-telegramgw update gateway
 # Worker administration, as its owning user:
 codex-telegramgw update worker --check
 codex-telegramgw update worker
+
+# Check or apply only the worker's Codex runtime maintenance:
+codex-telegramgw update codex --check
+codex-telegramgw update codex
 ```
 
 Checks fetch release metadata and checksums to show whether a newer stable
@@ -255,6 +262,36 @@ The gateway scheduler runs as a system service; the worker scheduler runs as its
 owning user. Releases marked draft or prerelease are not selected automatically.
 An older version is not installed over a newer one. Network or verification
 failures leave the installed binaries in place.
+
+Worker update checks also maintain the Codex runtime. Stable release discovery
+is limited to one automatic check per UTC day, even if a local timer runs more
+frequently. The private `codex-update.json` beside the worker's `update.json`
+records the last attempt and available version. A failed check is retried on the
+next daily check; a discovered update is reconsidered on every worker update
+tick until the live worker can confirm it is idle. `--check` is read-only and
+uses a cached release when the daily check is not yet due.
+
+Runtime installation uses the same idle reservation as worker maintenance,
+including native CLI turns, approvals, pending requests, and queued Telegram
+work. The worker stops before the native standalone updater downloads and
+installs Codex, then starts its app servers again. The updater verifies fresh
+worker readiness and the actual runtime versions before completing. Failures or
+cancellation trigger an attempt to restore the worker service, and an
+interrupted restart remains pending for the next updater invocation. A worker
+that was already stopped is left stopped.
+
+If Codex's own updater has already changed the installed launcher, the gateway
+updater still detects an older running app server and schedules its restart
+once idle. Runtime profiles sharing the same standalone installation are
+updated together. Manually pinned executables and package-manager installations
+are skipped. The native Codex installer uses its normal shell/download/archive
+tools; this procedure adds no Python dependency. Gateway-only hosts do not
+check or update Codex. Disabling worker automatic updates also disables these
+scheduled runtime checks; the gateway and worker timer defaults are unchanged.
+
+A runtime degraded by a missing protocol method retries discovery once per
+minute. It returns to healthy status only after those methods and a complete
+discovery pass succeed; work is not interrupted by these probes.
 
 Older native gateway managers can fail under systemd with `$HOME is not defined`
 before checking GitHub. The current manager uses system paths for the gateway

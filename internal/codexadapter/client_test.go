@@ -382,6 +382,34 @@ func TestMissingRequiredMethodMarksCapabilityUnavailable(t *testing.T) {
 	}
 }
 
+func TestSuccessfulRetryRestoresUnavailableCapability(t *testing.T) {
+	client, fake := newFake(t)
+	initialize(t, client, fake)
+	call := func() chan error {
+		done := make(chan error, 1)
+		go func() { _, err := client.ListThreads(context.Background(), "", 1); done <- err }()
+		return done
+	}
+	done := call()
+	request := fake.next(t)
+	fake.write(t, map[string]any{"id": request["id"], "error": RPCError{Code: -32601, Message: "method not found"}})
+	if err := <-done; !errors.Is(err, ErrMethodUnavailable) || client.Supports("thread/list") {
+		t.Fatalf("missing method was not recorded: %v", err)
+	}
+	done = call()
+	request = fake.next(t)
+	fake.write(t, map[string]any{"id": request["id"], "error": RPCError{Code: -32000, Message: "temporary failure"}})
+	if err := <-done; err == nil || client.Supports("thread/list") {
+		t.Fatalf("failed retry restored capability: %v", err)
+	}
+	done = call()
+	request = fake.next(t)
+	fake.respond(t, request, map[string]any{"data": []any{}})
+	if err := <-done; err != nil || !client.Supports("thread/list") || !client.Capabilities().Methods["thread/list"] {
+		t.Fatalf("successful retry did not restore capability: %v", err)
+	}
+}
+
 func TestSchemaStatusAndCompletionProjections(t *testing.T) {
 	thread, err := decodeThread(json.RawMessage(`{"id":"thr_1","sessionId":"thr_1","status":{"type":"active","activeFlags":["waitingOnApproval"]},"turns":[{"id":"turn_old","status":"completed"},{"id":"turn_live","status":"inProgress"}]}`))
 	if err != nil || thread.Status != "active" || thread.ActiveTurnID != "turn_live" {

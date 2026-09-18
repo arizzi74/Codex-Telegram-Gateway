@@ -591,6 +591,11 @@ func (c *Client) request(ctx context.Context, method string, params any, result 
 				return fmt.Errorf("decode %s response: %w", method, err)
 			}
 		}
+		c.mu.Lock()
+		if _, tracked := c.methods[method]; tracked {
+			c.methods[method] = true
+		}
+		c.mu.Unlock()
 		return nil
 	}
 }
@@ -672,7 +677,8 @@ func (e *MethodUnavailableError) Error() string {
 func (e *MethodUnavailableError) Unwrap() error { return ErrMethodUnavailable }
 
 // Capabilities is the version-aware method availability view. A false method
-// was observed as JSON-RPC -32601 on this connection.
+// was observed as JSON-RPC -32601 on this connection and has not subsequently
+// succeeded. A successful retry restores availability.
 type Capabilities struct {
 	Initialized bool
 	Methods     map[string]bool
@@ -689,7 +695,7 @@ func (c *Client) Capabilities() Capabilities {
 	return Capabilities{Initialized: c.ready, Methods: methods}
 }
 
-// Supports reports whether the adapter has not observed a method as missing.
+// Supports reports whether the adapter currently considers a method available.
 func (c *Client) Supports(method string) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()

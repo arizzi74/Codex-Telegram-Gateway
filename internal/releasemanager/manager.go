@@ -24,7 +24,7 @@ func New(out io.Writer) *Manager {
 	self, _ := os.Executable()
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.TLSClientConfig = &tls.Config{MinVersion: tls.VersionTLS12}
-	return &Manager{Run: RunCommand, Out: out, HTTP: &http.Client{Transport: transport, Timeout: 5 * time.Minute}, Self: self, Now: time.Now, ReadyTimeout: 45 * time.Second, PollInterval: time.Second}
+	return &Manager{Run: RunCommand, CodexRun: RunCodexUpdate, Out: out, HTTP: &http.Client{Transport: transport, Timeout: 5 * time.Minute}, Self: self, Now: time.Now, ReadyTimeout: 45 * time.Second, PollInterval: time.Second}
 }
 
 // RunCommand intentionally discards stderr: service commands can include private
@@ -74,6 +74,7 @@ Usage:
   codex-telegramgw install worker --config PATH [--auto-update]
   codex-telegramgw adopt gateway|worker [--auto-update]
   codex-telegramgw update gateway|worker [--check]
+  codex-telegramgw update codex [--check]
   codex-telegramgw auto-update enable|disable gateway|worker
   codex-telegramgw version
 
@@ -85,6 +86,8 @@ It generates the webhook secret; HTTPS must be configured separately.
 Worker installation requires an installed, authenticated Codex executable.
 Worker setup reuses ./worker.json or prompts for enrollment and workspace details.
 Setup enables daily updates and adopts existing services without restarting them.
+Worker updates also check the stable Codex runtime once per day and apply it when idle.
+Runtime updates support the official standalone installation and preserve active turns.
 `
 
 func setupComponent(args []string, uid int) (string, error) {
@@ -141,6 +144,12 @@ func parseOptions(args []string) (options, error) {
 		if result.Action == "install" && result.Config == "" {
 			return result, errors.New("install requires --config PATH")
 		}
+	}
+	if result.Component == "codex" {
+		if result.Action != "update" || result.Repo != "" || result.Version != "" {
+			return result, errors.New("use update codex [--check]; runtime updates follow the official stable channel")
+		}
+		return result, nil
 	}
 	if result.Component != "gateway" && result.Component != "worker" {
 		return result, errors.New("component must be gateway or worker")
@@ -210,8 +219,12 @@ func Execute(ctx context.Context, args []string, out, errOut io.Writer) int {
 	return 1
 }
 
-func (m *Manager) execute(ctx context.Context, opts options) error {
-	l, err := NewLayout(opts.Component)
+func (m *Manager) execute(ctx context.Context, opts options) (retErr error) {
+	component := opts.Component
+	if component == "codex" {
+		component = "worker"
+	}
+	l, err := NewLayout(component)
 	if err != nil {
 		return err
 	}
@@ -228,6 +241,12 @@ func (m *Manager) execute(ctx context.Context, opts options) error {
 		return err
 	}
 	defer unlock()
+	if opts.Component == "codex" {
+		if _, err := SavedSettings(l); err != nil {
+			return err
+		}
+		return m.UpdateCodexRuntime(ctx, l, opts.Check)
+	}
 	if opts.Action == "auto-update" {
 		if _, err := SavedSettings(l); err != nil {
 			return err
@@ -299,6 +318,26 @@ func (m *Manager) execute(ctx context.Context, opts options) error {
 		settings, err = SavedSettings(l)
 		if err != nil {
 			return err
+		}
+		if l.Component == "worker" {
+			// A failed or busy gateway-project update must not starve the daily
+			// Codex check. Both maintenance paths remain under the worker lock.
+			defer func() {
+				if ctx.Err() != nil {
+					return
+				}
+				runtimeErr := m.UpdateCodexRuntime(ctx, l, opts.Check)
+				if retErr == nil {
+					retErr = runtimeErr
+				} else if runtimeErr != nil {
+					var workerBusy, runtimeBusy *BusyError
+					if errors.As(retErr, &workerBusy) && !errors.As(runtimeErr, &runtimeBusy) {
+						retErr = fmt.Errorf("%v; %w", retErr, runtimeErr)
+					} else {
+						retErr = fmt.Errorf("%w; %v", retErr, runtimeErr)
+					}
+				}
+			}()
 		}
 	}
 	repo := opts.Repo

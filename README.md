@@ -35,6 +35,9 @@ without restarting. Configure HTTPS separately, then follow the
 
 Both commands enable daily automatic updates from
 [GitHub Releases](https://github.com/arizzi74/Codex-Telegram-Gateway/releases).
+The worker also checks for stable Codex runtime updates once per day (UTC).
+Supported standalone installations update when the worker has no active or
+queued work, then its app servers restart and their versions are verified.
 See the [installation guide](docs/installation.md) for HTTPS setup, worker
 enrollment, and manual updates.
 

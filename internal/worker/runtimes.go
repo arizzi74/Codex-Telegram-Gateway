@@ -18,9 +18,10 @@ import (
 )
 
 const (
-	discoveryPageSize = 100
-	discoveryLimit    = 1000
-	discoveryInterval = 30 * time.Second
+	discoveryPageSize       = 100
+	discoveryLimit          = 1000
+	discoveryInterval       = 30 * time.Second
+	capabilityRetryInterval = time.Minute
 )
 
 // RuntimeHooks route adapter activity to the session coordinator. OnSession
@@ -49,10 +50,11 @@ type RuntimeManager struct {
 }
 
 type managedRuntime struct {
-	runtime       protocol.Runtime
-	client        *codexadapter.Client
-	subscriptions map[string]struct{}
-	degraded      bool
+	runtime           protocol.Runtime
+	client            *codexadapter.Client
+	subscriptions     map[string]struct{}
+	degraded          bool
+	capabilityRetryAt time.Time
 }
 
 // runtimePersistenceError marks failures which have crossed the durable local
@@ -339,9 +341,17 @@ func (m *RuntimeManager) forwardAdapter(ctx context.Context, runtime protocol.Ru
 }
 
 func (m *RuntimeManager) discover(ctx context.Context, runtime protocol.Runtime, client *codexadapter.Client) error {
-	for _, method := range []string{"thread/list", "thread/loaded/list", "thread/read"} {
+	retryUnavailable := false
+	for _, method := range requiredDiscoveryMethods {
 		if methodKnownUnavailable(client, method) {
-			return nil
+			// A transient -32601 must not permanently disable discovery and
+			// updates. Retry on the existing connection without forgetting the
+			// negative capability until its RPC actually succeeds.
+			if !m.beginCapabilityRetry(runtime, client) {
+				return nil
+			}
+			retryUnavailable = true
+			break
 		}
 	}
 	threads, err := client.ListAllThreads(ctx, discoveryPageSize, discoveryLimit)
@@ -399,10 +409,11 @@ func (m *RuntimeManager) discover(ctx context.Context, runtime protocol.Runtime,
 			continue
 		}
 		if loaded[thread.ID] {
-			resumed, subscribed, resumeErr := m.subscribeLoadedThread(ctx, runtime, client, thread.ID)
+			resumed, subscribed, resumeErr := m.subscribeLoadedThread(ctx, runtime, client, thread.ID, retryUnavailable)
 			if resumeErr != nil {
 				if errors.Is(resumeErr, codexadapter.ErrMethodUnavailable) {
 					m.markRuntimeDegraded(runtime, resumeErr)
+					retryUnavailable = false
 				} else {
 					return resumeErr
 				}
@@ -441,7 +452,48 @@ func (m *RuntimeManager) discover(ctx context.Context, runtime protocol.Runtime,
 			m.hooks.OnSession(runtime, saved)
 		}
 	}
+	m.markRuntimeRecovered(runtime, client)
 	return nil
+}
+
+var requiredDiscoveryMethods = [...]string{"thread/list", "thread/loaded/list", "thread/read", "thread/resume"}
+
+func (m *RuntimeManager) beginCapabilityRetry(runtime protocol.Runtime, client *codexadapter.Client) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	current := m.runtimes[runtime.ID]
+	if current == nil || current.client != client || current.runtime.Generation != runtime.Generation {
+		return false
+	}
+	now := time.Now()
+	if now.Before(current.capabilityRetryAt) {
+		return false
+	}
+	current.capabilityRetryAt = now.Add(capabilityRetryInterval)
+	return true
+}
+
+// Recovery follows a complete discovery pass. An empty loaded-thread list
+// cannot prove that a previously unavailable read/resume method works again.
+func (m *RuntimeManager) markRuntimeRecovered(runtime protocol.Runtime, client *codexadapter.Client) {
+	for _, method := range requiredDiscoveryMethods {
+		if methodKnownUnavailable(client, method) {
+			return
+		}
+	}
+	m.mu.Lock()
+	current := m.runtimes[runtime.ID]
+	if current == nil || current.client != client || current.runtime.Generation != runtime.Generation || !current.degraded {
+		m.mu.Unlock()
+		return
+	}
+	current.runtime.State = "running"
+	current.degraded = false
+	current.capabilityRetryAt = time.Time{}
+	m.mu.Unlock()
+	// Heartbeat and local status carry the recovered state. This is the same
+	// runtime generation, not a new process or a replay of a startup event.
+	m.log.Info("runtime required RPC availability recovered", "runtime_id", runtime.ID)
 }
 
 func methodKnownUnavailable(client *codexadapter.Client, method string) bool {
@@ -474,10 +526,10 @@ func loadedThreadIDs(ctx context.Context, client *codexadapter.Client) (map[stri
 // subscribeLoadedThread performs the only allowed reconciliation resume: an
 // already-loaded, workspace-validated thread with no options beyond threadId.
 // The per-managed-runtime map resets when a new client/generation is installed.
-func (m *RuntimeManager) subscribeLoadedThread(ctx context.Context, runtime protocol.Runtime, client *codexadapter.Client, threadID string) (codexadapter.Thread, bool, error) {
-	if methodKnownUnavailable(client, "thread/resume") {
-		// The first -32601 already marked this runtime degraded. Do not keep
-		// probing an app-server version that has declared the required RPC absent.
+func (m *RuntimeManager) subscribeLoadedThread(ctx context.Context, runtime protocol.Runtime, client *codexadapter.Client, threadID string, retryUnavailable bool) (codexadapter.Thread, bool, error) {
+	resumeUnavailable := methodKnownUnavailable(client, "thread/resume")
+	if resumeUnavailable && !retryUnavailable {
+		// Probe a missing method only during the bounded recovery attempt.
 		return codexadapter.Thread{}, false, nil
 	}
 	m.mu.Lock()
@@ -486,7 +538,8 @@ func (m *RuntimeManager) subscribeLoadedThread(ctx context.Context, runtime prot
 		m.mu.Unlock()
 		return codexadapter.Thread{}, false, codexadapter.ErrClosed
 	}
-	if _, found := current.subscriptions[threadID]; found {
+	_, subscribed := current.subscriptions[threadID]
+	if subscribed && !(resumeUnavailable && retryUnavailable) {
 		m.mu.Unlock()
 		return codexadapter.Thread{}, false, nil
 	}
@@ -497,7 +550,7 @@ func (m *RuntimeManager) subscribeLoadedThread(ctx context.Context, runtime prot
 	thread, err := client.ResumeThread(ctx, threadID, codexadapter.ThreadOptions{})
 	if err != nil {
 		m.mu.Lock()
-		if current := m.runtimes[runtime.ID]; current != nil && current.client == client && current.runtime.Generation == runtime.Generation {
+		if current := m.runtimes[runtime.ID]; !subscribed && current != nil && current.client == client && current.runtime.Generation == runtime.Generation {
 			delete(current.subscriptions, threadID)
 		}
 		m.mu.Unlock()
@@ -556,6 +609,7 @@ func (m *RuntimeManager) markRuntimeDegraded(runtime protocol.Runtime, cause err
 	}
 	current.runtime = runtime
 	current.degraded = true
+	current.capabilityRetryAt = time.Now().Add(capabilityRetryInterval)
 	m.mu.Unlock()
 	m.log.Warn("runtime required RPC unavailable; running degraded", "runtime_id", runtime.ID, "error", cause)
 	if err := m.emit(runtime, "runtime_degraded", runtime); err != nil {
