@@ -14,6 +14,7 @@ menu names, so `/debug_config` is the menu spelling of `/debug-config`; both wor
 | `/tgsessions [runtime]` | List sessions and selection buttons. |
 | `/tgconnect NAME_OR_ID` | Select a session without starting a turn. |
 | `/tgstatus [session]` | Show gateway connectivity, queued commands and approvals. |
+| `/tghistory [count]` | Show saved Codex prompts for the selected session; defaults to 10, maximum 50 per page. |
 | `/tgdisconnect` | Clear the selection. |
 | `/tgnew [runtime]` | Create a session in the runtime's configured workspace. |
 | `/tgsteer TEXT` | Guide the exact active turn. |
@@ -76,6 +77,35 @@ If its writer lock is held elsewhere, the next turn reports `session_busy`
 with recovery instructions. Close that other client before retrying, use
 `/fork` to branch the saved conversation, or `/tgnew` to begin fresh.
 The gateway never silently redirects a failed command to a different chat.
+
+## Saved prompt history
+
+Use `/tghistory` after selecting a session to display prompts previously entered
+in Codex. Each prompt appears as a separate bot message labelled **You · Codex**.
+The bot remains the Telegram sender; these messages are copies of saved input.
+Reading history never submits the prompts again, starts a turn, resumes a cold
+thread, or interrupts work already running.
+
+The newest page contains up to 10 prompts by default, shown oldest first within
+that page. `/tghistory 25` requests a larger page. Use **Older prompts** to read
+earlier pages. The button is restricted to the requesting user, chat, topic,
+session, and runtime; select a different session or restart the runtime and use
+`/tghistory` again. Repeating the command deliberately displays the newest page
+again. Delivery retries preserve already-sent messages instead of repeating the
+whole page.
+
+Prompts matched to accepted Telegram submissions in the worker's command ledger
+are omitted, since they are already available in Telegram. If that ledger has
+been replaced or the original submission could not be correlated, a saved
+Telegram prompt may also appear. Images and attachments use placeholders; local
+attachment paths and file contents are not read. Long prompts are shortened with
+an explicit notice, and large pages may contain fewer entries to stay within
+message limits. Configured output redaction also applies to history.
+
+This is an on-demand view of the selected session's stored user prompts, not a
+capture of every terminal action. CLI-only slash commands may not be stored as
+prompts, and ephemeral or unavailable Codex history cannot be reconstructed.
+See the [Codex history API](https://learn.chatgpt.com/docs/app-server#read-a-stored-thread-without-resuming).
 
 ## Menu and typing indicator
 

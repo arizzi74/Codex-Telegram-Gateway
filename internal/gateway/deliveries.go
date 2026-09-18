@@ -105,15 +105,14 @@ func (s *Sender) sendDelivery(ctx context.Context, row registry.Delivery) error 
 	}
 	if len(checkpoints) == 0 {
 		renderCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
-		text, keyboard, err := s.render(renderCtx, row)
+		parts, keyboard, err := s.renderDeliveryParts(renderCtx, row)
 		cancel()
 		if err != nil {
 			return err
 		}
-		if text == "" {
+		if len(parts) == 0 {
 			return errors.New("empty Telegram delivery")
 		}
-		parts := SplitText(text, 4000)
 		messages := make([]json.RawMessage, 0, len(parts))
 		for index, part := range parts {
 			message := SendMessage{ChatID: row.ChatID, TopicID: row.TopicID, Text: part, DisableNotification: row.Kind == "agent_progress_message"}

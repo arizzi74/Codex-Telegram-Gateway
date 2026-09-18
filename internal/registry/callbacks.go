@@ -22,23 +22,28 @@ type Callback struct {
 	SessionID, RuntimeID, ApprovalID            uuid.UUID
 	Generation                                  int64
 	ExpiresAt                                   time.Time
+	History                                     *protocol.HistoryRequest
 }
 
 type callbackPayload struct {
 	BotID           string `json:"bot_id"`
 	ChatID, TopicID int64
-	RuntimeID       string `json:"runtime_id,omitempty"`
-	Generation      int64  `json:"generation,omitempty"`
-	Decision        string `json:"decision,omitempty"`
-	QuestionID      string `json:"question_id,omitempty"`
-	Answer          string `json:"answer,omitempty"`
+	RuntimeID       string                   `json:"runtime_id,omitempty"`
+	Generation      int64                    `json:"generation,omitempty"`
+	Decision        string                   `json:"decision,omitempty"`
+	QuestionID      string                   `json:"question_id,omitempty"`
+	Answer          string                   `json:"answer,omitempty"`
+	History         *protocol.HistoryRequest `json:"history,omitempty"`
 }
 
 func (s *Store) CreateCallback(ctx context.Context, callback Callback) (string, error) {
 	if callback.Action == "" || callback.BotID == "" || callback.UserID == 0 || callback.ChatID == 0 || callback.TopicID < 0 || callback.ExpiresAt.IsZero() || !callback.ExpiresAt.After(time.Now()) {
 		return "", errors.New("registry: invalid callback")
 	}
-	payload, err := json.Marshal(callbackPayload{BotID: callback.BotID, ChatID: callback.ChatID, TopicID: callback.TopicID, RuntimeID: uuidText(callback.RuntimeID), Generation: callback.Generation, Decision: callback.Decision, QuestionID: callback.QuestionID, Answer: callback.Answer})
+	if callback.Action == "history" && (callback.SessionID == uuid.Nil || callback.RuntimeID == uuid.Nil || callback.Generation <= 0 || callback.History.Validate() != nil) {
+		return "", errors.New("registry: invalid history callback")
+	}
+	payload, err := json.Marshal(callbackPayload{BotID: callback.BotID, ChatID: callback.ChatID, TopicID: callback.TopicID, RuntimeID: uuidText(callback.RuntimeID), Generation: callback.Generation, Decision: callback.Decision, QuestionID: callback.QuestionID, Answer: callback.Answer, History: callback.History})
 	if err != nil {
 		return "", err
 	}
@@ -116,6 +121,36 @@ func (s *Store) consumeCallback(ctx context.Context, tx *dbTx, in IncomingUpdate
 		return nil
 	}
 	switch action {
+	case "history":
+		if sessionID == nil || context.RuntimeID == "" || context.Generation <= 0 || context.History.Validate() != nil {
+			return AcceptResult{}, ErrCallbackInvalid
+		}
+		target, err := sessionRoute(ctx, tx, *sessionID)
+		if err != nil {
+			return AcceptResult{}, callbackTargetError(err)
+		}
+		if !callbackMatchesTarget(context, target) {
+			return AcceptResult{}, ErrCallbackInvalid
+		}
+		// A page button cannot recover a previous selection by replying to its
+		// message. The current topic/default selection must still be the target.
+		selection := in
+		selection.ReplyToMessageID = 0
+		current, err := resolveRoute(ctx, tx, selection)
+		if err != nil {
+			return AcceptResult{}, callbackTargetError(err)
+		}
+		if current.sessionID != target.sessionID {
+			return AcceptResult{}, ErrCallbackInvalid
+		}
+		result, err := acceptHistoryCommand(ctx, tx, in, target, context.History)
+		if err != nil {
+			return AcceptResult{}, err
+		}
+		if err := markUsed(); err != nil {
+			return AcceptResult{}, err
+		}
+		return result, nil
 	case "select", "connect":
 		if sessionID == nil {
 			return AcceptResult{}, ErrCallbackInvalid

@@ -153,6 +153,8 @@ func parseTelegramText(text, botName string) (action, target, prompt string, ign
 		return strings.TrimPrefix(name, "tg"), tail, "", false
 	case "tgdisconnect":
 		return "disconnect", "", "", false
+	case "tghistory":
+		return "history", "", tail, false
 	case "tgsteer":
 		return "steer", "", tail, false
 	case "tginterrupt":

@@ -3,6 +3,7 @@ package protocol
 import (
 	"encoding/json"
 	"errors"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -73,6 +74,7 @@ const (
 	ApprovalResponse Operation = "approval_response"
 	InputResponse    Operation = "input_response"
 	CodexCommand     Operation = "codex_command"
+	ReadHistory      Operation = "read_history"
 )
 
 // Command contains an immutable execution target. No dispatch path may consult a
@@ -92,6 +94,7 @@ type Command struct {
 }
 
 type Arguments struct {
+	History           *HistoryRequest      `json:"history,omitempty"`
 	SelectionRevision *uint64              `json:"selection_revision,omitempty"`
 	Codex             *CodexCommandPayload `json:"codex,omitempty"`
 	CWD               string               `json:"cwd,omitempty"`
@@ -125,7 +128,7 @@ func (c Command) Validate() error {
 		if c.SessionID != "" || c.ThreadID != "" {
 			return errors.New("new session cannot target an existing thread")
 		}
-	case StartTurn, Steer, Interrupt, ApprovalResponse, InputResponse, CodexCommand:
+	case StartTurn, Steer, Interrupt, ApprovalResponse, InputResponse, CodexCommand, ReadHistory:
 		if _, err := uuid.Parse(c.SessionID); err != nil || c.ThreadID == "" {
 			return errors.New("missing session target")
 		}
@@ -149,6 +152,11 @@ func (c Command) Validate() error {
 			if (ch < 'a' || ch > 'z') && ch != '-' {
 				return errors.New("invalid Codex command name")
 			}
+		}
+	}
+	if c.Operation == ReadHistory {
+		if err := c.Arguments.History.Validate(); err != nil {
+			return err
 		}
 	}
 	return nil
@@ -186,12 +194,51 @@ type EventAck struct {
 }
 
 type Result struct {
-	CommandID string   `json:"command_id,omitempty"`
-	TurnID    string   `json:"turn_id,omitempty"`
-	Text      string   `json:"text,omitempty"`
-	State     string   `json:"state,omitempty"`
-	Error     *Error   `json:"error,omitempty"`
-	Session   *Session `json:"session,omitempty"`
+	History   *HistoryPage `json:"history,omitempty"`
+	CommandID string       `json:"command_id,omitempty"`
+	TurnID    string       `json:"turn_id,omitempty"`
+	Text      string       `json:"text,omitempty"`
+	State     string       `json:"state,omitempty"`
+	Error     *Error       `json:"error,omitempty"`
+	Session   *Session     `json:"session,omitempty"`
+}
+
+const DefaultHistoryLimit = 10
+const MaxHistoryLimit = 50
+
+// HistoryCursor identifies an item within its turn. History reads never submit
+// these saved prompts as input or change the thread's execution state.
+type HistoryCursor struct {
+	TurnID string `json:"turn_id"`
+	ItemID string `json:"item_id"`
+}
+
+type HistoryRequest struct {
+	Limit  int            `json:"limit"`
+	Before *HistoryCursor `json:"before,omitempty"`
+}
+
+func (h *HistoryRequest) Validate() error {
+	if h == nil || h.Limit < 1 || h.Limit > MaxHistoryLimit {
+		return errors.New("invalid history page size")
+	}
+	if h.Before != nil && (strings.TrimSpace(h.Before.TurnID) == "" || strings.TrimSpace(h.Before.ItemID) == "" || len(h.Before.TurnID) > 512 || len(h.Before.ItemID) > 512) {
+		return errors.New("invalid history cursor")
+	}
+	return nil
+}
+
+type HistoryPrompt struct {
+	TurnID    string `json:"turn_id"`
+	ItemID    string `json:"item_id"`
+	Text      string `json:"text"`
+	Truncated bool   `json:"truncated,omitempty"`
+}
+
+type HistoryPage struct {
+	Prompts []HistoryPrompt `json:"prompts"`
+	Next    *HistoryCursor  `json:"next,omitempty"`
+	Limit   int             `json:"limit"`
 }
 
 type Approval struct {

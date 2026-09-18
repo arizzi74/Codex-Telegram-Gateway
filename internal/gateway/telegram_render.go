@@ -415,6 +415,10 @@ func (s *Sender) renderEvent(ctx context.Context, row registry.Delivery) (string
 		if err := json.Unmarshal(event.Data, &result); err != nil {
 			return "", nil, fmt.Errorf("render completed command: %w", err)
 		}
+		if result.History != nil {
+			parts, keyboard, err := s.renderHistory(ctx, row, event, result.History, result.CommandID)
+			return strings.Join(parts, "\n\n"), keyboard, err
+		}
 		if result.Session == nil || result.Session.ID == event.SessionID {
 			if strings.TrimSpace(result.Text) != "" {
 				return identity + "\n\n" + result.Text, nil, nil
@@ -574,10 +578,13 @@ func (s *Sender) inventory(ctx context.Context) (renderInventory, error) {
 }
 
 func (s *Sender) callback(ctx context.Context, row registry.Delivery, callback registry.Callback) (string, error) {
-	if s.options.BotID == "" || s.options.OwnerID == 0 {
+	if callback.UserID == 0 {
+		callback.UserID = s.options.OwnerID
+	}
+	if s.options.BotID == "" || callback.UserID == 0 {
 		return "", errors.New("render Telegram callback: sender identity is not configured")
 	}
-	callback.BotID, callback.UserID, callback.ChatID, callback.TopicID = s.options.BotID, s.options.OwnerID, row.ChatID, row.TopicID
+	callback.BotID, callback.ChatID, callback.TopicID = s.options.BotID, row.ChatID, row.TopicID
 	callback.ExpiresAt = time.Now().Add(callbackLifetime)
 	token, err := s.store.CreateCallback(ctx, callback)
 	if err != nil {
@@ -606,7 +613,7 @@ func findQuestion(questions []protocol.Question, id string) (protocol.Question, 
 }
 
 func helpText() string {
-	return "Gateway commands:\n/tgstart — getting started\n/tghelp — show this guide\n/tginstances — list workers and runtimes\n/tgsessions — list sessions\n/tgconnect <session> — select a session\n/tgstatus — show gateway session and queue state\n/tgdisconnect — clear the selection\n/tgnew — create a session\n/tgsteer <text> — guide the active turn\n/tginterrupt — stop the active turn\n/tginput <approval-id> <question-id> <answer> — answer a request (or reply to its message)\n\nCodex commands use their usual names: /status, /model, /compact, /review and more. Use /help for the full list or the bot menu."
+	return "Gateway commands:\n/tgstart — getting started\n/tghelp — show this guide\n/tginstances — list workers and runtimes\n/tgsessions — list sessions\n/tgconnect <session> — select a session\n/tgstatus — show gateway session and queue state\n/tghistory [count] — show saved Codex prompts\n/tgdisconnect — clear the selection\n/tgnew — create a session\n/tgsteer <text> — guide the active turn\n/tginterrupt — stop the active turn\n/tginput <approval-id> <question-id> <answer> — answer a request (or reply to its message)\n\nCodex commands use their usual names: /status, /model, /compact, /review and more. Use /help for the full list or the bot menu."
 }
 
 func codexHelpText() string {
@@ -626,6 +633,8 @@ func telegramErrorText(code string) string {
 		return "The command arguments are too long. Send fewer than 16,384 bytes."
 	case "input_usage":
 		return "Use /tginput <approval-id> <question-id> <answer>, or reply to the input request message."
+	case "history_usage":
+		return "Use /tghistory to show the latest 10 saved Codex prompts, or /tghistory <count> with a count from 1 to 50."
 	case "callback_invalid":
 		return "This button is expired, already used, or no longer valid."
 	case "stale_turn":

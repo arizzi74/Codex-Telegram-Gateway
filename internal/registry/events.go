@@ -12,6 +12,7 @@ import (
 	"reflect"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 	"github.com/iaia/telegramgw/internal/protocol"
@@ -367,6 +368,9 @@ func nullGeneration(event protocol.Event) any {
 }
 
 func (s *Store) applyEvent(ctx context.Context, tx *dbTx, workerID uuid.UUID, event protocol.Event, target eventTarget) (notify bool, commandID *uuid.UUID, err error) {
+	if handled, notify, commandID, err := applyHistoryEvent(ctx, tx, workerID, event, target); handled || err != nil {
+		return notify, commandID, err
+	}
 	// Older generation events remain in events for audit and may resolve their
 	// own immutable command, but may not overwrite current runtime/session or
 	// approval state.
@@ -505,6 +509,107 @@ func (s *Store) applyEvent(ctx context.Context, tx *dbTx, workerID uuid.UUID, ev
 		}
 	}
 	return notify, commandID, nil
+}
+
+// History responses are private command results. Handle them before any
+// session snapshots or turn transitions so reading saved input cannot change
+// execution state, even when a malformed worker result names another kind.
+func applyHistoryEvent(ctx context.Context, tx *dbTx, workerID uuid.UUID, event protocol.Event, target eventTarget) (handled, notify bool, commandID *uuid.UUID, err error) {
+	var envelope struct {
+		CommandID string          `json:"command_id"`
+		History   json.RawMessage `json:"history"`
+	}
+	if err := json.Unmarshal(event.Data, &envelope); err != nil {
+		return false, false, nil, ErrEventTarget
+	}
+	hasHistory := len(envelope.History) != 0 && !bytes.Equal(envelope.History, []byte("null"))
+	if envelope.CommandID == "" {
+		if hasHistory {
+			return false, false, nil, ErrEventTarget
+		}
+		return false, false, nil, nil
+	}
+	id, parseErr := uuid.Parse(envelope.CommandID)
+	if parseErr != nil {
+		return false, false, nil, ErrEventTarget
+	}
+	var operation string
+	var payload []byte
+	err = tx.QueryRow(ctx, `SELECT operation, payload FROM commands
+        WHERE command_id=$1 AND worker_id=$2 AND runtime_id IS $3
+          AND runtime_generation=$4 AND session_id IS $5`, id, workerID,
+		target.runtimeID, int64(event.RuntimeGeneration), target.sessionID).Scan(&operation, &payload)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, false, nil, ErrEventTarget
+	}
+	if err != nil {
+		return false, false, nil, fmt.Errorf("registry: resolve history result command: %w", err)
+	}
+	if protocol.Operation(operation) != protocol.ReadHistory {
+		if hasHistory {
+			return false, false, nil, ErrEventTarget
+		}
+		return false, false, nil, nil
+	}
+	var command protocol.Command
+	var result protocol.Result
+	if json.Unmarshal(payload, &command) != nil || command.Arguments.History.Validate() != nil || json.Unmarshal(event.Data, &result) != nil || result.Session != nil || result.TurnID != "" {
+		return true, false, nil, ErrEventTarget
+	}
+	switch event.Kind {
+	case "command_completed":
+		if result.Error != nil || !validHistoryPage(result.History, command.Arguments.History) {
+			return true, false, nil, ErrEventTarget
+		}
+	case "command_failed", "command_result_unknown":
+		if hasHistory {
+			return true, false, nil, ErrEventTarget
+		}
+	default:
+		return true, false, nil, ErrEventTarget
+	}
+	if err := updateCommandOutcome(ctx, tx, id, workerID, event, target, result); err != nil {
+		return true, false, nil, err
+	}
+	return true, target.runtimeCurrent, &id, nil
+}
+
+func validHistoryPage(page *protocol.HistoryPage, request *protocol.HistoryRequest) bool {
+	if page == nil || request.Validate() != nil || page.Limit != request.Limit || len(page.Prompts) > page.Limit {
+		return false
+	}
+	seen := make(map[protocol.HistoryCursor]struct{}, len(page.Prompts))
+	total := 0
+	for _, prompt := range page.Prompts {
+		cursor := protocol.HistoryCursor{TurnID: prompt.TurnID, ItemID: prompt.ItemID}
+		if !validHistoryCursor(cursor) || strings.TrimSpace(prompt.Text) == "" || !utf8.ValidString(prompt.Text) {
+			return false
+		}
+		if _, duplicate := seen[cursor]; duplicate || (request.Before != nil && cursor == *request.Before) {
+			return false
+		}
+		seen[cursor] = struct{}{}
+		length := utf8.RuneCountInString(prompt.Text)
+		total += length
+		if length > 16000 || total > 64000 {
+			return false
+		}
+	}
+	if page.Next != nil {
+		if !validHistoryCursor(*page.Next) || len(page.Prompts) == 0 {
+			return false
+		}
+		first := page.Prompts[0]
+		if page.Next.TurnID != first.TurnID || page.Next.ItemID != first.ItemID {
+			return false
+		}
+	}
+	return true
+}
+
+func validHistoryCursor(cursor protocol.HistoryCursor) bool {
+	return strings.TrimSpace(cursor.TurnID) != "" && len(cursor.TurnID) <= 512 &&
+		strings.TrimSpace(cursor.ItemID) != "" && len(cursor.ItemID) <= 512
 }
 
 func sessionTransition(kind string, result protocol.Result) (state, activeTurn, terminalTurn string) {
@@ -651,6 +756,7 @@ func enqueueEventDeliveries(ctx context.Context, tx *dbTx, eventID uuid.UUID, ev
 	rows, err := tx.Query(ctx, `WITH targets AS (
         SELECT bot_id, chat_id, message_thread_id FROM telegram_bindings
         WHERE session_id = $1 AND $3 <> 'command_completed'
+		  AND NOT EXISTS (SELECT 1 FROM commands WHERE command_id=$4 AND operation='read_history')
         UNION
         SELECT binding.bot_id, binding.chat_id, binding.message_thread_id
         FROM telegram_bindings AS binding

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"strconv"
 	"strings"
 	"time"
 
@@ -83,6 +84,22 @@ func (s *Store) TelegramSessionStatus(ctx context.Context, sessionID uuid.UUID) 
 		return SessionStatus{}, fmt.Errorf("registry: read Telegram session status: %w", err)
 	}
 	return status, nil
+}
+
+// HistoryRequester returns the user who requested a private history page, so
+// its pagination buttons retain the initiating user's authorization scope.
+func (s *Store) HistoryRequester(ctx context.Context, commandID uuid.UUID) (int64, error) {
+	var userID int64
+	err := s.pool.QueryRow(ctx, `SELECT telegram_user_id FROM commands
+        WHERE command_id=$1 AND source='telegram' AND operation='read_history'
+          AND telegram_user_id IS NOT NULL`, commandID).Scan(&userID)
+	if errors.Is(err, sql.ErrNoRows) || (err == nil && userID == 0) {
+		return 0, ErrTelegramTarget
+	}
+	if err != nil {
+		return 0, fmt.Errorf("registry: read history requester: %w", err)
+	}
+	return userID, nil
 }
 
 // PendingApproval returns the original, validated request for rendering the
@@ -196,6 +213,25 @@ func (s *Store) acceptAction(ctx context.Context, tx *dbTx, in IncomingUpdate) (
 		return AcceptResult{View: "error", ErrorCode: "unknown_command", Action: in.Target}, nil
 	case "codex":
 		return s.acceptCodexCommand(ctx, tx, in)
+	case "history":
+		limit := protocol.DefaultHistoryLimit
+		if count := strings.TrimSpace(in.Text); count != "" {
+			for _, digit := range count {
+				if digit < '0' || digit > '9' {
+					return AcceptResult{View: "error", ErrorCode: "history_usage"}, nil
+				}
+			}
+			var err error
+			limit, err = strconv.Atoi(count)
+			if err != nil || limit < 1 || limit > protocol.MaxHistoryLimit {
+				return AcceptResult{View: "error", ErrorCode: "history_usage"}, nil
+			}
+		}
+		target, err := resolveRoute(ctx, tx, in)
+		if err != nil {
+			return AcceptResult{}, err
+		}
+		return acceptHistoryCommand(ctx, tx, in, target, &protocol.HistoryRequest{Limit: limit})
 	case "input_command":
 		parts := strings.Fields(in.Text)
 		if len(parts) < 3 {
@@ -264,6 +300,14 @@ func (s *Store) acceptAction(ctx context.Context, tx *dbTx, in IncomingUpdate) (
 	default:
 		return acceptTextCommand(ctx, tx, in, protocol.StartTurn)
 	}
+}
+
+func acceptHistoryCommand(ctx context.Context, tx *dbTx, in IncomingUpdate, target routeTarget, history *protocol.HistoryRequest) (AcceptResult, error) {
+	command, err := createTelegramCommand(ctx, tx, in, target, protocol.ReadHistory, target.sessionID.String(), "", protocol.Arguments{History: history})
+	if err != nil {
+		return AcceptResult{}, err
+	}
+	return AcceptResult{View: "queued", SessionID: target.sessionID.String(), RuntimeID: target.runtimeID.String(), CommandID: command.ID}, nil
 }
 
 // Codex commands share the ordinary frozen routing transaction, but have their

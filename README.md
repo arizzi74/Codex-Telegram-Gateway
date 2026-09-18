@@ -88,7 +88,7 @@ The bot authorizes only the numeric `WLID` in its private `.botsecrets` file.
 Changing a Telegram username does not grant access. To use the bot, send
 `/tgstart`, then `/tginstances` or `/tgsessions` and select a session.
 All gateway commands begin with `/tg`: `/tgconnect`, `/tgstatus`, `/tgnew`,
-`/tgdisconnect`, `/tgsteer`, `/tginterrupt`, and `/tginput`. Telegram's initial
+`/tghistory`, `/tgdisconnect`, `/tgsteer`, `/tginterrupt`, and `/tginput`. Telegram's initial
 `/start` button remains an alias for `/tgstart`.
 
 Unprefixed commands control Codex: `/status` shows the selected session's model,
@@ -98,6 +98,10 @@ Use `/help` for Codex commands and `/tghelp` for gateway controls. Terminal-only
 commands explain how to use the attached CLI. The bot shows “typing…” while
 Codex is preparing a response and stops when a reply or an input request arrives.
 See [Telegram commands](docs/telegram-commands.md) for syntax and supported actions.
+
+Use `/tghistory` to display saved Codex prompts as separate **You · Codex** bot
+messages, with an **Older prompts** button for earlier pages. This reads the
+selected session's history without running those prompts again.
 
 Ordinary messages submit turns to the selection frozen when each message is
 accepted, without a separate “Queued for…” acknowledgement. Codex's progress

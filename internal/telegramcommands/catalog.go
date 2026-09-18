@@ -16,6 +16,7 @@ var gateway = []Command{
 	{"tgsessions", "Gateway: choose a session"},
 	{"tgconnect", "Gateway: select a session by name or ID"},
 	{"tgstatus", "Gateway: connection, session and queue state"},
+	{"tghistory", "Gateway: show saved Codex prompts"},
 	{"tgdisconnect", "Gateway: clear the selected session"},
 	{"tgnew", "Gateway: create a session on a runtime"},
 	{"tgsteer", "Gateway: send guidance to the current turn"},

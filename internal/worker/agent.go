@@ -607,6 +607,16 @@ func (s *sessionActor) command(req actorCommand) {
 		return
 	}
 	req.reply <- commandReply{ack: protocol.CommandAck{CommandID: c.ID, Status: "accepted"}}
+	if c.Operation == protocol.ReadHistory {
+		page, err := s.readHistory(client, c.Arguments.History)
+		if err != nil {
+			s.agent.report(s.agent.executionError(c, err))
+			return
+		}
+		_, err = s.agent.record(c, CommandCompleted, &protocol.Result{CommandID: c.ID, State: "completed", History: page}, "command_completed")
+		s.agent.report(err)
+		return
+	}
 	if c.Operation == protocol.CodexCommand {
 		result, err := s.executeCodexCommand(s.agent.ctx, client, c.Arguments.Codex.Name, c.Arguments.Codex.Args)
 		if err != nil {
