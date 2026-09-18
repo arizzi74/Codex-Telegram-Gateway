@@ -115,7 +115,10 @@ func (s *Sender) sendDelivery(ctx context.Context, row registry.Delivery) error 
 		}
 		messages := make([]json.RawMessage, 0, len(parts))
 		for index, part := range parts {
-			message := SendMessage{ChatID: row.ChatID, TopicID: row.TopicID, Text: part, DisableNotification: row.Kind == "agent_progress_message"}
+			message := SendMessage{ChatID: row.ChatID, TopicID: row.TopicID, Text: part, DisableNotification: isProgressDelivery(row.Kind)}
+			if row.Kind == "tool_progress_message" {
+				message.Entities = []TelegramEntity{{Type: "pre", Length: telegramTextLength(part)}}
+			}
 			// Put controls after their complete explanation.
 			if index == len(parts)-1 {
 				message.Keyboard = keyboard
@@ -147,7 +150,13 @@ func (s *Sender) sendDelivery(ctx context.Context, row registry.Delivery) error 
 			return err
 		}
 		sendCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
-		id, err := s.api.Send(sendCtx, message)
+		var id int64
+		var err error
+		if row.Kind == "tool_progress_message" {
+			id, err = s.sendToolProgress(sendCtx, row, message)
+		} else {
+			id, err = s.api.Send(sendCtx, message)
+		}
 		cancel()
 		if err != nil {
 			return err

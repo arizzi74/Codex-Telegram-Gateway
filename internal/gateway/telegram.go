@@ -51,8 +51,16 @@ type SendMessage struct {
 	ChatID              int64             `json:"chat_id"`
 	TopicID             int64             `json:"message_thread_id,omitempty"`
 	Text                string            `json:"text"`
+	Entities            []TelegramEntity  `json:"entities,omitempty"`
 	Keyboard            *TelegramKeyboard `json:"reply_markup,omitempty"`
 	DisableNotification bool              `json:"disable_notification,omitempty"`
+}
+
+// TelegramEntity offsets and lengths are measured in UTF-16 code units.
+type TelegramEntity struct {
+	Type   string `json:"type"`
+	Offset int    `json:"offset"`
+	Length int    `json:"length"`
 }
 type ChatAction struct {
 	ChatID  int64  `json:"chat_id"`
@@ -137,6 +145,16 @@ func (t *TelegramClient) Edit(ctx context.Context, chatID, messageID int64, text
 		payload["reply_markup"] = keyboard
 	}
 	return t.call(ctx, "editMessageText", payload, nil)
+}
+
+func (t *TelegramClient) EditFormatted(ctx context.Context, messageID int64, message SendMessage) error {
+	return t.call(ctx, "editMessageText", struct {
+		ChatID    int64             `json:"chat_id"`
+		MessageID int64             `json:"message_id"`
+		Text      string            `json:"text"`
+		Entities  []TelegramEntity  `json:"entities"`
+		Keyboard  *TelegramKeyboard `json:"reply_markup,omitempty"`
+	}{message.ChatID, messageID, message.Text, message.Entities, message.Keyboard}, nil)
 }
 
 func (t *TelegramClient) DeleteMessage(ctx context.Context, chatID, messageID int64) error {

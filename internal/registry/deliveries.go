@@ -31,12 +31,38 @@ type DeliveryChunk struct {
 // ClaimDeliveries atomically leases due rows in one UPDATE statement. SQLite
 // serializes concurrent writers, so senders cannot claim the same live lease.
 // A crashed sender's lease becomes eligible again after 30 seconds.
+// Only the latest tool event at each destination remains eligible, and an
+// existing tool send must finish or expire before its replacement is claimed.
 func (s *Store) ClaimDeliveries(ctx context.Context, limit int) ([]Delivery, error) {
 	if limit < 1 || limit > 100 {
 		return nil, errors.New("registry: invalid delivery claim limit")
 	}
-	rows, err := s.pool.Query(ctx, `WITH claimed AS (
- SELECT delivery_id FROM telegram_deliveries WHERE status IN ('pending','failed','sending') AND next_attempt_at <= (strftime('%Y-%m-%dT%H:%M:%f','now') || '000000Z') ORDER BY created_at LIMIT $1
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback(ctx)
+	if _, err := tx.Exec(ctx, `UPDATE telegram_deliveries AS delivery SET status='cancelled',last_error=NULL
+        WHERE kind='tool_progress_message'
+          AND (status IN ('pending','failed') OR (status='sending' AND next_attempt_at<=`+sqliteNow+`))
+          AND `+newerToolProgressDeliverySQL); err != nil {
+		return nil, err
+	}
+	rows, err := tx.Query(ctx, `WITH claimed AS (
+ SELECT delivery.delivery_id FROM telegram_deliveries delivery
+ WHERE delivery.status IN ('pending','failed','sending') AND delivery.next_attempt_at <= `+sqliteNow+`
+   AND (delivery.kind<>'tool_progress_message' OR (NOT `+newerToolProgressDeliverySQL+` AND NOT EXISTS (
+     SELECT 1 FROM events progress
+     JOIN events active_event ON active_event.runtime_id=progress.runtime_id
+       AND active_event.runtime_generation=progress.runtime_generation AND active_event.session_id=progress.session_id
+       AND json_extract(active_event.payload, '$.turn_id')=json_extract(progress.payload, '$.turn_id')
+     JOIN telegram_deliveries active ON active.event_id=active_event.event_id
+     WHERE progress.event_id=delivery.event_id AND active.kind='tool_progress_message'
+       AND active.delivery_id<>delivery.delivery_id AND active.status='sending' AND active.next_attempt_at>`+sqliteNow+`
+       AND active.bot_id=delivery.bot_id AND active.chat_id=delivery.chat_id
+       AND active.message_thread_id=delivery.message_thread_id
+   )))
+ ORDER BY delivery.created_at LIMIT $1
 )
 UPDATE telegram_deliveries SET status='sending', attempt_count=attempt_count+1, next_attempt_at=(strftime('%Y-%m-%dT%H:%M:%f','now','+30 seconds') || '000000Z')
 WHERE delivery_id IN (SELECT delivery_id FROM claimed)
@@ -55,7 +81,14 @@ RETURNING delivery_id,bot_id,chat_id,message_thread_id,kind,payload,attempt_coun
 		d.ID = id.String()
 		result = append(result, d)
 	}
-	return result, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	rows.Close()
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+	return result, nil
 }
 
 // MarkDeliverySent checkpoints one Telegram message/chunk. Repeating it is

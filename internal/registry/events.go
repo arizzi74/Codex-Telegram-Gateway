@@ -449,7 +449,7 @@ func (s *Store) applyEvent(ctx context.Context, tx *dbTx, workerID uuid.UUID, ev
 	if err := json.Unmarshal(event.Data, &result); err != nil {
 		return false, nil, fmt.Errorf("registry: decode event result: %w", err)
 	}
-	if event.Kind == "agent_progress_message" && (target.runtimeID == nil || target.sessionID == nil || strings.TrimSpace(result.TurnID) == "" || strings.TrimSpace(result.Text) == "") {
+	if (event.Kind == "agent_progress_message" || event.Kind == "tool_progress_message") && (target.runtimeID == nil || target.sessionID == nil || strings.TrimSpace(result.TurnID) == "" || strings.TrimSpace(result.Text) == "") {
 		return false, nil, ErrEventTarget
 	}
 	originalTarget := target
@@ -645,7 +645,7 @@ func sessionTransition(kind string, result protocol.Result) (state, activeTurn, 
 
 func notificationRequired(kind string) bool {
 	switch kind {
-	case "agent_progress_message", "turn_completed", "turn_interrupted", "approval_requested", "user_input_requested", "turn_failed", "runtime_failed", "runtime_degraded", "command_failed", "command_result_unknown":
+	case "agent_progress_message", "tool_progress_message", "turn_completed", "turn_interrupted", "approval_requested", "user_input_requested", "turn_failed", "runtime_failed", "runtime_degraded", "command_failed", "command_result_unknown":
 		return true
 	default:
 		return false
@@ -768,7 +768,7 @@ func enqueueEventDeliveries(ctx context.Context, tx *dbTx, eventID uuid.UUID, ev
         UNION
         SELECT delivery.bot_id, delivery.chat_id, delivery.message_thread_id
         FROM telegram_deliveries delivery JOIN events progress ON progress.event_id=delivery.event_id
-        WHERE delivery.kind='agent_progress_message' AND progress.runtime_id=$2
+        WHERE delivery.kind IN ('agent_progress_message','tool_progress_message') AND progress.runtime_id=$2
           AND progress.runtime_generation=$5
           AND (($3 IN ('turn_completed','turn_failed','turn_interrupted') AND progress.session_id=$1
                 AND json_extract(progress.payload, '$.turn_id')=$6)

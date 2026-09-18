@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 	"time"
+	"unicode/utf16"
 
 	"github.com/iaia/telegramgw/internal/registry"
 )
@@ -23,8 +24,81 @@ type TelegramDeleteAPI interface {
 	DeleteMessage(context.Context, int64, int64) error
 }
 
+type TelegramToolProgressStore interface {
+	TelegramToolProgressTarget(context.Context, string) (int64, error)
+}
+
+type TelegramFormattedEditAPI interface {
+	EditFormatted(context.Context, int64, SendMessage) error
+}
+
+func isProgressDelivery(kind string) bool {
+	return kind == "agent_progress_message" || kind == "tool_progress_message"
+}
+
+func telegramTextLength(text string) int {
+	length := 0
+	for _, r := range text {
+		length += utf16.RuneLen(r)
+	}
+	return length
+}
+
+// A tool call occupies a single replaceable message, including when its input
+// is longer than Telegram's text limit. Truncate after redaction and preserve
+// Unicode boundaries rather than sending additional messages.
+func compactToolProgress(text string) string {
+	const limit = 4000
+	const suffix = "\n… (truncated)"
+	if telegramTextLength(text) <= limit {
+		return text
+	}
+	remaining := limit - telegramTextLength(suffix)
+	for index, r := range text {
+		remaining -= utf16.RuneLen(r)
+		if remaining < 0 {
+			return text[:index] + suffix
+		}
+	}
+	return text
+}
+
+func (s *Sender) sendToolProgress(ctx context.Context, row registry.Delivery, message SendMessage) (int64, error) {
+	store, ok := s.store.(TelegramToolProgressStore)
+	if !ok {
+		return 0, errors.New("Telegram tool progress tracking unavailable")
+	}
+	api, ok := s.api.(TelegramFormattedEditAPI)
+	if !ok {
+		return 0, errors.New("Telegram tool progress editing unavailable")
+	}
+	id, err := store.TelegramToolProgressTarget(ctx, row.ID)
+	if err != nil {
+		return 0, err
+	}
+	if id == 0 {
+		return s.api.Send(ctx, message)
+	}
+	err = api.EditFormatted(ctx, id, message)
+	var telegram *TelegramError
+	if errors.As(err, &telegram) && telegram.Code == 400 {
+		description := strings.ToLower(strings.TrimSpace(telegram.Description))
+		// An edit may have succeeded just before a checkpoint failed. Treat
+		// Telegram's unchanged-content response as a successful retry.
+		if description == "bad request: message is not modified" || strings.HasPrefix(description, "bad request: message is not modified:") {
+			return id, nil
+		}
+		// The user may delete the temporary message while the turn runs.
+		// Only a definite missing-message error permits a fresh send.
+		if description == "bad request: message to edit not found" {
+			return s.api.Send(ctx, message)
+		}
+	}
+	return id, err
+}
+
 func (s *Sender) skipProgress(ctx context.Context, row registry.Delivery) (bool, error) {
-	if row.Kind != "agent_progress_message" {
+	if !isProgressDelivery(row.Kind) {
 		return false, nil
 	}
 	store, ok := s.store.(TelegramProgressStore)

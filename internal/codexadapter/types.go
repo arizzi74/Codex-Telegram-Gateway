@@ -96,6 +96,12 @@ func newEvent(method string, params json.RawMessage) Event {
 		event.State = first(statusName(value.State), statusName(value.Status), value.Turn.Status, value.Item.Status)
 		event.Text = first(value.Delta, value.Text, value.Item.Text)
 		event.ItemType = value.Item.Type
+		if method == "item/started" {
+			if text := toolCallText(params); text != "" {
+				event.Kind = "tool_call_started"
+				event.Text = text
+			}
+		}
 		if method == "item/completed" && value.Item.Type == "agentMessage" {
 			event.Kind = "agent_message_completed"
 			event.Phase = value.Item.Phase

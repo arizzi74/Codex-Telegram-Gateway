@@ -317,6 +317,98 @@ func TestAgentMessagesEmitCorrelatedRedactedProgressAndOnlyFinalAnswer(t *testin
 	}
 }
 
+func TestAgentToolCallsEmitOncePerItemWithinTurnAndNeverBecomeFinal(t *testing.T) {
+	a, runtime, _, cleanup := testAgent(t)
+	defer cleanup()
+	session, err := a.store.UpsertSession(protocol.Session{RuntimeID: runtime.ID, ThreadID: "thread-tools", CWD: runtime.DefaultCWD, State: "running", Loaded: true, ActiveTurnID: "turn-live"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	command := agentCommand(runtime, session, protocol.StartTurn)
+	actor := &sessionActor{agent: a, runtime: runtime, session: session, activeCommand: &command}
+	secret := "sk-abcdefghijklmnopqrstuvwxyz0123456789-secret"
+	first := codexadapter.Event{Kind: "tool_call_started", ItemType: "commandExecution", ItemID: "call-1", TurnID: session.ActiveTurnID, Text: "commandExecution\necho " + secret}
+	actor.event(first)
+	actor.event(first) // Duplicate app-server delivery is not another tool call.
+	for _, invalid := range []codexadapter.Event{
+		{Kind: "tool_call_started", ItemID: "stale", TurnID: "turn-stale", Text: "private stale call"},
+		{Kind: "tool_call_started", ItemID: "missing-turn", Text: "private missing turn"},
+		{Kind: "tool_call_started", TurnID: session.ActiveTurnID, Text: "private missing item"},
+		{Kind: "tool_call_started", ItemID: "blank", TurnID: session.ActiveTurnID, Text: " \n "},
+		{Kind: "item_completed", ItemType: "commandExecution", ItemID: "call-1", TurnID: session.ActiveTurnID, Text: "private tool output"},
+		{Kind: "item_started", ItemType: "reasoning", ItemID: "reasoning", TurnID: session.ActiveTurnID, Text: "private reasoning"},
+	} {
+		actor.event(invalid)
+	}
+	actor.event(codexadapter.Event{Kind: "agent_message_completed", TurnID: session.ActiveTurnID, Phase: "final_answer", Text: "Finished."})
+	second := first
+	second.ItemID, second.Text = "call-2", "functions.exec\ntext(await tools.clock__curr_time({}));"
+	actor.event(second)
+	actor.event(codexadapter.Event{Kind: "turn_completed", TurnID: session.ActiveTurnID})
+	actor.event(second) // A late call cannot recreate ephemeral progress.
+	events, err := a.store.OutboxAfter(0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 4 {
+		t.Fatalf("got %d events, want two tool calls, one answer, and turn completion", len(events))
+	}
+	for i, want := range []struct{ kind, text string }{
+		{"tool_progress_message", a.redactor.Redact(first.Text)},
+		{"agent_progress_message", "Finished."},
+		{"tool_progress_message", second.Text},
+		{"turn_completed", "Finished."},
+	} {
+		var result protocol.Result
+		if err := json.Unmarshal(events[i].Data, &result); err != nil {
+			t.Fatal(err)
+		}
+		if events[i].Kind != want.kind || result.Text != want.text || result.TurnID != session.ActiveTurnID || result.CommandID != command.ID || events[i].SessionID != session.ID || strings.Contains(result.Text, secret) {
+			t.Fatalf("event %d = %#v %#v; want %#v", i, events[i], result, want)
+		}
+	}
+	// Item IDs may be reused on a new turn, including turns from the local CLI.
+	actor.event(codexadapter.Event{Kind: "turn_started", TurnID: "next-turn"})
+	first.TurnID = "next-turn"
+	actor.event(first)
+	actor.event(codexadapter.Event{Kind: "turn_completed", TurnID: "next-turn"})
+	events, err = a.store.OutboxAfter(events[len(events)-1].Seq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 3 || events[1].Kind != "tool_progress_message" {
+		t.Fatalf("reused item ID was not emitted in next turn: %#v", events)
+	}
+	var final protocol.Result
+	if err := json.Unmarshal(events[2].Data, &final); err != nil || final.Text != "" || final.CommandID != "" {
+		t.Fatalf("tool-only local turn leaked call into final answer or retained command: %#v %v", final, err)
+	}
+}
+
+func TestAgentToolProgressRedactsBeforeTruncating(t *testing.T) {
+	a, runtime, _, cleanup := testAgent(t)
+	defer cleanup()
+	session, err := a.store.UpsertSession(protocol.Session{RuntimeID: runtime.ID, ThreadID: "thread-tool-limit", CWD: runtime.DefaultCWD, State: "running", Loaded: true, ActiveTurnID: "turn-live"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	actor := &sessionActor{agent: a, runtime: runtime, session: session}
+	secret := "sk-abcdefghijklmnopqrstuvwxyz0123456789-secret"
+	text := strings.Repeat("界", 2988) + secret + " " + strings.Repeat("x", 100)
+	actor.event(codexadapter.Event{Kind: "tool_call_started", ItemID: "call-limit", TurnID: session.ActiveTurnID, Text: text})
+	events, err := a.store.OutboxAfter(0)
+	if err != nil || len(events) != 1 {
+		t.Fatalf("events = %#v, error %v", events, err)
+	}
+	var result protocol.Result
+	if err := json.Unmarshal(events[0].Data, &result); err != nil {
+		t.Fatal(err)
+	}
+	if len([]rune(result.Text)) != 3000 || !strings.HasSuffix(result.Text, "…") || strings.Contains(result.Text, "sk-") || !strings.Contains(result.Text, "[REDACTED]") {
+		t.Fatal("tool progress was not safely bounded after redaction")
+	}
+}
+
 func TestAgentFinalAnswerPhaseCompatibilityAndStoppedTurns(t *testing.T) {
 	type message struct{ phase, text string }
 	for _, tc := range []struct {

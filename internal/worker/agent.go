@@ -484,6 +484,7 @@ type sessionActor struct {
 	finalText                       string
 	legacyFinalText                 string
 	hasFinalAnswer                  bool
+	toolItems                       map[string]struct{}
 }
 
 func (s *sessionActor) runtimeEvents() chan actorEvent     { return s.eventQueue }
@@ -796,6 +797,7 @@ func (s *sessionActor) resetMessages() {
 	s.finalText = ""
 	s.legacyFinalText = ""
 	s.hasFinalAnswer = false
+	s.toolItems = nil
 }
 
 func (s *sessionActor) event(event codexadapter.Event) {
@@ -822,6 +824,32 @@ func (s *sessionActor) event(event codexadapter.Event) {
 		} else {
 			s.agent.report(s.agent.emit(s.runtime, s.session.ID, "turn_started", result))
 		}
+	case "tool_call_started":
+		if event.TurnID == "" || event.TurnID != s.session.ActiveTurnID || event.ItemID == "" {
+			return
+		}
+		if _, duplicate := s.toolItems[event.ItemID]; duplicate {
+			return
+		}
+		// Redact the complete call before clipping: truncating first could
+		// expose a prefix of a credential that no longer matches its pattern.
+		text := s.agent.redactor.Redact(event.Text)
+		if strings.TrimSpace(text) == "" {
+			return
+		}
+		if s.toolItems == nil {
+			s.toolItems = make(map[string]struct{})
+		}
+		s.toolItems[event.ItemID] = struct{}{}
+		const maxToolProgressRunes = 3000
+		if runes := []rune(text); len(runes) > maxToolProgressRunes {
+			text = string(runes[:maxToolProgressRunes-1]) + "…"
+		}
+		result := protocol.Result{TurnID: event.TurnID, Text: text}
+		if s.activeCommand != nil {
+			result.CommandID = s.activeCommand.ID
+		}
+		s.agent.report(s.agent.emit(s.runtime, s.session.ID, "tool_progress_message", result))
 	case "agent_message_completed":
 		if event.TurnID == "" || event.TurnID != s.session.ActiveTurnID {
 			return

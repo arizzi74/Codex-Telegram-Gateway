@@ -49,8 +49,9 @@ race tests with PostgreSQL, ten release archives, and inner/outer checksums.
 
 - `TestControlPlaneWorkerOutboxSurvivesGatewayRestartIntegration` verifies
   quiet prompt acceptance, two visible commentary messages during an active
-  turn, gateway restart, one permanent final answer, and deletion of only the
-  temporary message IDs after the final send.
+  turn, started tools displayed in one monospace message, replacement of that
+  message across a gateway restart, one permanent final answer, and deletion
+  of only the temporary message IDs after the final send.
 - Registry integration tests verify all final chunks must be checkpointed
   before cleanup, retry leases survive a fresh Store, late progress is
   suppressed, and cleanup stays within the same bot/chat/topic/session/turn

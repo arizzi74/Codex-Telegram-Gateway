@@ -3,6 +3,7 @@ package worker
 import (
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"io"
@@ -15,6 +16,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf16"
 
 	"github.com/coder/websocket"
 	"github.com/google/uuid"
@@ -30,7 +32,7 @@ import (
 // Agent and bbolt outbox. The fixture is an app-server JSONL peer, so the only
 // substituted edges are TLS trust and Telegram's external HTTP API.
 func TestControlPlaneWorkerOutboxSurvivesGatewayRestartIntegration(t *testing.T) {
-	store := controlPlaneRegistry(t)
+	store, registryProbe := controlPlaneRegistry(t)
 	ctx, stop := context.WithCancel(context.Background())
 	defer stop()
 	root := t.TempDir()
@@ -142,11 +144,45 @@ func TestControlPlaneWorkerOutboxSurvivesGatewayRestartIntegration(t *testing.T)
 		waitControl(t, func() bool { return tg.countText(text) == 1 })
 		progressIDs = append(progressIDs, tg.messageID(text))
 	}
+	// Each started tool is visible before it finishes. Later tools edit the
+	// same monospace message, including after a gateway restart. Commentary
+	// remains separate and every temporary message waits for final delivery.
+	toolCommands := []string{"printf 'tool one 🧪\\n'", "rg --files", "go version"}
+	for i, command := range toolCommands {
+		if i == 1 {
+			gw.close()
+			gw = startControlGateway(t, store, tg, log)
+			slot.set(gw)
+			defer gw.close()
+			waitControl(t, func() bool { return len(gw.hub.ConnectedWorkers()) == 1 })
+		}
+		if err := f.Emit("item/started", map[string]any{"threadId": targetThread, "turnId": active, "item": map[string]any{"id": "tool-" + string(rune('a'+i)), "type": "commandExecution", "status": "inProgress", "command": command}}); err != nil {
+			t.Fatal(err)
+		}
+		if i == 0 {
+			waitControl(t, func() bool { return tg.countText(command) == 1 })
+			progressIDs = append(progressIDs, tg.messageID(command))
+			// Restart after the first send is durably checkpointed. The
+			// external-send-before-commit crash window is at-least-once;
+			// this case checks recovery of an existing replacement target.
+			waitControl(t, func() bool {
+				var checkpointed bool
+				err := registryProbe.QueryRowContext(ctx, `SELECT EXISTS(
+					SELECT 1 FROM telegram_progress_messages
+					WHERE bot_id='bot' AND chat_id=9 AND telegram_message_id=? AND status='pending'
+				)`, progressIDs[len(progressIDs)-1]).Scan(&checkpointed)
+				return err == nil && checkpointed
+			})
+		} else {
+			waitControl(t, func() bool { return tg.hasEditedText(command) })
+		}
+	}
+	tg.assertToolProgress(t, progressIDs[len(progressIDs)-1], toolCommands)
 	if currentActive(t, local, runtimeID, targetThread) != active {
-		t.Fatal("commentary ended the running turn")
+		t.Fatal("temporary progress ended the running turn")
 	}
 	if tg.deletedCount() != 0 {
-		t.Fatal("commentary was removed before the final answer")
+		t.Fatal("temporary progress was removed before the final answer")
 	}
 	if tg.countText("Queued for") != 0 {
 		t.Fatal("normal prompt produced an unwanted queued acknowledgment")
@@ -256,7 +292,7 @@ func TestControlPlaneWorkerOutboxSurvivesGatewayRestartIntegration(t *testing.T)
 		return false
 	})
 	if tg.deletedCount() != 0 {
-		t.Fatal("commentary was removed before the offline final answer was delivered")
+		t.Fatal("temporary progress was removed before the offline final answer was delivered")
 	}
 
 	gw = startControlGateway(t, store, tg, log)
@@ -398,6 +434,7 @@ type telegramRecordedAction struct {
 	chatID    int64
 	messageID int64
 	text      string
+	entities  []gateway.TelegramEntity
 }
 
 func (t *telegramRecorder) Send(_ context.Context, m gateway.SendMessage) (int64, error) {
@@ -405,8 +442,76 @@ func (t *telegramRecorder) Send(_ context.Context, m gateway.SendMessage) (int64
 	defer t.mu.Unlock()
 	t.next++
 	t.messages = append(t.messages, m)
-	t.actions = append(t.actions, telegramRecordedAction{kind: "send", chatID: m.ChatID, messageID: t.next, text: m.Text})
+	t.actions = append(t.actions, telegramRecordedAction{kind: "send", chatID: m.ChatID, messageID: t.next, text: m.Text, entities: append([]gateway.TelegramEntity(nil), m.Entities...)})
 	return t.next, nil
+}
+
+func (t *telegramRecorder) EditFormatted(_ context.Context, messageID int64, m gateway.SendMessage) error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.actions = append(t.actions, telegramRecordedAction{kind: "edit", chatID: m.ChatID, messageID: messageID, text: m.Text, entities: append([]gateway.TelegramEntity(nil), m.Entities...)})
+	return nil
+}
+
+func (t *telegramRecorder) hasEditedText(text string) bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	for _, action := range t.actions {
+		if action.kind == "edit" && strings.Contains(action.text, text) {
+			return true
+		}
+	}
+	return false
+}
+
+func (t *telegramRecorder) assertToolProgress(test *testing.T, messageID int64, commands []string) {
+	test.Helper()
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if messageID == 0 {
+		test.Fatal("tool message ID was not recorded")
+	}
+	seen := 0
+	for _, action := range t.actions {
+		if action.messageID != messageID || action.kind == "delete" {
+			continue
+		}
+		if seen >= len(commands) {
+			test.Fatalf("unexpected extra tool update: %q", action.text)
+		}
+		wantKind := "edit"
+		if seen == 0 {
+			wantKind = "send"
+		}
+		command := commands[seen]
+		commandStart := strings.Index(action.text, command)
+		if action.kind != wantKind || action.chatID != 9 || commandStart < 0 {
+			test.Fatalf("tool update %d = kind %s, chat %d, text %q; want %s with %q", seen, action.kind, action.chatID, action.text, wantKind, command)
+		}
+		commandOffset := len(utf16.Encode([]rune(action.text[:commandStart])))
+		commandEnd := commandOffset + len(utf16.Encode([]rune(command)))
+		textLength := len(utf16.Encode([]rune(action.text)))
+		monospace := false
+		for _, entity := range action.entities {
+			if entity.Type == "pre" && entity.Offset >= 0 && entity.Length > 0 && entity.Offset <= commandOffset && entity.Offset+entity.Length >= commandEnd && entity.Offset+entity.Length <= textLength {
+				monospace = true
+			}
+		}
+		if !monospace {
+			test.Fatalf("tool update %d lacks a valid monospace entity covering the command: %#v", seen, action.entities)
+		}
+		seen++
+	}
+	if seen != len(commands) {
+		test.Fatalf("tool updates = %d, want %d", seen, len(commands))
+	}
+	for _, command := range commands[1:] {
+		for _, action := range t.actions {
+			if action.kind == "send" && strings.Contains(action.text, command) {
+				test.Fatalf("subsequent tool sent another message instead of replacing %d: %q", messageID, action.text)
+			}
+		}
+	}
 }
 
 func (t *telegramRecorder) DeleteMessage(_ context.Context, chatID, messageID int64) error {
@@ -446,7 +551,7 @@ func (t *telegramRecorder) assertProgressCleanup(test *testing.T, progressIDs []
 	expected := make(map[int64]bool, len(progressIDs))
 	for _, id := range progressIDs {
 		if id == 0 {
-			test.Fatal("commentary message ID was not recorded")
+			test.Fatal("temporary progress message ID was not recorded")
 		}
 		expected[id] = true
 	}
@@ -467,7 +572,7 @@ func (t *telegramRecorder) assertProgressCleanup(test *testing.T, progressIDs []
 		delete(expected, action.messageID)
 	}
 	if len(expected) != 0 {
-		test.Fatalf("commentary messages were not deleted after final delivery: %v", expected)
+		test.Fatalf("temporary progress messages were not deleted after final delivery: %v", expected)
 	}
 }
 func (t *telegramRecorder) Edit(context.Context, int64, int64, string, *gateway.TelegramKeyboard) error {
@@ -524,10 +629,11 @@ type readinessFail struct{ *registry.Store }
 
 func (readinessFail) Ping(context.Context) error { return errors.New("database unavailable") }
 
-func controlPlaneRegistry(t *testing.T) *registry.Store {
+func controlPlaneRegistry(t *testing.T) (*registry.Store, *sql.DB) {
 	t.Helper()
 	ctx := context.Background()
-	store, err := registry.Open(ctx, filepath.Join(t.TempDir(), "gateway.db"))
+	databasePath := filepath.Join(t.TempDir(), "gateway.db")
+	store, err := registry.Open(ctx, databasePath)
 	if err != nil {
 		t.Fatalf("open isolated SQLite store: %v", err)
 	}
@@ -535,7 +641,12 @@ func controlPlaneRegistry(t *testing.T) *registry.Store {
 	if err := store.Migrate(ctx); err != nil {
 		t.Fatalf("migrate isolated SQLite store: %v", err)
 	}
-	return store
+	probe, err := sql.Open("sqlite", "file:"+databasePath+"?mode=ro")
+	if err != nil {
+		t.Fatalf("open isolated registry probe: %v", err)
+	}
+	t.Cleanup(func() { _ = probe.Close() })
+	return store, probe
 }
 func postTelegram(t *testing.T, c *http.Client, base, secret string, id int64, text string, reply int64) {
 	t.Helper()

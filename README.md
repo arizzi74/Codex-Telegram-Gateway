@@ -104,9 +104,11 @@ messages, with an **Older prompts** button for earlier pages. This reads the
 selected session's history without running those prompts again.
 
 Ordinary messages submit turns to the selection frozen when each message is
-accepted, without a separate “Queued for…” acknowledgement. Codex's progress
-messages appear temporarily while the turn runs and are removed after the final
-response is delivered. Cleanup also handles interruption and failure, and
+accepted, without a separate “Queued for…” acknowledgement. Codex's commentary
+and tool calls appear temporarily while the turn runs. The latest tool call
+appears in a monospace message that each subsequent tool call replaces.
+Temporary messages are removed after the final response is delivered.
+Cleanup also handles interruption and failure, and
 resumes after gateway restarts. Replies to earlier bot messages retain that
 session's routing.
 Approval and input buttons refer to the exact pending request and expire.

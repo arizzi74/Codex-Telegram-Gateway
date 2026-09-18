@@ -27,13 +27,54 @@ func eventTurnID(event protocol.Event) string {
 	return result.TurnID
 }
 
+// Tool progress is a replaceable view of the latest event at a frozen
+// destination. Event sequence numbers establish order even if timestamps tie
+// or an older failed delivery becomes due after a newer one.
+const newerToolProgressDeliverySQL = `EXISTS (
+    SELECT 1 FROM events previous
+    JOIN events newer ON newer.runtime_id=previous.runtime_id
+      AND newer.runtime_generation=previous.runtime_generation
+      AND newer.session_id=previous.session_id AND newer.event_seq>previous.event_seq
+      AND json_extract(newer.payload, '$.turn_id')=json_extract(previous.payload, '$.turn_id')
+    JOIN telegram_deliveries replacement ON replacement.event_id=newer.event_id
+    WHERE previous.event_id=delivery.event_id AND replacement.kind='tool_progress_message'
+      AND replacement.bot_id=delivery.bot_id AND replacement.chat_id=delivery.chat_id
+      AND replacement.message_thread_id=delivery.message_thread_id
+)`
+
+// TelegramToolProgressTarget recovers the message edited by successive tool
+// calls. The durable cleanup checkpoint also serves as the replacement target,
+// so retries and sender restarts do not create another visible tool message.
+// Commentary messages and other destinations, sessions, turns, or generations
+// never become replacement targets.
+func (s *Store) TelegramToolProgressTarget(ctx context.Context, deliveryID string) (int64, error) {
+	if _, err := uuid.Parse(deliveryID); err != nil {
+		return 0, errors.New("registry: invalid delivery ID")
+	}
+	var messageID int64
+	err := s.pool.QueryRow(ctx, `SELECT COALESCE((
+        SELECT progress.telegram_message_id FROM telegram_progress_messages progress
+        JOIN telegram_deliveries prior_delivery ON prior_delivery.delivery_id=progress.delivery_id
+        JOIN events prior_event ON prior_event.event_id=prior_delivery.event_id
+        WHERE prior_delivery.kind='tool_progress_message' AND progress.status='pending'
+          AND progress.bot_id=delivery.bot_id AND progress.chat_id=delivery.chat_id
+          AND progress.message_thread_id=delivery.message_thread_id
+          AND progress.runtime_id=event.runtime_id AND progress.runtime_generation=event.runtime_generation
+          AND progress.session_id=event.session_id AND progress.turn_id=json_extract(event.payload, '$.turn_id')
+          AND prior_event.event_seq<=event.event_seq
+        ORDER BY prior_event.event_seq DESC,progress.chunk_index DESC LIMIT 1
+    ),0) FROM telegram_deliveries delivery JOIN events event ON event.event_id=delivery.event_id
+    WHERE delivery.delivery_id=$1 AND delivery.kind='tool_progress_message'`, deliveryID).Scan(&messageID)
+	return messageID, err
+}
+
 // SuppressProgressDelivery checks immediately before sending each temporary
 // chunk. Once a terminal event is durable, even a delayed/retried progress
 // delivery must not add more messages. A send already in flight may complete;
 // its checkpoint remains eligible for the independent deletion queue.
 func (s *Store) SuppressProgressDelivery(ctx context.Context, id string) (bool, error) {
 	var suppress bool
-	err := s.pool.QueryRow(ctx, `SELECT delivery.kind='agent_progress_message' AND (
+	err := s.pool.QueryRow(ctx, `SELECT delivery.kind IN ('agent_progress_message','tool_progress_message') AND (
         delivery.status IN ('sent','cancelled') OR EXISTS (
             SELECT 1 FROM events terminal
             WHERE terminal.runtime_id=progress.runtime_id
@@ -47,7 +88,7 @@ func (s *Store) SuppressProgressDelivery(ctx context.Context, id string) (bool, 
             SELECT 1 FROM runtimes runtime WHERE runtime.runtime_id=progress.runtime_id
               AND (runtime.generation>progress.runtime_generation
                    OR (runtime.generation=progress.runtime_generation AND runtime.state IN ('stopped','failed')))
-        ))
+        ) OR (delivery.kind='tool_progress_message' AND `+newerToolProgressDeliverySQL+`))
         FROM telegram_deliveries delivery LEFT JOIN events progress ON progress.event_id=delivery.event_id
         WHERE delivery.delivery_id=$1`, id).Scan(&suppress)
 	return suppress, err
@@ -71,7 +112,16 @@ func checkpointTelegramProgress(ctx context.Context, tx *dbTx, deliveryID uuid.U
         SELECT $1,delivery.delivery_id,$2,delivery.bot_id,delivery.chat_id,delivery.message_thread_id,$3,
                event.runtime_id,event.runtime_generation,event.session_id,json_extract(event.payload, '$.turn_id')
         FROM telegram_deliveries delivery JOIN events event ON event.event_id=delivery.event_id
-        WHERE delivery.delivery_id=$4 AND delivery.kind='agent_progress_message'
+        WHERE delivery.delivery_id=$4 AND delivery.kind IN ('agent_progress_message','tool_progress_message')
+          AND (delivery.kind='agent_progress_message' OR NOT EXISTS (
+            SELECT 1 FROM telegram_progress_messages existing
+            JOIN telegram_deliveries prior_delivery ON prior_delivery.delivery_id=existing.delivery_id
+            WHERE prior_delivery.kind='tool_progress_message'
+              AND existing.bot_id=delivery.bot_id AND existing.chat_id=delivery.chat_id
+              AND existing.message_thread_id=delivery.message_thread_id AND existing.telegram_message_id=$3
+              AND existing.runtime_id=event.runtime_id AND existing.runtime_generation=event.runtime_generation
+              AND existing.session_id=event.session_id AND existing.turn_id=json_extract(event.payload, '$.turn_id')
+          ))
         ON CONFLICT(delivery_id,chunk_index) DO NOTHING`, uuid.New(), index, messageID, deliveryID)
 	if err != nil {
 		return fmt.Errorf("registry: checkpoint temporary message: %w", err)

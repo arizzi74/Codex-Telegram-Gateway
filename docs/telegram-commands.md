@@ -132,6 +132,10 @@ retain the gateway's normal subscriptions.
 Plain prompts are accepted without a “Queued for…” reply. The typing indicator
 shows that work is pending or running. As Codex completes each commentary
 message, Telegram displays it silently as a temporary progress message.
+Tool calls appear as they start in a separate monospace message. Each subsequent
+tool call replaces that message, keeping only the latest call visible while
+commentary messages remain available until the turn ends. The same tool message
+continues to be updated after a gateway restart.
 
 After all chunks of the final response have been delivered, the gateway removes
 the temporary messages for that turn. The final answer remains in the chat.

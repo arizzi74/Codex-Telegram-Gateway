@@ -361,13 +361,16 @@ func (s *Sender) renderEvent(ctx context.Context, row registry.Delivery) (string
 			return "", nil, err
 		}
 		return s.renderQuestion(ctx, row, identity, session, runtime, event.RuntimeGeneration, approvalID, approval, approval.Questions[0])
-	case "agent_progress_message":
+	case "agent_progress_message", "tool_progress_message":
 		var result protocol.Result
 		if err := json.Unmarshal(event.Data, &result); err != nil {
 			return "", nil, fmt.Errorf("render progress output: %w", err)
 		}
 		if result.TurnID == "" || strings.TrimSpace(result.Text) == "" {
 			return "", nil, errors.New("render progress output: missing turn or message")
+		}
+		if event.Kind == "tool_progress_message" {
+			return "🔧 " + identity + "\n\n" + strings.TrimSpace(result.Text), nil, nil
 		}
 		return "⏳ " + identity + "\n\n" + strings.TrimSpace(result.Text), nil, nil
 	case "final_agent_message", "turn_completed":

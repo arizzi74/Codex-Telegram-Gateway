@@ -153,3 +153,44 @@ func TestTelegramClientDeletesOnlyTheRequestedMessage(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestTelegramClientSendsAndEditsLiteralMonospaceText(t *testing.T) {
+	text := "printf '<b>🧪 & `literal`</b>'"
+	entity := TelegramEntity{Type: "pre", Offset: 0, Length: len(utf16.Encode([]rune(text)))}
+	var methods []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		method := strings.TrimPrefix(r.URL.Path, "/botfake-token/")
+		methods = append(methods, method)
+		var body struct {
+			ChatID    int64            `json:"chat_id"`
+			MessageID int64            `json:"message_id"`
+			Text      string           `json:"text"`
+			Entities  []TelegramEntity `json:"entities"`
+			ParseMode string           `json:"parse_mode"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Error(err)
+		}
+		if body.ChatID != -123 || body.Text != text || body.ParseMode != "" || len(body.Entities) != 1 || body.Entities[0] != entity {
+			t.Errorf("invalid formatted message payload: %+v", body)
+		}
+		if method == "editMessageText" && body.MessageID != 77 {
+			t.Errorf("wrong edit identity: %d", body.MessageID)
+		}
+		w.Write([]byte(`{"ok":true,"result":{"message_id":77}}`))
+	}))
+	defer server.Close()
+	client := NewTelegramClient("fake-token")
+	client.endpoint, client.http = server.URL, server.Client()
+	message := SendMessage{ChatID: -123, Text: text, Entities: []TelegramEntity{entity}}
+	id, err := client.Send(context.Background(), message)
+	if err != nil || id != 77 {
+		t.Fatalf("send: id=%d err=%v", id, err)
+	}
+	if err := client.EditFormatted(context.Background(), id, message); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(methods, ",") != "sendMessage,editMessageText" {
+		t.Fatalf("unexpected Telegram methods: %v", methods)
+	}
+}

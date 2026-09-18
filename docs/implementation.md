@@ -97,3 +97,10 @@ The replacement worker and Codex runtime both report `NoNewPrivs: 0`; sudo
 works from new worker-hosted commands. Gateway and worker are running version
 0.2.1 with matching release checksums, a connected worker, acknowledged events,
 healthy HTTPS endpoints, and the 69-command Telegram menu intact.
+
+## 2026-09-18 temporary tool calls
+
+Tool calls produce temporary progress when they start. Each destination keeps
+one tool message per turn, rendered in monospace, and later calls edit that
+message. The message ID is persisted so replacement and final cleanup continue
+after a gateway restart. Commentary remains in separate temporary messages.
