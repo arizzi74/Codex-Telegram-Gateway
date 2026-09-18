@@ -33,8 +33,10 @@ private secrets, SQLite database, and service. Existing installations are adopte
 without restarting. Configure HTTPS separately, then follow the
 [gateway setup steps](docs/installation.md#finish-gateway-setup).
 
-Both commands enable daily automatic updates from
+Both commands enable automatic update checks every five minutes from
 [GitHub Releases](https://github.com/arizzi74/Codex-Telegram-Gateway/releases).
+Gateway checks run at minutes `00`, `05`, `10`, …; worker checks run two minutes
+later at `02`, `07`, `12`, … in each machine's local time.
 See the [installation guide](docs/installation.md) for HTTPS setup, worker
 enrollment, and manual updates.
 

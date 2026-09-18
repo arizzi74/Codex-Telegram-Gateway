@@ -79,7 +79,7 @@ func (m *Manager) setupGateway(ctx context.Context, l *Layout, cwd string, openP
 		return errors.New("gateway setup needs a terminal or private gateway.json, .botsecrets, and secrets.env files in the current directory; run this command in an interactive terminal")
 	}
 	defer prompt.Close()
-	fmt.Fprintln(m.Out, "Set up a gateway using your Telegram bot and public HTTPS address. Daily automatic updates will be enabled.")
+	fmt.Fprintln(m.Out, "Set up a gateway using your Telegram bot and public HTTPS address. Automatic update checks every five minutes will be enabled, at minutes 00, 05, 10, ... (local time).")
 	origin, err := prompt.Ask(ctx, "Public HTTPS address", "", false)
 	if err != nil {
 		return err
