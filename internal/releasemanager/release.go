@@ -8,9 +8,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
-	"net/http"
 	"net/url"
 	"os"
 	"path"
@@ -89,46 +87,6 @@ func githubURL(raw string, redirect bool) error {
 		}
 	}
 	return errors.New("rejected an unexpected release download host")
-}
-
-func (m *Manager) Download(ctx context.Context, source string, limit int64) ([]byte, error) {
-	if err := githubURL(source, false); err != nil {
-		return nil, err
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, source, nil)
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("User-Agent", "codex-telegramgw-release-manager")
-	if req.URL.Hostname() == "api.github.com" {
-		req.Header.Set("Accept", "application/vnd.github+json")
-	} else {
-		req.Header.Set("Accept", "application/octet-stream")
-	}
-	// Keep redirect policy even when a test or caller supplies a custom transport.
-	client := *m.HTTP
-	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
-		if len(via) >= 10 {
-			return errors.New("too many release download redirects")
-		}
-		return githubURL(req.URL.String(), true)
-	}
-	response, err := client.Do(req)
-	if err != nil {
-		return nil, errors.New("could not download the GitHub release")
-	}
-	defer response.Body.Close()
-	if response.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("GitHub release download failed (HTTP %d)", response.StatusCode)
-	}
-	data, err := io.ReadAll(io.LimitReader(response.Body, limit+1))
-	if err != nil {
-		return nil, errors.New("could not read the GitHub release download")
-	}
-	if int64(len(data)) > limit {
-		return nil, errors.New("release download exceeded its size limit")
-	}
-	return data, nil
 }
 
 func Manifest(data []byte, nested bool) (map[string]string, error) {

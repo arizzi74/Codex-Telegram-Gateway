@@ -182,11 +182,22 @@ codex-telegramgw update worker --check
 codex-telegramgw update worker
 ```
 
-Checks show whether a newer stable release is available. Applying an update
-preserves configuration, credentials, and database locations. Gateway updates
-back up SQLite before migrations and verify readiness after startup. Workers
-continue running while the gateway restarts and replay their durable outboxes
-when it returns.
+Checks fetch release metadata and checksums to show whether a newer stable
+release is available; they do not download or verify the component archives.
+When applying an update, the native manager downloads and verifies all required
+archives before stopping the service. A download or verification failure leaves
+a running service online and its installed binaries in place.
+
+The native manager retries temporary HTTP and network failures, with at most
+four attempts per download within five minutes. It waits between attempts and
+respects GitHub's rate limits and retry delays. Retry logs and final errors name
+the failed request and include the HTTP status and GitHub request ID when
+available, without exposing credentials or signed download URLs.
+
+Applying an update preserves configuration, credentials, and database locations.
+Gateway updates back up SQLite before migrations and verify readiness after
+startup. Workers continue running while the gateway restarts and replay their
+durable outboxes when it returns.
 
 Worker updates require cooperation from the running worker. It must have no
 active or waiting turns, queued work, attached terminal clients, or outstanding
@@ -217,6 +228,9 @@ The updater starts the worker after installing the new version. On macOS, stop
 it with `launchctl bootout "gui/$(id -u)/com.iaia.codex-worker"` before running
 the same update command. Stopping the worker ends its current app-server
 processes, so do not run this from a Codex turn hosted by that worker.
+If a download fails after you manually stop the worker, start it again with
+`systemctl --user start codex-worker.service` on Linux, or load its LaunchAgent
+again on macOS, before retrying the update.
 
 ## Automatic updates
 
