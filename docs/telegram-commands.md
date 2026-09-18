@@ -27,6 +27,12 @@ bound to your user, chat, topic, and runtime generation, and do not change the
 selected session or start any work. Run `/tgsessions` again if a button expires
 or the worker restarts.
 
+Only user conversations inside the worker's allowed workspaces appear. Internal
+helper-agent and ephemeral threads are excluded. Discovery also hides entries
+that no longer exist after a complete successful scan; saved history is retained,
+and this cleanup does not archive or delete threads in Codex. The CLI picker can
+show a different count because it has its own source and directory filters.
+
 ## Codex controls
 
 These run against the selected session and keep its immutable worker, runtime,

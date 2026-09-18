@@ -426,6 +426,81 @@ func (s *Store) UpsertSession(session protocol.Session) (protocol.Session, error
 	return saved, err
 }
 
+// ArchiveDiscoveredSession hides a previously discovered session from gateway
+// selection while retaining its identity and history. It never archives the
+// underlying Codex thread. The expected snapshot prevents a discovery scan
+// from hiding a session changed concurrently by an actor or notification.
+// Persist the inventory change and its durable event together so reconnecting
+// gateways also receive tombstones for sessions discovered before an upgrade.
+func (s *Store) ArchiveDiscoveredSession(runtime protocol.Runtime, expected protocol.Session) (protocol.Session, bool, error) {
+	candidate := expected
+	candidate.Archived, candidate.Loaded, candidate.ActiveTurnID, candidate.State = true, false, "", "not_loaded"
+	return s.changeDiscoveredSessionVisibility(runtime, expected, candidate)
+}
+
+// RestoreDiscoveredSession makes a locally hidden session selectable again
+// after discovery finds an eligible Codex thread. The identity and expected
+// archived snapshot must still match, and the change is atomic with its event.
+func (s *Store) RestoreDiscoveredSession(runtime protocol.Runtime, expected, candidate protocol.Session) (protocol.Session, bool, error) {
+	if candidate.Archived || candidate.ID != expected.ID || candidate.WorkerID != expected.WorkerID ||
+		candidate.RuntimeID != expected.RuntimeID || candidate.ThreadID != expected.ThreadID {
+		return protocol.Session{}, false, errors.New("worker store: invalid discovered session restore target")
+	}
+	return s.changeDiscoveredSessionVisibility(runtime, expected, candidate)
+}
+
+func (s *Store) changeDiscoveredSessionVisibility(runtime protocol.Runtime, expected, candidate protocol.Session) (protocol.Session, bool, error) {
+	if _, err := uuid.Parse(runtime.ID); err != nil || runtime.WorkerID != s.workerID ||
+		runtime.Generation == 0 || runtime.Generation > math.MaxInt64 ||
+		expected.WorkerID != s.workerID || expected.RuntimeID != runtime.ID || expected.ThreadID == "" {
+		return protocol.Session{}, false, errors.New("worker store: invalid discovered session visibility target")
+	}
+	if _, err := uuid.Parse(expected.ID); err != nil {
+		return protocol.Session{}, false, errors.New("worker store: invalid discovered session identity")
+	}
+	var saved protocol.Session
+	changed := false
+	err := s.db.Update(func(tx *bolt.Tx) error {
+		bucket := tx.Bucket(bucketSessions)
+		key := sessionKey(runtime.ID, expected.ThreadID)
+		value := bucket.Get(key)
+		if value == nil {
+			return nil
+		}
+		var current protocol.Session
+		if err := json.Unmarshal(value, &current); err != nil {
+			return err
+		}
+		saved = current
+		previous := expected
+		current.UpdatedAt, previous.UpdatedAt = time.Time{}, time.Time{}
+		if saved.Archived == candidate.Archived || current != previous || !saved.UpdatedAt.Equal(expected.UpdatedAt) {
+			return nil
+		}
+		saved = candidate
+		saved.UpdatedAt = time.Now().UTC()
+		encoded, err := json.Marshal(saved)
+		if err != nil {
+			return err
+		}
+		if err := bucket.Put(key, encoded); err != nil {
+			return err
+		}
+		if _, err := appendEvent(tx, protocol.Event{
+			WorkerID: s.workerID, RuntimeID: runtime.ID, RuntimeGeneration: runtime.Generation,
+			SessionID: saved.ID, Kind: "session_state_changed", Data: encoded,
+		}); err != nil {
+			return err
+		}
+		changed = true
+		return nil
+	})
+	if err != nil {
+		return protocol.Session{}, false, err
+	}
+	return saved, changed, nil
+}
+
 // ListSessions returns every session, optionally limited to a runtime ID.
 func (s *Store) ListSessions(runtimeID string) ([]protocol.Session, error) {
 	var sessions []protocol.Session

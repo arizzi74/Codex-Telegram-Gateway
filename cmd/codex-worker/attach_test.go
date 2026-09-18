@@ -56,3 +56,20 @@ func TestAttachmentRejectsInvalidSelections(t *testing.T) {
 		t.Fatal("latest attachment without a managed endpoint accepted")
 	}
 }
+
+func TestAttachmentIgnoresArchivedInventory(t *testing.T) {
+	status := worker.Status{
+		Runtimes: []protocol.Runtime{{ID: "runtime", LocalSocket: "/private/worker.sock"}},
+		Sessions: []protocol.Session{
+			{Name: "same", ThreadID: "hidden", RuntimeID: "runtime", Archived: true},
+			{Name: "same", ThreadID: "visible", RuntimeID: "runtime"},
+		},
+	}
+	if _, err := attachmentArgs(status, []string{"hidden"}); err == nil {
+		t.Fatal("archived inventory can still be selected")
+	}
+	args, err := attachmentArgs(status, []string{"same"})
+	if err != nil || args[len(args)-1] != "visible" {
+		t.Fatalf("hidden duplicate interfered with user session: %v %v", args, err)
+	}
+}

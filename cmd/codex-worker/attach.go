@@ -21,6 +21,9 @@ func attachmentArgs(status worker.Status, args []string) ([]string, error) {
 			return nil, errors.New("unknown attach option; use codex-worker attach [SESSION|--latest]")
 		}
 		for _, s := range status.Sessions {
+			if s.Archived {
+				continue
+			}
 			if s.ID == args[0] || s.ThreadID == args[0] || s.Name == args[0] {
 				if thread != "" {
 					return nil, errors.New("session name is ambiguous; use the thread ID")

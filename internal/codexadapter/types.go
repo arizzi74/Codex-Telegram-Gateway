@@ -381,20 +381,38 @@ func (c *Client) track(event Event) {
 // Thread is a stable worker-domain view of an app-server thread. Raw retains
 // all protocol fields that do not belong in the domain interface yet.
 type Thread struct {
-	ID            string
-	SessionID     string
-	Name          string
-	Preview       string
-	CWD           string
-	Model         string
-	ModelProvider string
-	GitBranch     string
-	Status        string
-	CreatedAt     int64
-	UpdatedAt     int64
-	Ephemeral     bool
-	ActiveTurnID  string
-	Raw           json.RawMessage
+	ID             string
+	SessionID      string
+	ParentThreadID string
+	Source         string
+	ThreadSource   string
+	Name           string
+	Preview        string
+	CWD            string
+	Model          string
+	ModelProvider  string
+	GitBranch      string
+	Status         string
+	CreatedAt      int64
+	UpdatedAt      int64
+	Ephemeral      bool
+	ActiveTurnID   string
+	Raw            json.RawMessage
+}
+
+// UserSession reports whether a thread belongs in the user-facing inventory.
+// A missing source remains compatible with older app servers, but explicit
+// unknown sources are excluded: Codex uses unknown for some internal work.
+func (t Thread) UserSession() bool {
+	if t.Ephemeral || t.ParentThreadID != "" || t.ThreadSource == "subagent" || t.ThreadSource == "memory_consolidation" {
+		return false
+	}
+	switch t.Source {
+	case "", "cli", "vscode", "exec", "appServer":
+		return true
+	default:
+		return false
+	}
 }
 
 // Turn is the stable worker-domain view of a Codex turn.
@@ -407,15 +425,18 @@ type Turn struct {
 
 func decodeThread(raw json.RawMessage) (Thread, error) {
 	var wire struct {
-		ID            string          `json:"id"`
-		SessionID     string          `json:"sessionId"`
-		Name          string          `json:"name"`
-		Preview       string          `json:"preview"`
-		CWD           string          `json:"cwd"`
-		Model         string          `json:"model"`
-		ModelProvider string          `json:"modelProvider"`
-		Status        json.RawMessage `json:"status"`
-		GitInfo       struct {
+		ID             string          `json:"id"`
+		SessionID      string          `json:"sessionId"`
+		ParentThreadID string          `json:"parentThreadId"`
+		Source         json.RawMessage `json:"source"`
+		ThreadSource   string          `json:"threadSource"`
+		Name           string          `json:"name"`
+		Preview        string          `json:"preview"`
+		CWD            string          `json:"cwd"`
+		Model          string          `json:"model"`
+		ModelProvider  string          `json:"modelProvider"`
+		Status         json.RawMessage `json:"status"`
+		GitInfo        struct {
 			Branch string `json:"branch"`
 		} `json:"gitInfo"`
 		CreatedAt int64 `json:"createdAt"`
@@ -429,7 +450,7 @@ func decodeThread(raw json.RawMessage) (Thread, error) {
 	if err := json.Unmarshal(raw, &wire); err != nil {
 		return Thread{}, err
 	}
-	thread := Thread{ID: wire.ID, SessionID: wire.SessionID, Name: wire.Name, Preview: wire.Preview, CWD: wire.CWD, Model: wire.Model, ModelProvider: wire.ModelProvider, GitBranch: wire.GitInfo.Branch, Status: statusName(wire.Status), CreatedAt: wire.CreatedAt, UpdatedAt: wire.UpdatedAt, Ephemeral: wire.Ephemeral, Raw: cloneRaw(raw)}
+	thread := Thread{ID: wire.ID, SessionID: wire.SessionID, ParentThreadID: wire.ParentThreadID, Source: threadSourceName(wire.Source), ThreadSource: wire.ThreadSource, Name: wire.Name, Preview: wire.Preview, CWD: wire.CWD, Model: wire.Model, ModelProvider: wire.ModelProvider, GitBranch: wire.GitInfo.Branch, Status: statusName(wire.Status), CreatedAt: wire.CreatedAt, UpdatedAt: wire.UpdatedAt, Ephemeral: wire.Ephemeral, Raw: cloneRaw(raw)}
 	for _, turn := range wire.Turns {
 		if turn.Status == "inProgress" {
 			thread.ActiveTurnID = turn.ID
@@ -437,6 +458,28 @@ func decodeThread(raw json.RawMessage) (Thread, error) {
 		}
 	}
 	return thread, nil
+}
+
+func threadSourceName(raw json.RawMessage) string {
+	if len(raw) == 0 || string(raw) == "null" {
+		return ""
+	}
+	var value string
+	if json.Unmarshal(raw, &value) == nil && value != "" {
+		return value
+	}
+	// SessionSource is an externally tagged enum. Every subAgent payload,
+	// including future variants, is still an internal helper thread.
+	var object map[string]json.RawMessage
+	if json.Unmarshal(raw, &object) == nil && len(object) == 1 {
+		if _, ok := object["subAgent"]; ok {
+			return "subAgent"
+		}
+		if _, ok := object["custom"]; ok {
+			return "custom"
+		}
+	}
+	return "unknown"
 }
 
 func statusName(raw json.RawMessage) string {
@@ -645,23 +688,35 @@ func (c *Client) listThreads(ctx context.Context, method string, params map[stri
 // ListAllThreads follows persisted list cursors until completion or max. A max
 // of zero means no adapter-imposed cap; workers should provide their policy cap.
 func (c *Client) ListAllThreads(ctx context.Context, pageSize, max int) ([]Thread, error) {
+	all, _, err := c.ListAllThreadsComplete(ctx, pageSize, max)
+	return all, err
+}
+
+// ListAllThreadsComplete also reports whether discovery reached the end of the
+// inventory. Callers must not retire unseen sessions when a cap truncates it.
+func (c *Client) ListAllThreadsComplete(ctx context.Context, pageSize, max int) ([]Thread, bool, error) {
 	var all []Thread
+	seen := map[string]bool{"": true}
 	for cursor := ""; ; {
 		page, err := c.ListThreads(ctx, cursor, pageSize)
 		if err != nil {
-			return nil, err
+			return nil, false, err
 		}
 		if max > 0 && len(all)+len(page.Threads) > max {
 			all = append(all, page.Threads[:max-len(all)]...)
-			return all, nil
+			return all, false, nil
 		}
 		all = append(all, page.Threads...)
-		if max > 0 && len(all) == max {
-			return all, nil
-		}
 		if page.NextCursor == "" {
-			return all, nil
+			return all, true, nil
 		}
+		if max > 0 && len(all) == max {
+			return all, false, nil
+		}
+		if seen[page.NextCursor] {
+			return nil, false, errors.New("thread/list returned a repeated pagination cursor")
+		}
+		seen[page.NextCursor] = true
 		cursor = page.NextCursor
 	}
 }

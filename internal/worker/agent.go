@@ -235,6 +235,10 @@ func (a *Agent) onSession(runtime protocol.Runtime, s protocol.Session) {
 	a.mu.Lock()
 	actor := a.sessions[s.ID]
 	if actor == nil {
+		if s.Archived {
+			a.mu.Unlock()
+			return
+		}
 		actor = &sessionActor{agent: a, identityRuntime: runtime.ID, identityThread: s.ThreadID, runtime: runtime, session: s, commands: make(chan actorCommand), eventQueue: make(chan actorEvent, 128), requestQueue: make(chan actorRequest, 32), snapshots: make(chan actorSnapshot, 8), pending: map[string]pendingRequest{}, updateChecks: make(chan chan bool)}
 		a.sessions[s.ID] = actor
 		a.group.Add(1)
@@ -267,6 +271,9 @@ func (a *Agent) actorForThread(runtimeID, threadID string) *sessionActor {
 }
 
 func (a *Agent) onEvent(runtime protocol.Runtime, event codexadapter.Event) {
+	if event.Thread != nil && !event.Thread.UserSession() {
+		return
+	}
 	if event.Thread != nil && event.Thread.ID != "" && workspaceAllowed(event.Thread.CWD, a.cfg.AllowedWorkspaceRoots) {
 		session := sessionFromThread(runtime, *event.Thread, true)
 		if a.actorForThread(runtime.ID, event.Thread.ID) == nil {
@@ -526,6 +533,7 @@ func (s *sessionActor) run() {
 				if s.session.ActiveTurnID == "" && s.activeCommand == nil {
 					s.session = snapshot.session
 				} else {
+					s.session.Archived = snapshot.session.Archived
 					s.session.Name, s.session.Preview = snapshot.session.Name, snapshot.session.Preview
 					s.session.CWD, s.session.GitBranch, s.session.GitRoot = snapshot.session.CWD, snapshot.session.GitBranch, snapshot.session.GitRoot
 				}
@@ -567,6 +575,10 @@ func (s *sessionActor) command(req actorCommand) {
 	}
 	if c.SessionID != s.session.ID || c.ThreadID != s.session.ThreadID {
 		reject(protocol.UnknownSession, "Session target does not match.")
+		return
+	}
+	if s.session.Archived {
+		reject(protocol.UnknownSession, "Session is no longer available in the worker inventory.")
 		return
 	}
 	if time.Now().After(c.ExpiresAt) {
@@ -710,6 +722,11 @@ func codexCommandNeedsIdle(name, args string) bool {
 }
 
 func (s *sessionActor) start(c protocol.Command) {
+	if s.session.Archived {
+		_, err := s.agent.reject(c, protocol.UnknownSession, "Session is no longer available in the worker inventory.")
+		s.agent.report(err)
+		return
+	}
 	client, runtime, ok := s.agent.manager.Client(s.runtime.ID)
 	if !ok || runtime.Generation != c.RuntimeGeneration {
 		_, err := s.agent.reject(c, protocol.StaleRuntime, "Runtime generation no longer matches.")

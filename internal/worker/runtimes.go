@@ -354,7 +354,13 @@ func (m *RuntimeManager) discover(ctx context.Context, runtime protocol.Runtime,
 			break
 		}
 	}
-	threads, err := client.ListAllThreads(ctx, discoveryPageSize, discoveryLimit)
+	// Snapshot before the RPC scan so a concurrent thread/started notification
+	// cannot make a newly created session look missing from an older list.
+	existing, err := m.store.ListSessions(runtime.ID)
+	if err != nil {
+		return persistenceError(err)
+	}
+	threads, complete, err := client.ListAllThreadsComplete(ctx, discoveryPageSize, discoveryLimit)
 	if err != nil {
 		if errors.Is(err, codexadapter.ErrMethodUnavailable) {
 			m.markRuntimeDegraded(runtime, err)
@@ -362,7 +368,7 @@ func (m *RuntimeManager) discover(ctx context.Context, runtime protocol.Runtime,
 		}
 		return err
 	}
-	loaded, err := loadedThreadIDs(ctx, client)
+	loaded, loadedComplete, err := loadedThreadIDs(ctx, client)
 	if err != nil {
 		if errors.Is(err, codexadapter.ErrMethodUnavailable) {
 			m.markRuntimeDegraded(runtime, err)
@@ -370,6 +376,7 @@ func (m *RuntimeManager) discover(ctx context.Context, runtime protocol.Runtime,
 		}
 		return err
 	}
+	complete = complete && loadedComplete
 	// A loaded thread may not yet have a stored log or appear in a history
 	// page. Read its current turn independently, without changing selection.
 	indexed := make(map[string]int, len(threads))
@@ -391,16 +398,18 @@ func (m *RuntimeManager) discover(ctx context.Context, runtime protocol.Runtime,
 			threads = append(threads, thread)
 		}
 	}
-	existing, err := m.store.ListSessions(runtime.ID)
-	if err != nil {
-		return persistenceError(err)
-	}
 	byThread := make(map[string]protocol.Session, len(existing))
 	for _, session := range existing {
 		byThread[session.ThreadID] = session
 	}
+	visible := make(map[string]bool, len(threads))
+	observed := make(map[string]bool, len(threads))
 	for _, thread := range threads {
 		if thread.ID == "" {
+			continue
+		}
+		observed[thread.ID] = true
+		if !thread.UserSession() {
 			continue
 		}
 		candidate := sessionFromThread(runtime, thread, loaded[thread.ID])
@@ -408,6 +417,7 @@ func (m *RuntimeManager) discover(ctx context.Context, runtime protocol.Runtime,
 			m.log.Warn("skip discovered thread outside allowed workspace", "runtime_id", runtime.ID, "thread_id", thread.ID)
 			continue
 		}
+		visible[thread.ID] = true
 		if loaded[thread.ID] {
 			resumed, subscribed, resumeErr := m.subscribeLoadedThread(ctx, runtime, client, thread.ID, retryUnavailable)
 			if resumeErr != nil {
@@ -433,9 +443,22 @@ func (m *RuntimeManager) discover(ctx context.Context, runtime protocol.Runtime,
 		if prior, found := byThread[thread.ID]; found {
 			if prior.CWD == "" || !workspaceAllowed(prior.CWD, m.cfg.AllowedWorkspaceRoots) {
 				m.log.Warn("skip persisted thread outside allowed workspace", "runtime_id", runtime.ID, "thread_id", thread.ID)
+				visible[thread.ID] = false
 				continue
 			}
 			candidate.ID = prior.ID
+			if prior.Archived {
+				// A user thread can reappear after being restored in Codex.
+				// Persist this before creating an actor for a retired identity.
+				var changed bool
+				candidate, changed, err = m.store.RestoreDiscoveredSession(runtime, prior, candidate)
+				if err != nil {
+					return persistenceError(err)
+				}
+				if !changed {
+					continue
+				}
+			}
 			if m.hooks.OnSession != nil {
 				m.hooks.OnSession(runtime, candidate)
 			}
@@ -449,6 +472,21 @@ func (m *RuntimeManager) discover(ctx context.Context, runtime protocol.Runtime,
 			return persistenceError(err)
 		}
 		if m.hooks.OnSession != nil {
+			m.hooks.OnSession(runtime, saved)
+		}
+	}
+	for _, prior := range existing {
+		if visible[prior.ThreadID] || (!complete && !observed[prior.ThreadID]) {
+			continue
+		}
+		// Hide obsolete inventory only after all discovery RPCs succeeded.
+		// The store compares the original snapshot to protect concurrent work,
+		// and records the visibility change with its durable gateway event.
+		saved, changed, err := m.store.ArchiveDiscoveredSession(runtime, prior)
+		if err != nil {
+			return persistenceError(err)
+		}
+		if changed && m.hooks.OnSession != nil {
 			m.hooks.OnSession(runtime, saved)
 		}
 	}
@@ -501,26 +539,33 @@ func methodKnownUnavailable(client *codexadapter.Client, method string) bool {
 	return observed && !available
 }
 
-func loadedThreadIDs(ctx context.Context, client *codexadapter.Client) (map[string]bool, error) {
+func loadedThreadIDs(ctx context.Context, client *codexadapter.Client) (map[string]bool, bool, error) {
 	loaded := map[string]bool{}
 	cursor := ""
-	for len(loaded) < discoveryLimit {
+	seen := map[string]bool{"": true}
+	for {
 		page, err := client.LoadedThreads(ctx, cursor, discoveryPageSize)
 		if err != nil {
-			return nil, err
+			return nil, false, err
 		}
 		for _, thread := range page.Threads {
-			loaded[thread.ID] = true
-			if len(loaded) == discoveryLimit {
-				break
+			if !loaded[thread.ID] && len(loaded) == discoveryLimit {
+				return loaded, false, nil
 			}
+			loaded[thread.ID] = true
 		}
 		if page.NextCursor == "" {
-			break
+			return loaded, true, nil
 		}
+		if len(loaded) == discoveryLimit {
+			return loaded, false, nil
+		}
+		if seen[page.NextCursor] {
+			return nil, false, errors.New("thread/loaded/list returned a repeated pagination cursor")
+		}
+		seen[page.NextCursor] = true
 		cursor = page.NextCursor
 	}
-	return loaded, nil
 }
 
 // subscribeLoadedThread performs the only allowed reconciliation resume: an
