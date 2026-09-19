@@ -12,18 +12,18 @@ import (
 	"github.com/iaia/telegramgw/internal/protocol"
 )
 
-type toolProgressStoreFake struct {
+type progressReplacementStoreFake struct {
 	*progressStoreFake
 	target    int64
 	markedIDs []int64
 	markErr   error
 }
 
-func (f *toolProgressStoreFake) TelegramToolProgressTarget(context.Context, string) (int64, error) {
+func (f *progressReplacementStoreFake) TelegramProgressTarget(context.Context, string) (int64, error) {
 	return f.target, nil
 }
 
-func (f *toolProgressStoreFake) MarkDeliveryChunkSent(ctx context.Context, id string, index int, messageID int64, session, turn, approval string, questions ...string) error {
+func (f *progressReplacementStoreFake) MarkDeliveryChunkSent(ctx context.Context, id string, index int, messageID int64, session, turn, approval string, questions ...string) error {
 	if f.markErr != nil {
 		return f.markErr
 	}
@@ -35,25 +35,25 @@ func (f *toolProgressStoreFake) MarkDeliveryChunkSent(ctx context.Context, id st
 	return nil
 }
 
-type toolProgressAPIFake struct {
+type progressReplacementAPIFake struct {
 	progressAPIFake
 	edits   []SendMessage
 	editIDs []int64
 	editErr error
 }
 
-func (a *toolProgressAPIFake) EditFormatted(_ context.Context, id int64, message SendMessage) error {
+func (a *progressReplacementAPIFake) EditFormatted(_ context.Context, id int64, message SendMessage) error {
 	a.edits = append(a.edits, message)
 	a.editIDs = append(a.editIDs, id)
 	return a.editErr
 }
 
-func toolProgressFixture() (*toolProgressStoreFake, *toolProgressAPIFake) {
-	return &toolProgressStoreFake{progressStoreFake: &progressStoreFake{renderStoreFake: renderFixture()}}, &toolProgressAPIFake{}
+func progressReplacementFixture() (*progressReplacementStoreFake, *progressReplacementAPIFake) {
+	return &progressReplacementStoreFake{progressStoreFake: &progressStoreFake{renderStoreFake: renderFixture()}}, &progressReplacementAPIFake{}
 }
 
 func TestToolProgressReplacesPreviousCallInMonospaceAfterSenderRestart(t *testing.T) {
-	store, api := toolProgressFixture()
+	store, api := progressReplacementFixture()
 	ctx := context.Background()
 	for i, command := range []string{"printf '<b>👩🏽‍💻 & `literal`</b>'", "go test ./..."} {
 		store.chunks = nil
@@ -86,7 +86,7 @@ func TestToolProgressReplacesPreviousCallInMonospaceAfterSenderRestart(t *testin
 }
 
 func TestToolProgressTruncatesToOneUnicodeSafeMessage(t *testing.T) {
-	store, api := toolProgressFixture()
+	store, api := progressReplacementFixture()
 	row := eventRow(t, "tool_progress_message", protocol.Result{TurnID: "turn-tools", Text: strings.Repeat("🧪<&>\n", 3000)}, testSessionID.String())
 	if err := NewSender(store, api, nil).sendDelivery(context.Background(), row); err != nil {
 		t.Fatal(err)
@@ -100,62 +100,74 @@ func TestToolProgressTruncatesToOneUnicodeSafeMessage(t *testing.T) {
 	}
 }
 
-func TestToolProgressEditRetriesWithoutSendingDuplicates(t *testing.T) {
-	store, api := toolProgressFixture()
-	store.target = 77
-	api.editErr = &TelegramError{Code: 429, RetryAfter: 45 * time.Second}
-	row := eventRow(t, "tool_progress_message", protocol.Result{TurnID: "turn-tools", Text: "make test"}, testSessionID.String())
-	sender := NewSender(store, api, nil)
-	if err := sender.sendDelivery(context.Background(), row); err == nil || telegramRetryDelay(1, err) != 45*time.Second {
-		t.Fatalf("edit rate limit lost: %v", err)
-	}
-	if len(api.messages) != 0 || len(store.markedIDs) != 0 {
-		t.Fatal("failed edit sent or checkpointed a duplicate")
-	}
-	// Telegram reports unchanged content if the previous attempt reached it
-	// before a timeout or the local checkpoint failed.
-	api.editErr = &TelegramError{Code: 400, Description: "Bad Request: message is not modified: specified new message content and reply markup are exactly the same"}
-	if err := sender.sendDelivery(context.Background(), row); err != nil {
-		t.Fatal(err)
-	}
-	if len(api.messages) != 0 || len(store.markedIDs) != 1 || store.markedIDs[0] != 77 {
-		t.Fatal("unchanged edit was not checkpointed against the original message")
-	}
-}
-
-func TestToolProgressRecreatesOnlyDefinitelyMissingMessages(t *testing.T) {
-	for _, failure := range []error{
-		&TelegramError{Code: 400, Description: "Bad Request: message to edit not found"},
-		&TelegramError{Code: 400, Description: "Bad Request: message can't be edited"},
-		&TelegramError{Code: 403, Description: "Forbidden"},
-		errors.New("network timeout"),
-	} {
-		store, api := toolProgressFixture()
-		store.target = 77
-		api.editErr = failure
-		row := eventRow(t, "tool_progress_message", protocol.Result{TurnID: "turn-tools", Text: "make test"}, testSessionID.String())
-		err := NewSender(store, api, nil).sendDelivery(context.Background(), row)
-		missing := strings.Contains(failure.Error(), "message to edit not found")
-		if missing && (err != nil || len(api.messages) != 1 || len(store.markedIDs) != 1) {
-			t.Fatalf("deleted tool message was not recreated: %v", err)
-		}
-		if !missing && (err == nil || len(api.messages) != 0 || len(store.markedIDs) != 0) {
-			t.Fatalf("uncertain edit created a duplicate: %v", failure)
-		}
+func TestProgressEditRetriesWithoutSendingDuplicates(t *testing.T) {
+	for _, kind := range []string{"agent_progress_message", "tool_progress_message"} {
+		t.Run(kind, func(t *testing.T) {
+			store, api := progressReplacementFixture()
+			store.target = 77
+			api.editErr = &TelegramError{Code: 429, RetryAfter: 45 * time.Second}
+			row := eventRow(t, kind, protocol.Result{TurnID: "turn-progress", Text: "make test"}, testSessionID.String())
+			sender := NewSender(store, api, nil)
+			if err := sender.sendDelivery(context.Background(), row); err == nil || telegramRetryDelay(1, err) != 45*time.Second {
+				t.Fatalf("edit rate limit lost: %v", err)
+			}
+			if len(api.messages) != 0 || len(store.markedIDs) != 0 {
+				t.Fatal("failed edit sent or checkpointed a duplicate")
+			}
+			// Telegram reports unchanged content if the previous attempt reached it
+			// before a timeout or the local checkpoint failed.
+			api.editErr = &TelegramError{Code: 400, Description: "Bad Request: message is not modified: specified new message content and reply markup are exactly the same"}
+			if err := sender.sendDelivery(context.Background(), row); err != nil {
+				t.Fatal(err)
+			}
+			if len(api.messages) != 0 || len(store.markedIDs) != 1 || store.markedIDs[0] != 77 {
+				t.Fatal("unchanged edit was not checkpointed against the original message")
+			}
+		})
 	}
 }
 
-func TestToolProgressSuppressedBeforeSendOrEdit(t *testing.T) {
-	for _, target := range []int64{0, 77} {
-		store, api := toolProgressFixture()
-		store.target = target
-		store.suppressAt = 1
-		row := eventRow(t, "tool_progress_message", protocol.Result{TurnID: "turn-tools", Text: "make test"}, testSessionID.String())
-		if err := NewSender(store, api, nil).sendDelivery(context.Background(), row); err != nil {
-			t.Fatal(err)
-		}
-		if len(api.messages) != 0 || len(api.edits) != 0 || len(store.skipped) != 1 {
-			t.Fatal("obsolete tool was sent or edited")
-		}
+func TestProgressRecreatesOnlyDefinitelyMissingMessages(t *testing.T) {
+	for _, kind := range []string{"agent_progress_message", "tool_progress_message"} {
+		t.Run(kind, func(t *testing.T) {
+			for _, failure := range []error{
+				&TelegramError{Code: 400, Description: "Bad Request: message to edit not found"},
+				&TelegramError{Code: 400, Description: "Bad Request: message can't be edited"},
+				&TelegramError{Code: 403, Description: "Forbidden"},
+				errors.New("network timeout"),
+			} {
+				store, api := progressReplacementFixture()
+				store.target = 77
+				api.editErr = failure
+				row := eventRow(t, kind, protocol.Result{TurnID: "turn-progress", Text: "make test"}, testSessionID.String())
+				err := NewSender(store, api, nil).sendDelivery(context.Background(), row)
+				missing := strings.Contains(failure.Error(), "message to edit not found")
+				if missing && (err != nil || len(api.messages) != 1 || len(store.markedIDs) != 1) {
+					t.Fatalf("deleted progress message was not recreated: %v", err)
+				}
+				if !missing && (err == nil || len(api.messages) != 0 || len(store.markedIDs) != 0) {
+					t.Fatalf("uncertain edit created a duplicate: %v", failure)
+				}
+			}
+		})
+	}
+}
+
+func TestProgressSuppressedBeforeSendOrEdit(t *testing.T) {
+	for _, kind := range []string{"agent_progress_message", "tool_progress_message"} {
+		t.Run(kind, func(t *testing.T) {
+			for _, target := range []int64{0, 77} {
+				store, api := progressReplacementFixture()
+				store.target = target
+				store.suppressAt = 1
+				row := eventRow(t, kind, protocol.Result{TurnID: "turn-progress", Text: "make test"}, testSessionID.String())
+				if err := NewSender(store, api, nil).sendDelivery(context.Background(), row); err != nil {
+					t.Fatal(err)
+				}
+				if len(api.messages) != 0 || len(api.edits) != 0 || len(store.skipped) != 1 {
+					t.Fatal("obsolete progress was sent or edited")
+				}
+			}
+		})
 	}
 }

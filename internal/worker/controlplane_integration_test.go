@@ -132,21 +132,24 @@ func TestControlPlaneWorkerOutboxSurvivesGatewayRestartIntegration(t *testing.T)
 	fakeMu.Lock()
 	f := fake
 	fakeMu.Unlock()
-	// User-visible Codex commentary appears while the turn is still running.
-	// These message IDs must survive a gateway restart so they can be removed
-	// only after the permanent final answer has actually reached Telegram.
-	progressTexts := []string{"Checking the gateway command routing now.", "The command routing is verified; checking delivery next."}
-	var progressIDs []int64
-	for i, text := range progressTexts {
-		if err := f.Emit("item/completed", map[string]any{"threadId": targetThread, "turnId": active, "item": map[string]any{"id": "commentary-" + string(rune('a'+i)), "type": "agentMessage", "status": "completed", "phase": "commentary", "text": text}}); err != nil {
+	// Commentary and tools each keep one independently replaced message. Both
+	// IDs must survive a restart, then remain until final delivery succeeds.
+	progressTexts := []string{"Checking the gateway command routing now.", "The command routing is verified; checking delivery next.", "Delivery checks passed; preparing the final response."}
+	emitCommentary := func(i int) {
+		t.Helper()
+		if err := f.Emit("item/completed", map[string]any{"threadId": targetThread, "turnId": active, "item": map[string]any{"id": "commentary-" + string(rune('a'+i)), "type": "agentMessage", "status": "completed", "phase": "commentary", "text": progressTexts[i]}}); err != nil {
 			t.Fatal(err)
 		}
-		waitControl(t, func() bool { return tg.countText(text) == 1 })
-		progressIDs = append(progressIDs, tg.messageID(text))
+		if i == 0 {
+			waitControl(t, func() bool { return tg.countText(progressTexts[i]) == 1 })
+		} else {
+			waitControl(t, func() bool { return tg.hasEditedText(progressTexts[i]) })
+		}
 	}
-	// Each started tool is visible before it finishes. Later tools edit the
-	// same monospace message, including after a gateway restart. Commentary
-	// remains separate and every temporary message waits for final delivery.
+	emitCommentary(0)
+	progressIDs := []int64{tg.messageID(progressTexts[0])}
+	// Interleave both kinds after the restart to catch either one accidentally
+	// replacing the other. Started tools stay monospace before they finish.
 	toolCommands := []string{"printf 'tool one 🧪\\n'", "rg --files", "go version"}
 	for i, command := range toolCommands {
 		if i == 1 {
@@ -175,9 +178,14 @@ func TestControlPlaneWorkerOutboxSurvivesGatewayRestartIntegration(t *testing.T)
 			})
 		} else {
 			waitControl(t, func() bool { return tg.hasEditedText(command) })
+			emitCommentary(i)
 		}
 	}
+	tg.assertCommentaryProgress(t, progressIDs[0], progressTexts)
 	tg.assertToolProgress(t, progressIDs[len(progressIDs)-1], toolCommands)
+	if len(progressIDs) != 2 || progressIDs[0] == progressIDs[1] {
+		t.Fatalf("commentary and tools should have two independent messages: %v", progressIDs)
+	}
 	if currentActive(t, local, runtimeID, targetThread) != active {
 		t.Fatal("temporary progress ended the running turn")
 	}
@@ -509,6 +517,42 @@ func (t *telegramRecorder) assertToolProgress(test *testing.T, messageID int64, 
 		for _, action := range t.actions {
 			if action.kind == "send" && strings.Contains(action.text, command) {
 				test.Fatalf("subsequent tool sent another message instead of replacing %d: %q", messageID, action.text)
+			}
+		}
+	}
+}
+
+func (t *telegramRecorder) assertCommentaryProgress(test *testing.T, messageID int64, messages []string) {
+	test.Helper()
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if messageID == 0 {
+		test.Fatal("commentary message ID was not recorded")
+	}
+	seen := 0
+	for _, action := range t.actions {
+		if action.messageID != messageID || action.kind == "delete" {
+			continue
+		}
+		if seen >= len(messages) {
+			test.Fatalf("unexpected extra commentary update: %q", action.text)
+		}
+		wantKind := "edit"
+		if seen == 0 {
+			wantKind = "send"
+		}
+		if action.kind != wantKind || action.chatID != 9 || !strings.HasPrefix(action.text, "⏳ ") || !strings.Contains(action.text, messages[seen]) {
+			test.Fatalf("commentary update %d = kind %s, chat %d, text %q; want %s with %q", seen, action.kind, action.chatID, action.text, wantKind, messages[seen])
+		}
+		seen++
+	}
+	if seen != len(messages) {
+		test.Fatalf("commentary updates = %d, want %d", seen, len(messages))
+	}
+	for _, message := range messages[1:] {
+		for _, action := range t.actions {
+			if action.kind == "send" && strings.Contains(action.text, message) {
+				test.Fatalf("subsequent commentary sent another message instead of replacing %d: %q", messageID, action.text)
 			}
 		}
 	}

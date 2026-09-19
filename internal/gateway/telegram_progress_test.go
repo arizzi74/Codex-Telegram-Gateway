@@ -7,7 +7,10 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf16"
+	"unicode/utf8"
 
+	"github.com/iaia/telegramgw/internal/auth"
 	"github.com/iaia/telegramgw/internal/protocol"
 	"github.com/iaia/telegramgw/internal/registry"
 )
@@ -80,19 +83,18 @@ func (a *progressAPIFake) DeleteMessage(_ context.Context, chat, message int64) 
 }
 
 func TestProgressDeliveryIsTemporarySilentAndKeepsItsTurnRoute(t *testing.T) {
-	store := &progressStoreFake{renderStoreFake: renderFixture()}
-	api := &progressAPIFake{}
+	store, api := progressReplacementFixture()
 	sender := NewSender(store, api, nil)
 	body := strings.Repeat("Progress update. ", 400)
 	row := eventRow(t, "agent_progress_message", protocol.Result{TurnID: "turn-progress", Text: body}, testSessionID.String())
 	if err := sender.sendDelivery(context.Background(), row); err != nil {
 		t.Fatal(err)
 	}
-	if len(api.messages) != 2 || len(store.marked) != 2 {
+	if len(api.messages) != 1 || len(store.marked) != 1 {
 		t.Fatalf("progress chunks: sends=%d checkpoints=%v", len(api.messages), store.marked)
 	}
 	for _, message := range api.messages {
-		if !message.DisableNotification || message.ChatID != row.ChatID || message.TopicID != row.TopicID || message.Keyboard != nil {
+		if !message.DisableNotification || message.ChatID != row.ChatID || message.TopicID != row.TopicID || message.Keyboard != nil || len(message.Entities) != 0 || !strings.HasPrefix(message.Text, "⏳ ") {
 			t.Fatalf("wrong progress delivery: %#v", message)
 		}
 	}
@@ -104,23 +106,63 @@ func TestProgressDeliveryIsTemporarySilentAndKeepsItsTurnRoute(t *testing.T) {
 	}
 }
 
-func TestProgressDeliveryStopsSendingChunksWhenTurnEnds(t *testing.T) {
-	for _, suppressAt := range []int{1, 3} {
-		store := &progressStoreFake{renderStoreFake: renderFixture(), suppressAt: suppressAt}
-		api := &progressAPIFake{}
+func TestProgressDeliveryStopsSendingWhenTurnEnds(t *testing.T) {
+	for _, suppressAt := range []int{1, 2} {
+		store, api := progressReplacementFixture()
+		store.suppressAt = suppressAt
 		sender := NewSender(store, api, nil)
 		row := eventRow(t, "agent_progress_message", protocol.Result{TurnID: "turn-progress", Text: strings.Repeat("x", 8000)}, testSessionID.String())
 		row.ID = "progress-delivery"
 		if err := sender.sendDelivery(context.Background(), row); err != nil {
 			t.Fatal(err)
 		}
-		wantSent := 0
-		if suppressAt == 3 {
-			wantSent = 1
-		}
-		if len(api.messages) != wantSent || len(store.skipped) != 1 || store.skipped[0] != row.ID {
+		if len(api.messages) != 0 || len(api.edits) != 0 || len(store.skipped) != 1 || store.skipped[0] != row.ID {
 			t.Fatalf("suppressAt=%d: sends=%d skipped=%v", suppressAt, len(api.messages), store.skipped)
 		}
+	}
+}
+
+func TestAgentProgressReplacesPreviousUpdateAfterSenderRestart(t *testing.T) {
+	store, api := progressReplacementFixture()
+	for i, text := range []string{"First update with <literal> & `text`.", "Latest update."} {
+		store.chunks = nil
+		row := eventRow(t, "agent_progress_message", protocol.Result{TurnID: "turn-progress", Text: text}, testSessionID.String())
+		if err := NewSender(store, api, nil).sendDelivery(context.Background(), row); err != nil {
+			t.Fatal(err)
+		}
+		if len(api.messages) != 1 || len(api.edits) != i {
+			t.Fatalf("update %d created extra messages: sends=%d edits=%d", i, len(api.messages), len(api.edits))
+		}
+	}
+	if len(api.editIDs) != 1 || api.editIDs[0] != store.markedIDs[0] || store.markedIDs[1] != store.markedIDs[0] {
+		t.Fatalf("replacement changed message identity: edits=%v checkpoints=%v", api.editIDs, store.markedIDs)
+	}
+	for _, message := range []SendMessage{api.messages[0], api.edits[0]} {
+		if !strings.HasPrefix(message.Text, "⏳ ") || !message.DisableNotification || message.Keyboard != nil || len(message.Entities) != 0 {
+			t.Fatalf("wrong plain text progress formatting: %+v", message)
+		}
+	}
+	if !strings.Contains(api.messages[0].Text, "<literal> & `text`") || !strings.Contains(api.edits[0].Text, "Latest update.") || strings.Contains(api.edits[0].Text, "First update") {
+		t.Fatal("progress updates were escaped, appended, or lost")
+	}
+}
+
+func TestAgentProgressTruncatesAfterRedactionToOneUnicodeSafeMessage(t *testing.T) {
+	store, api := progressReplacementFixture()
+	redactor, err := auth.NewRedactor([]string{"private-token"}, strings.Repeat("🧪", 2400))
+	if err != nil {
+		t.Fatal(err)
+	}
+	row := eventRow(t, "agent_progress_message", protocol.Result{TurnID: "turn-progress", Text: "private-token must not leak."}, testSessionID.String())
+	if err := NewSender(store, api, nil, SenderOptions{Redactor: redactor}).sendDelivery(context.Background(), row); err != nil {
+		t.Fatal(err)
+	}
+	if len(api.messages) != 1 {
+		t.Fatalf("long progress sent %d messages", len(api.messages))
+	}
+	message := api.messages[0]
+	if !utf8.ValidString(message.Text) || len(utf16.Encode([]rune(message.Text))) > 4000 || !strings.HasSuffix(message.Text, "… (truncated)") || strings.Contains(message.Text, "private-token") {
+		t.Fatalf("invalid, oversized, or unredacted progress message: bytes=%d", len(message.Text))
 	}
 }
 

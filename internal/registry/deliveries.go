@@ -34,8 +34,8 @@ var ErrDeliveryLeaseChanged = errors.New("registry: delivery lease changed")
 // ClaimDeliveries atomically leases due rows in one UPDATE statement. SQLite
 // serializes concurrent writers, so senders cannot claim the same live lease.
 // A crashed sender's lease becomes eligible again after 30 seconds.
-// Only the latest tool event at each destination remains eligible, and an
-// existing tool send must finish or expire before its replacement is claimed.
+// Only the latest event of each progress kind at each destination is eligible.
+// An existing send of that kind must finish or expire before its replacement.
 func (s *Store) ClaimDeliveries(ctx context.Context, limit int) ([]Delivery, error) {
 	if limit < 1 || limit > 100 {
 		return nil, errors.New("registry: invalid delivery claim limit")
@@ -46,21 +46,21 @@ func (s *Store) ClaimDeliveries(ctx context.Context, limit int) ([]Delivery, err
 	}
 	defer tx.Rollback(ctx)
 	if _, err := tx.Exec(ctx, `UPDATE telegram_deliveries AS delivery SET status='cancelled',last_error=NULL
-        WHERE kind='tool_progress_message'
+        WHERE kind IN ('agent_progress_message','tool_progress_message')
           AND (status IN ('pending','failed') OR (status='sending' AND next_attempt_at<=`+sqliteNow+`))
-          AND `+newerToolProgressDeliverySQL); err != nil {
+          AND `+newerProgressDeliverySQL); err != nil {
 		return nil, err
 	}
 	rows, err := tx.Query(ctx, `WITH claimed AS (
  SELECT delivery.delivery_id FROM telegram_deliveries delivery
  WHERE delivery.status IN ('pending','failed','sending') AND delivery.next_attempt_at <= `+sqliteNow+`
-   AND (delivery.kind<>'tool_progress_message' OR (NOT `+newerToolProgressDeliverySQL+` AND NOT EXISTS (
+   AND (delivery.kind NOT IN ('agent_progress_message','tool_progress_message') OR (NOT `+newerProgressDeliverySQL+` AND NOT EXISTS (
      SELECT 1 FROM events progress
      JOIN events active_event ON active_event.runtime_id=progress.runtime_id
        AND active_event.runtime_generation=progress.runtime_generation AND active_event.session_id=progress.session_id
        AND json_extract(active_event.payload, '$.turn_id')=json_extract(progress.payload, '$.turn_id')
      JOIN telegram_deliveries active ON active.event_id=active_event.event_id
-     WHERE progress.event_id=delivery.event_id AND active.kind='tool_progress_message'
+     WHERE progress.event_id=delivery.event_id AND active.kind=delivery.kind
        AND active.delivery_id<>delivery.delivery_id AND active.status='sending' AND active.next_attempt_at>`+sqliteNow+`
        AND active.bot_id=delivery.bot_id AND active.chat_id=delivery.chat_id
        AND active.message_thread_id=delivery.message_thread_id
@@ -182,6 +182,23 @@ func (s *Store) PrepareDeliveryChunks(ctx context.Context, id string, messages [
 // message and its checkpoint survive. The lease attempt fences stale senders,
 // including a sender whose render overlapped a newer delivery claim.
 func (s *Store) ReplaceUnsentSessionDeliveryChunks(ctx context.Context, id string, attempt int, messages []json.RawMessage) ([]DeliveryChunk, error) {
+	return s.replaceUnsentDeliveryChunks(ctx, id, attempt, messages,
+		`kind='ui_response' AND json_extract(payload,'$.view')='sessions' AND COALESCE(json_extract(payload,'$.error_code'),'')=''`)
+}
+
+// ReplaceUnsentProgressDeliveryChunks compacts legacy frozen multipart progress
+// to one replaceable message, preserving already sent chunks and their cleanup
+// checkpoints. An expired or superseded sender cannot rewrite the newer lease.
+func (s *Store) ReplaceUnsentProgressDeliveryChunks(ctx context.Context, id string, attempt int, messages []json.RawMessage) ([]DeliveryChunk, error) {
+	if len(messages) != 1 {
+		return nil, errors.New("registry: progress requires one replacement message")
+	}
+	return s.replaceUnsentDeliveryChunks(ctx, id, attempt, messages,
+		`kind IN ('agent_progress_message','tool_progress_message')`)
+}
+
+// eligible is a fixed SQL predicate supplied only by the typed wrappers above.
+func (s *Store) replaceUnsentDeliveryChunks(ctx context.Context, id string, attempt int, messages []json.RawMessage, eligible string) ([]DeliveryChunk, error) {
 	if len(messages) < 1 || len(messages) > 1000 {
 		return nil, errors.New("registry: invalid delivery chunk count")
 	}
@@ -190,18 +207,16 @@ func (s *Store) ReplaceUnsentSessionDeliveryChunks(ctx context.Context, id strin
 		return nil, err
 	}
 	defer tx.Rollback(ctx)
-	var eligible bool
+	var validLease bool
 	if err = tx.QueryRow(ctx, `SELECT EXISTS (
 		SELECT 1 FROM telegram_deliveries
-		WHERE delivery_id=$1 AND kind='ui_response'
-		  AND json_extract(payload,'$.view')='sessions'
-		  AND COALESCE(json_extract(payload,'$.error_code'),'')=''
+		WHERE delivery_id=$1 AND (`+eligible+`)
 		  AND status='sending' AND attempt_count=$2 AND next_attempt_at>`+sqliteNow+`
 		  AND EXISTS (SELECT 1 FROM telegram_delivery_chunks WHERE delivery_id=$1 AND status='pending')
-	)`, id, attempt).Scan(&eligible); err != nil {
+	)`, id, attempt).Scan(&validLease); err != nil {
 		return nil, err
 	}
-	if !eligible {
+	if !validLease {
 		return nil, ErrDeliveryLeaseChanged
 	}
 	if _, err = tx.Exec(ctx, `DELETE FROM telegram_delivery_chunks WHERE delivery_id=$1 AND status='pending'`, id); err != nil {

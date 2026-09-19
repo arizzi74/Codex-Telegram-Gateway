@@ -75,11 +75,14 @@ func TestTelegramProgressDeletesOnlyAfterAllFinalChunksAndRecoversCleanupIntegra
 	if suppress, err := env.store.SuppressProgressDelivery(ctx, delivery.ID); err != nil || suppress {
 		t.Fatalf("live progress suppressed: %v %v", suppress, err)
 	}
-	sendProgressChunks(t, env.store, delivery, 2)
+	sendProgressChunks(t, env.store, delivery, 1)
+	progressEvent(t, env, 3, "tool_progress_message", "turn-a", "")
+	tool := claimProgress(t, env.store, 1)[0]
+	checkpointProgress(t, env.store, tool, 101)
 	if due, err := env.store.ClaimTelegramDeletions(ctx, 100); err != nil || len(due) != 0 {
 		t.Fatalf("live progress deleted: %v %v", due, err)
 	}
-	progressEvent(t, env, 3, "turn_completed", "turn-a", "")
+	progressEvent(t, env, 4, "turn_completed", "turn-a", "")
 	final := claimProgress(t, env.store, 1)[0]
 	if _, err := env.store.PrepareDeliveryChunks(ctx, final.ID, []json.RawMessage{json.RawMessage(`{"text":"final1"}`), json.RawMessage(`{"text":"final2"}`)}); err != nil {
 		t.Fatal(err)
@@ -92,7 +95,7 @@ func TestTelegramProgressDeletesOnlyAfterAllFinalChunksAndRecoversCleanupIntegra
 	}
 	// A worker restart while the final is only partly delivered must not
 	// bypass its durable checkpoints and remove progress prematurely.
-	progressEvent(t, env, 4, "runtime_stopped", "", "")
+	progressEvent(t, env, 5, "runtime_stopped", "", "")
 	if due, err := env.store.ClaimTelegramDeletions(ctx, 100); err != nil || len(due) != 0 {
 		t.Fatalf("runtime stop bypassed pending final: %v %v", due, err)
 	}

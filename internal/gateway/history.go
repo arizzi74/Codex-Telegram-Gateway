@@ -36,8 +36,8 @@ func (s *Sender) renderDeliveryParts(ctx context.Context, row registry.Delivery)
 	if err != nil || text == "" {
 		return nil, keyboard, err
 	}
-	if row.Kind == "tool_progress_message" {
-		return []string{compactToolProgress(text)}, nil, nil
+	if isProgressDelivery(row.Kind) {
+		return []string{compactProgress(text)}, nil, nil
 	}
 	return SplitText(text, 4000), keyboard, nil
 }

@@ -3,6 +3,7 @@ package registry
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"testing"
 	"time"
 )
@@ -59,6 +60,125 @@ func TestDeliveryFreezesContentAndRecoversOnlyUnsentChunksIntegration(t *testing
 	if err != nil || len(rows) != 0 {
 		t.Fatalf("sent delivery was claimed again: %v %v", rows, err)
 	}
+}
+
+func frozenProgressDelivery(t *testing.T, kind string) (eventTestEnv, Delivery) {
+	t.Helper()
+	env := progressEnv(t)
+	progressEvent(t, env, 2, kind, "turn-a", "")
+	row := claimProgress(t, env.store, 1)[0]
+	if _, err := env.store.PrepareDeliveryChunks(context.Background(), row.ID, []json.RawMessage{
+		json.RawMessage(`{"chat_id":20,"text":"historical first"}`),
+		json.RawMessage(`{"chat_id":20,"text":"historical second"}`),
+		json.RawMessage(`{"chat_id":20,"text":"obsolete unsent tail"}`),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return env, row
+}
+
+func TestProgressDeliveryRepairPreservesAcceptedMessagesIntegration(t *testing.T) {
+	forProgressKinds(t, func(t *testing.T, kind, _ string) {
+		for sentCount := range 3 {
+			t.Run(fmt.Sprintf("%d accepted messages", sentCount), func(t *testing.T) {
+				env, row := frozenProgressDelivery(t, kind)
+				ctx := context.Background()
+				before, err := env.store.DeliveryChunks(ctx, row.ID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				for i := range sentCount {
+					if err := env.store.MarkDeliveryChunkSent(ctx, row.ID, i, int64(99+i), "", "", ""); err != nil {
+						t.Fatal(err)
+					}
+				}
+				replacement := json.RawMessage(`{"chat_id":20,"text":"compact current progress"}`)
+				chunks, err := env.store.ReplaceUnsentProgressDeliveryChunks(ctx, row.ID, row.Attempt, []json.RawMessage{replacement})
+				if err != nil || len(chunks) != sentCount+1 {
+					t.Fatalf("compact replacement: %+v: %v", chunks, err)
+				}
+				for i := range sentCount {
+					if !chunks[i].Sent || chunks[i].Index != i || string(chunks[i].Payload) != string(before[i].Payload) {
+						t.Fatalf("accepted checkpoint %d changed: %+v", i, chunks[i])
+					}
+					var messageID int64
+					if err := env.store.pool.QueryRow(ctx, `SELECT telegram_message_id FROM telegram_delivery_chunks WHERE delivery_id=$1 AND chunk_index=$2`, row.ID, i).Scan(&messageID); err != nil || messageID != int64(99+i) {
+						t.Fatalf("accepted message %d identity changed to %d: %v", i, messageID, err)
+					}
+				}
+				if chunks[sentCount].Sent || chunks[sentCount].Index != sentCount || string(chunks[sentCount].Payload) != string(replacement) {
+					t.Fatalf("unsent tail was not replaced: %+v", chunks)
+				}
+				expectedTarget := int64(0)
+				messageID := int64(101)
+				if sentCount > 0 {
+					expectedTarget = int64(98 + sentCount)
+					messageID = expectedTarget
+				}
+				assertProgressTarget(t, env.store, row, expectedTarget)
+				if err := env.store.MarkDeliveryChunkSent(ctx, row.ID, sentCount, messageID, "", "", ""); err != nil {
+					t.Fatal(err)
+				}
+				var status string
+				if err := env.store.pool.QueryRow(ctx, `SELECT status FROM telegram_deliveries WHERE delivery_id=$1`, row.ID).Scan(&status); err != nil || status != "sent" {
+					t.Fatalf("repaired progress status = %q: %v", status, err)
+				}
+				due, err := env.store.ClaimTelegramDeletions(ctx, 100)
+				if sentCount == 2 {
+					if err != nil || len(due) != 1 || due[0].MessageID != 99 {
+						t.Fatalf("repair must retire the older legacy chunk and retain its replacement: %+v: %v", due, err)
+					}
+				} else if err != nil || len(due) != 0 {
+					t.Fatalf("repair deleted the surviving progress slot: %+v: %v", due, err)
+				}
+				claimProgress(t, env.store, 0)
+			})
+		}
+	})
+}
+
+func TestProgressDeliveryRepairFencesClaimsAndRollsBackFailuresIntegration(t *testing.T) {
+	forProgressKinds(t, func(t *testing.T, kind, _ string) {
+		for _, test := range []struct {
+			name     string
+			update   string
+			attempt  int
+			messages []json.RawMessage
+		}{
+			{name: "stale claim", attempt: 2},
+			{name: "expired lease", update: `next_attempt_at='2000-01-01T00:00:00.000000000Z'`},
+			{name: "unleased delivery", update: `status='failed'`},
+			{name: "other event", update: `kind='final_message'`},
+			{name: "no replacement", messages: []json.RawMessage{}},
+			{name: "multiple replacements", messages: []json.RawMessage{json.RawMessage(`{"text":"first"}`), json.RawMessage(`{"text":"second"}`)}},
+			{name: "failed replacement insert", messages: []json.RawMessage{json.RawMessage(`not JSON`)}},
+		} {
+			t.Run(test.name, func(t *testing.T) {
+				env, row := frozenProgressDelivery(t, kind)
+				ctx := context.Background()
+				if test.update != "" {
+					if _, err := env.store.pool.Exec(ctx, `UPDATE telegram_deliveries SET `+test.update+` WHERE delivery_id=$1`, row.ID); err != nil {
+						t.Fatal(err)
+					}
+				}
+				attempt := row.Attempt
+				if test.attempt != 0 {
+					attempt = test.attempt
+				}
+				messages := test.messages
+				if messages == nil {
+					messages = []json.RawMessage{json.RawMessage(`{"text":"compact progress"}`)}
+				}
+				if _, err := env.store.ReplaceUnsentProgressDeliveryChunks(ctx, row.ID, attempt, messages); err == nil {
+					t.Fatal("unsafe progress repair was accepted")
+				}
+				chunks, err := env.store.DeliveryChunks(ctx, row.ID)
+				if err != nil || len(chunks) != 3 || string(chunks[2].Payload) != `{"chat_id":20,"text":"obsolete unsent tail"}` {
+					t.Fatalf("rejected repair changed original progress: %+v: %v", chunks, err)
+				}
+			})
+		}
+	})
 }
 
 func TestDeliveryClaimRecoversExpiredSendingLeaseIntegration(t *testing.T) {

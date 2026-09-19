@@ -39,6 +39,12 @@ type SenderOptions struct {
 type SessionDeliveryRepairStore interface {
 	ReplaceUnsentSessionDeliveryChunks(context.Context, string, int, []json.RawMessage) ([]registry.DeliveryChunk, error)
 }
+
+// ProgressDeliveryRepairStore upgrades previously frozen multipart progress
+// into one replaceable message without replaying accepted checkpoints.
+type ProgressDeliveryRepairStore interface {
+	ReplaceUnsentProgressDeliveryChunks(context.Context, string, int, []json.RawMessage) ([]registry.DeliveryChunk, error)
+}
 type Sender struct {
 	store   DeliveryStore
 	api     TelegramAPI
@@ -112,18 +118,25 @@ func (s *Sender) sendDelivery(ctx context.Context, row registry.Delivery) error 
 	if err != nil {
 		return err
 	}
-	repair := oversizedSessionDelivery(row, checkpoints)
-	if len(checkpoints) == 0 || repair {
+	repairSession := oversizedSessionDelivery(row, checkpoints)
+	repairProgress := oversizedProgressDelivery(row, checkpoints)
+	if len(checkpoints) == 0 || repairSession || repairProgress {
 		messages, err := s.renderDeliveryMessages(ctx, row)
 		if err != nil {
 			return err
 		}
-		if repair {
+		if repairSession {
 			store, ok := s.store.(SessionDeliveryRepairStore)
 			if !ok {
 				return errors.New("Telegram session delivery needs keyboard repair")
 			}
 			checkpoints, err = store.ReplaceUnsentSessionDeliveryChunks(ctx, row.ID, row.Attempt, messages)
+		} else if repairProgress {
+			store, ok := s.store.(ProgressDeliveryRepairStore)
+			if !ok {
+				return errors.New("Telegram progress delivery needs message repair")
+			}
+			checkpoints, err = store.ReplaceUnsentProgressDeliveryChunks(ctx, row.ID, row.Attempt, messages)
 		} else {
 			checkpoints, err = s.store.PrepareDeliveryChunks(ctx, row.ID, messages)
 		}
@@ -149,8 +162,8 @@ func (s *Sender) sendDelivery(ctx context.Context, row registry.Delivery) error 
 		sendCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 		var id int64
 		var err error
-		if row.Kind == "tool_progress_message" {
-			id, err = s.sendToolProgress(sendCtx, row, message)
+		if isProgressDelivery(row.Kind) {
+			id, err = s.sendProgress(sendCtx, row, message)
 		} else {
 			id, err = s.api.Send(sendCtx, message)
 		}
@@ -195,6 +208,25 @@ func (s *Sender) renderDeliveryMessages(ctx context.Context, row registry.Delive
 		messages = append(messages, raw)
 	}
 	return messages, nil
+}
+
+func oversizedProgressDelivery(row registry.Delivery, chunks []registry.DeliveryChunk) bool {
+	if !isProgressDelivery(row.Kind) {
+		return false
+	}
+	if len(chunks) > 1 {
+		return true
+	}
+	for _, chunk := range chunks {
+		if chunk.Sent {
+			continue
+		}
+		var message SendMessage
+		if json.Unmarshal(chunk.Payload, &message) == nil && telegramTextLength(message.Text) > 4000 {
+			return true
+		}
+	}
+	return false
 }
 
 func oversizedSessionDelivery(row registry.Delivery, chunks []registry.DeliveryChunk) bool {

@@ -24,8 +24,8 @@ type TelegramDeleteAPI interface {
 	DeleteMessage(context.Context, int64, int64) error
 }
 
-type TelegramToolProgressStore interface {
-	TelegramToolProgressTarget(context.Context, string) (int64, error)
+type TelegramReplaceableProgressStore interface {
+	TelegramProgressTarget(context.Context, string) (int64, error)
 }
 
 type TelegramFormattedEditAPI interface {
@@ -44,10 +44,10 @@ func telegramTextLength(text string) int {
 	return length
 }
 
-// A tool call occupies a single replaceable message, including when its input
-// is longer than Telegram's text limit. Truncate after redaction and preserve
+// Each kind of progress occupies its own single replaceable message, including
+// when its text exceeds Telegram's limit. Truncate after redaction and preserve
 // Unicode boundaries rather than sending additional messages.
-func compactToolProgress(text string) string {
+func compactProgress(text string) string {
 	const limit = 4000
 	const suffix = "\n… (truncated)"
 	if telegramTextLength(text) <= limit {
@@ -63,16 +63,16 @@ func compactToolProgress(text string) string {
 	return text
 }
 
-func (s *Sender) sendToolProgress(ctx context.Context, row registry.Delivery, message SendMessage) (int64, error) {
-	store, ok := s.store.(TelegramToolProgressStore)
+func (s *Sender) sendProgress(ctx context.Context, row registry.Delivery, message SendMessage) (int64, error) {
+	store, ok := s.store.(TelegramReplaceableProgressStore)
 	if !ok {
-		return 0, errors.New("Telegram tool progress tracking unavailable")
+		return 0, errors.New("Telegram progress tracking unavailable")
 	}
 	api, ok := s.api.(TelegramFormattedEditAPI)
 	if !ok {
-		return 0, errors.New("Telegram tool progress editing unavailable")
+		return 0, errors.New("Telegram progress editing unavailable")
 	}
-	id, err := store.TelegramToolProgressTarget(ctx, row.ID)
+	id, err := store.TelegramProgressTarget(ctx, row.ID)
 	if err != nil {
 		return 0, err
 	}
