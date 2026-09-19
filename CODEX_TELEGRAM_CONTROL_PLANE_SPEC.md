@@ -371,7 +371,7 @@ worker:
   name: example-macbook
 
 gateway:
-  url: wss://codex.example.com/api/v1/workers/connect
+  url: wss://codex.example.com/tgapi/v1/workers/connect
   token_file: ~/.config/codex-worker/token
 
 runtimes:
@@ -522,10 +522,10 @@ Internet
   v
 Caddy/nginx
   |
-  +--> /api/v1/telegram/webhook
-  +--> /api/v1/workers/connect
-  +--> /healthz
-  +--> /readyz
+  +--> /tgapi/v1/telegram/webhook
+  +--> /tgapi/v1/workers/connect
+  +--> /tghealthz
+  +--> /tgreadyz
         |
         v
 codex-gateway 127.0.0.1:8080
@@ -546,10 +546,10 @@ unless deployed behind a trusted private load balancer.
 Required:
 
 ```text
-POST /api/v1/telegram/webhook
-GET  /api/v1/workers/connect      # HTTP upgrade to WebSocket
-GET  /healthz
-GET  /readyz
+POST /tgapi/v1/telegram/webhook
+GET  /tgapi/v1/workers/connect      # HTTP upgrade to WebSocket
+GET  /tghealthz
+GET  /tgreadyz
 ```
 
 Optional administrative endpoint:
@@ -888,7 +888,7 @@ Use one long-lived authenticated WSS connection per Worker.
 Endpoint:
 
 ```text
-wss://codex.example.com/api/v1/workers/connect
+wss://codex.example.com/tgapi/v1/workers/connect
 ```
 
 The custom protocol is application-defined JSON messages.
@@ -2389,7 +2389,7 @@ worker:
   state_file: ~/.local/share/codex-worker/state.db
 
 gateway:
-  url: wss://codex.example.com/api/v1/workers/connect
+  url: wss://codex.example.com/tgapi/v1/workers/connect
   token_file: ~/.config/codex-worker/token
 
 security:
@@ -2443,13 +2443,13 @@ No public administration API is required.
 
 # 30. Health and Readiness
 
-## Gateway `/healthz`
+## Gateway `/tghealthz`
 
 Returns 200 if process is alive.
 
 No DB requirement.
 
-## Gateway `/readyz`
+## Gateway `/tgreadyz`
 
 Returns 200 only if:
 
@@ -2561,10 +2561,10 @@ codex.example.com {
 Gateway itself handles:
 
 ```text
-/api/v1/telegram/webhook
-/api/v1/workers/connect
-/healthz
-/readyz
+/tgapi/v1/telegram/webhook
+/tgapi/v1/workers/connect
+/tghealthz
+/tgreadyz
 ```
 
 Caddy automatically supports WebSocket upgrade forwarding.

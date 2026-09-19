@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -51,6 +52,8 @@ func TestControlPlaneWorkerOutboxSurvivesGatewayRestartIntegration(t *testing.T)
 		t.Fatal(err)
 	}
 	defer local.Close()
+	// Existing worker configurations must migrate to the prefixed endpoint on
+	// every connection, including reconnects after a gateway restart.
 	cfg := config.WorkerConfig{WorkerID: workerID.String(), Name: "pipeline", GatewayURL: "wss://pipeline.invalid/api/v1/workers/connect", TokenFile: tokenFile, StateFile: filepath.Join(root, "state", "worker.db"), AllowedWorkspaceRoots: []string{root}, Runtimes: []config.RuntimeProfile{{ID: "main", Name: "Main", CodexBinary: "/bin/true", WorkingDirectory: root, Autostart: true, RestartPolicy: "on-failure"}}}
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	agent, err := NewAgent(cfg, local, log)
@@ -331,7 +334,7 @@ func TestControlPlaneWorkerOutboxSurvivesGatewayRestartIntegration(t *testing.T)
 	// readiness probe must not stop this already-running local runtime.
 	bad := readinessFail{Store: store}
 	r := httptest.NewRecorder()
-	gateway.NewMux(bad, gw.hub).ServeHTTP(r, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+	gateway.NewMux(bad, gw.hub).ServeHTTP(r, httptest.NewRequest(http.MethodGet, "/tgreadyz", nil))
 	if r.Code != http.StatusServiceUnavailable || len(agent.manager.Snapshot()) != 1 {
 		t.Fatalf("readiness/runtime isolation = %d runtimes=%d", r.Code, len(agent.manager.Snapshot()))
 	}
@@ -351,7 +354,7 @@ func startControlGateway(t *testing.T, store *registry.Store, telegram gateway.T
 	hub.EventHandler = store.IngestEvent
 	hub.AckHandler = store.AcknowledgeCommand
 	mux := gateway.NewMux(store, hub)
-	mux.Handle("/api/v1/telegram/webhook", gateway.NewWebhook(store, config.GatewayConfig{AllowedUserIDs: []int64{7}, AllowedChatIDs: []int64{9}, CommandExpiry: time.Hour, Secrets: config.BotSecrets{BotName: "bot"}}, "secret", telegram, log))
+	mux.Handle("/tgapi/v1/telegram/webhook", gateway.NewWebhook(store, config.GatewayConfig{AllowedUserIDs: []int64{7}, AllowedChatIDs: []int64{9}, CommandExpiry: time.Hour, Secrets: config.BotSecrets{BotName: "bot"}}, "secret", telegram, log))
 	server := httptest.NewUnstartedServer(mux)
 	server.StartTLS()
 	run := &gatewayRun{hub: hub, server: server, cancel: cancel}
@@ -412,7 +415,11 @@ func dialTestServer(slot *gatewaySlot) func(config.WorkerConfig, *Store, *slog.L
 		if e != nil {
 			return nil, e
 		}
-		c.dial = func(ctx context.Context, _ string, options *websocket.DialOptions) (*websocket.Conn, *http.Response, error) {
+		c.dial = func(ctx context.Context, endpoint string, options *websocket.DialOptions) (*websocket.Conn, *http.Response, error) {
+			parsed, err := url.Parse(endpoint)
+			if err != nil {
+				return nil, nil, err
+			}
 			current, available := slot.current()
 			if !available || current == nil || current.server == nil {
 				return nil, nil, errors.New("test gateway is stopped")
@@ -420,7 +427,7 @@ func dialTestServer(slot *gatewaySlot) func(config.WorkerConfig, *Store, *slog.L
 			client := current.server.Client()
 			copy := *options
 			copy.HTTPClient = client
-			conn, response, err := websocket.Dial(ctx, "wss"+strings.TrimPrefix(current.server.URL, "https")+"/api/v1/workers/connect", &copy)
+			conn, response, err := websocket.Dial(ctx, "wss"+strings.TrimPrefix(current.server.URL, "https")+parsed.EscapedPath(), &copy)
 			if err == nil {
 				slot.remember(conn)
 			}
@@ -699,7 +706,7 @@ func postTelegram(t *testing.T, c *http.Client, base, secret string, id int64, t
 		message["reply_to_message"] = map[string]any{"message_id": reply, "chat": map[string]any{"id": 9}}
 	}
 	body, _ := json.Marshal(map[string]any{"update_id": id, "message": message})
-	req, err := http.NewRequest(http.MethodPost, base+"/api/v1/telegram/webhook", strings.NewReader(string(body)))
+	req, err := http.NewRequest(http.MethodPost, base+"/tgapi/v1/telegram/webhook", strings.NewReader(string(body)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -719,7 +726,7 @@ func postCallback(t *testing.T, c *http.Client, base, secret string, id int64, d
 	if err != nil {
 		t.Fatal(err)
 	}
-	req, err := http.NewRequest(http.MethodPost, base+"/api/v1/telegram/webhook", strings.NewReader(string(body)))
+	req, err := http.NewRequest(http.MethodPost, base+"/tgapi/v1/telegram/webhook", strings.NewReader(string(body)))
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -13,12 +13,12 @@ type Readiness interface {
 
 func NewMux(store Readiness, hub *Hub) *http.ServeMux {
 	mux := http.NewServeMux()
-	mux.Handle("GET /api/v1/workers/connect", hub)
-	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
+	mux.Handle("GET /tgapi/v1/workers/connect", hub)
+	mux.HandleFunc("GET /tghealthz", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain")
 		w.Write([]byte("ok\n"))
 	})
-	mux.HandleFunc("GET /readyz", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("GET /tgreadyz", func(w http.ResponseWriter, r *http.Request) {
 		ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
 		defer cancel()
 		if err := store.Ping(ctx); err != nil {

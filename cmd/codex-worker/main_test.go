@@ -51,6 +51,9 @@ func TestExportWorkerConfigNormalizesRelativePaths(t *testing.T) {
 	if cfg.StateFile != filepath.Join(configDir, "state", "worker.db") || cfg.TokenFile != token {
 		t.Fatalf("normalized files = state %q token %q", cfg.StateFile, cfg.TokenFile)
 	}
+	if cfg.GatewayURL != "wss://gateway.example.test/tgapi/v1/workers/connect" {
+		t.Fatalf("legacy gateway URL was not migrated: %q", cfg.GatewayURL)
+	}
 	if len(cfg.AllowedWorkspaceRoots) != 1 || cfg.AllowedWorkspaceRoots[0] != workspace {
 		t.Fatalf("normalized roots = %#v", cfg.AllowedWorkspaceRoots)
 	}

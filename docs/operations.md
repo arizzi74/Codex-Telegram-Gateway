@@ -105,7 +105,7 @@ recent committed data can still be in its `-wal` sidecar.
 For restore, stop the gateway, preserve the current database and both sidecars,
 and restore the verified backup with mode `0600` and gateway ownership. Remove
 only the old destination's `-wal` and `-shm` files while every connection is
-closed, then start the gateway and verify `/readyz` and worker reconnection.
+closed, then start the gateway and verify `/tgreadyz` and worker reconnection.
 Workers keep their local Codex processes and durable outboxes running.
 
 ## Switching from PostgreSQL
@@ -140,7 +140,7 @@ Replace `database_url_env` in the gateway configuration with:
 ```
 
 Remove the old database URL from the service environment, install the new binary
-and systemd template, reload systemd, and start the gateway. Check `/readyz`, worker
+and systemd template, reload systemd, and start the gateway. Check `/tgreadyz`, worker
 reconnection, event acknowledgements, and the existing admin login and session
 bindings. There is no need to enroll workers or register passkeys again.
 
@@ -189,7 +189,7 @@ Create a first-admin token only from the gateway host:
 codex-gateway --config /etc/codex-gateway/gateway.json admin bootstrap
 ```
 
-It expires in 15 minutes and is shown once. Open `/admin/` over HTTPS, enroll a
+It expires in 15 minutes and is shown once. Open `/tgadmin/` over HTTPS, enroll a
 resident user-verified personal passkey, and add a second passkey before
 revoking the first. The browser console can create workers, rotate their token,
 and revoke them. Copy a returned worker token directly to the worker’s private

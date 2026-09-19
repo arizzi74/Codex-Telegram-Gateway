@@ -33,6 +33,9 @@ private secrets, SQLite database, and service. Existing installations are adopte
 without restarting. Configure HTTPS separately, then follow the
 [gateway setup steps](docs/installation.md#finish-gateway-setup).
 
+Gateway URLs use `/tgadmin/` for the console, `/tgapi/v1/` for APIs,
+and `/tghealthz` and `/tgreadyz` for health checks.
+
 Both commands enable daily automatic updates from
 [GitHub Releases](https://github.com/arizzi74/Codex-Telegram-Gateway/releases).
 The worker also checks for stable Codex runtime updates once per day (UTC).
@@ -132,8 +135,8 @@ and access to its SQLite database:
 codex-gateway --config /path/to/gateway.json admin bootstrap
 ```
 
-Open `/admin/` on your gateway's public HTTPS URL, such as
-`https://gateway.example.com/admin/`, and enter the one-time token under **First
+Open `/tgadmin/` on your gateway's public HTTPS URL, such as
+`https://gateway.example.com/tgadmin/`, and enter the one-time token under **First
 administrator?**. Register your passkey, sign in, and add a spare passkey.
 The token expires in 15 minutes. The console manages worker enrollment,
 credential rotation, and revocation. It lists user sessions with prompt counts,

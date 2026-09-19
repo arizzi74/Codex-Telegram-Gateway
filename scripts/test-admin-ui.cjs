@@ -22,7 +22,7 @@ const data = {
   workers: [{ ID: 'worker-1', Name: 'Linux worker ' + malicious, OS: 'linux', Arch: 'amd64', Connectivity: 'connected', Version: '1.2.3', Enabled: true }],
   runtimes: [{ runtime_id: 'runtime-1' }],
   sessions: [...sessions, { session_id: 'hidden', name: 'Archived subagent', state: 'idle', archived: true }], pending_approvals: 1, queued_commands: 0,
-  bot: { username: 'example_bot', display_name: 'Example bot ' + malicious, id: 12345, status: 'connected', webhook_status: 'active', webhook_url: 'https://gateway.example.com/telegram', pending_updates: 0, allowed_user_count: 1, allowed_chat_count: 0, checked_at: time },
+  bot: { username: 'example_bot', display_name: 'Example bot ' + malicious, id: 12345, status: 'connected', webhook_status: 'active', webhook_url: 'https://gateway.example.com/tgapi/v1/telegram/webhook', pending_updates: 0, allowed_user_count: 1, allowed_chat_count: 0, checked_at: time },
 };
 
 (async () => {
@@ -33,10 +33,12 @@ const data = {
   let dashboardStatus = 200;
   let dashboardReads = 0;
   const mutations = [];
+  const paths = [];
   await page.route('http://admin.test/**', async route => {
     const request = route.request();
     const url = new URL(request.url());
-    if (url.pathname.startsWith('/api/')) {
+    paths.push(url.pathname);
+    if (url.pathname.startsWith('/tgapi/')) {
       let body = {};
       let status = 200;
       if (url.pathname.endsWith('/dashboard')) { body = data; status = dashboardStatus; dashboardReads++; }
@@ -51,7 +53,7 @@ const data = {
   });
   try {
     if (page.clock) await page.clock.install();
-    await page.goto('http://admin.test/admin');
+    await page.goto('http://admin.test/tgadmin');
     await page.waitForSelector('#console:not([hidden])');
     assert.equal(await page.locator('#sessions').textContent(), '12');
     assert.equal(await page.locator('.session-card').count(), 10);
@@ -123,6 +125,7 @@ const data = {
     await page.waitForSelector('#auth:not([hidden])');
     assert.equal(await page.locator('#console').getAttribute('hidden'), '');
     assert.equal(await page.locator('.session-card').count(), 0, 'Session expiry removes session data');
+    assert.ok(paths.every(path => path === '/tgadmin' || path.startsWith('/tgadmin/') || path.startsWith('/tgapi/')), 'Every gateway request must use a tg-prefixed route');
     assert.deepEqual(errors, []);
     console.log('Admin browser checks passed: mobile/desktop layout, full names, stats, filters, pagination, safe rendering, refresh/error recovery, enrollment flows, session expiry.');
   } finally { await browser.close(); }

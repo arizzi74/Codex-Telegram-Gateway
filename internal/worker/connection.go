@@ -51,6 +51,7 @@ func (c *Connection) Connected() bool { return c.connected.Load() }
 // NewConnection constructs an outbound-only worker transport. onCommand must
 // durably receive the command before it returns an accepted acknowledgement.
 func NewConnection(cfg config.WorkerConfig, store *Store, logger *slog.Logger, snapshot func() []protocol.Runtime, onCommand func(context.Context, protocol.Command) (protocol.CommandAck, error)) (*Connection, error) {
+	cfg.GatewayURL = config.NormalizeGatewayURL(cfg.GatewayURL)
 	if store == nil {
 		return nil, errors.New("worker connection: store is required")
 	}

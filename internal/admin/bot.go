@@ -44,7 +44,7 @@ type botMonitor struct {
 
 func newBotMonitor(cfg Config) *botMonitor {
 	return &botMonitor{api: cfg.BotAPI, username: strings.TrimPrefix(cfg.BotUsername, "@"),
-		expectedWebhook: strings.TrimRight(cfg.Origin, "/") + "/api/v1/telegram/webhook",
+		expectedWebhook: strings.TrimRight(cfg.Origin, "/") + "/tgapi/v1/telegram/webhook",
 		allowedUsers:    cfg.AllowedUserCount, allowedChats: cfg.AllowedChatCount, redactor: cfg.Redactor}
 }
 

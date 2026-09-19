@@ -171,16 +171,16 @@ func setupGatewayURL(value string) (string, error) {
 		u, err = config.ParseHTTPSOrigin(value)
 		if err == nil {
 			u.Scheme = "wss"
-			u.Path = "/api/v1/workers/connect"
+			u.Path = config.WorkerConnectPath
 			return u.String(), nil
 		}
 	}
 	if err == nil && u.Scheme == "wss" && u.User == nil && u.RawQuery == "" && !u.ForceQuery && !strings.Contains(value, "#") {
 		if _, err := config.ParseHTTPSOrigin((&url.URL{Scheme: "https", Host: u.Host}).String()); err == nil {
 			if u.Path == "" || u.Path == "/" {
-				u.Path = "/api/v1/workers/connect"
+				u.Path = config.WorkerConnectPath
 			}
-			return u.String(), nil
+			return config.NormalizeGatewayURL(u.String()), nil
 		}
 	}
 	return "", errors.New("gateway address must be an HTTPS origin or WSS URL without credentials, query, or fragment")

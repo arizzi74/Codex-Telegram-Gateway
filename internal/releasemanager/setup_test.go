@@ -66,7 +66,7 @@ func preparedWorkerConfig(t *testing.T, cwd string) string {
 	cfg := config.WorkerConfig{
 		WorkerID: "00000000-0000-4000-8000-000000000001", Name: "test-worker",
 		StateFile: "state/worker.db", TokenFile: token,
-		GatewayURL:            "wss://gateway.example.com/api/v1/workers/connect",
+		GatewayURL:            "wss://gateway.example.com/tgapi/v1/workers/connect",
 		AllowedWorkspaceRoots: []string{cwd},
 		Runtimes:              []config.RuntimeProfile{{ID: "primary", CodexBinary: "codex", WorkingDirectory: cwd, Autostart: true}},
 	}
@@ -157,7 +157,7 @@ func TestSetupWorkerGuidedConfigIsPrivateValidatedAndTemporary(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				if cfg.GatewayURL != "wss://gateway.example.com:8443/api/v1/workers/connect" || cfg.Name != `Worker "one"` || cfg.StateFile != filepath.Join(l.Home, ".local/state/codex-worker/worker.db") {
+				if cfg.GatewayURL != "wss://gateway.example.com:8443/tgapi/v1/workers/connect" || cfg.Name != `Worker "one"` || cfg.StateFile != filepath.Join(l.Home, ".local/state/codex-worker/worker.db") {
 					t.Fatalf("bad generated worker config: %+v", cfg)
 				}
 				canonicalWorkspace, _ := filepath.EvalSymlinks(cwd)
@@ -278,9 +278,13 @@ func TestSetupWorkerRejectsInvalidBootstrapRelease(t *testing.T) {
 
 func TestSetupGatewayURL(t *testing.T) {
 	for _, test := range []struct{ input, want string }{
-		{"https://gateway.example.com", "wss://gateway.example.com/api/v1/workers/connect"},
-		{"https://[::1]:8443/", "wss://[::1]:8443/api/v1/workers/connect"},
-		{"wss://gateway.example.com", "wss://gateway.example.com/api/v1/workers/connect"},
+		{"https://gateway.example.com", "wss://gateway.example.com/tgapi/v1/workers/connect"},
+		{"https://[::1]:8443/", "wss://[::1]:8443/tgapi/v1/workers/connect"},
+		{"wss://gateway.example.com", "wss://gateway.example.com/tgapi/v1/workers/connect"},
+		{"wss://gateway.example.com/", "wss://gateway.example.com/tgapi/v1/workers/connect"},
+		{"wss://gateway.example.com/api/v1/workers/connect", "wss://gateway.example.com/tgapi/v1/workers/connect"},
+		{"wss://gateway.example.com:8443/api/v1/workers/connect/", "wss://gateway.example.com:8443/tgapi/v1/workers/connect"},
+		{"wss://gateway.example.com/tgapi/v1/workers/connect", "wss://gateway.example.com/tgapi/v1/workers/connect"},
 		{"wss://gateway.example.com/custom/connect", "wss://gateway.example.com/custom/connect"},
 		{"http://gateway.example.com", ""},
 		{"https://gateway.example.com/path", ""},

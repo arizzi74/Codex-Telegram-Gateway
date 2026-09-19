@@ -35,7 +35,7 @@ connection environment is required by CI.
   453 source rows across 20 tables passed content, count, foreign-key, and
   integrity verification. The database and sidecars are private; WAL is enabled.
   The old PostgreSQL database, binary, and configuration were retained privately.
-- Post-deployment HTTPS `/healthz`, `/readyz`, and `/admin/` return 200; the
+- Post-deployment HTTPS liveness, readiness, and administrator pages returned 200; the
   unauthenticated admin-session endpoint returns 401. The worker reconnected
   with all events acknowledged and unchanged worker/runtime PIDs and generation.
   All 13 sessions, the Telegram binding, and the existing admin credential are
@@ -104,7 +104,7 @@ of the verification turn remains gated on delivery of that turn's final answer.
 | AT-16 Queue serialization | Verified | `internal/worker:TestAgentSessionFIFOAndIndependentSessions` verifies three same-session turns run FIFO and only release after completion. | None. |
 | AT-17 Cross-session concurrency | Verified | The same agent test starts independent sessions concurrently while retaining the same-session one-active-turn limit. | None. |
 | AT-18 Runtime crash | Verified | `internal/worker:TestRuntimeClientCrashStartsNextGeneration` closes the fixture transport and checks a new generation. The control-plane integration test repeats the crash through a connected worker and verifies its three persisted session identities recover. | Live 2026-09-13: worker survived owned Codex SIGTERM, generation 2→3, new PID, stable session identities and fully acknowledged outbox. |
-| AT-19 Gateway database restart | Verified (live) | 2026-09-13: the PostgreSQL cluster was stopped. HTTPS `/healthz` remained 200 and `/readyz` became 503; the running worker and Codex PIDs remained alive and unchanged. After the cluster restart, `/readyz` returned 200. The control-plane test separately covers readiness/runtime isolation with an injected failed `Ping`. | Repeat after material deployment topology changes. |
+| AT-19 Gateway database restart | Verified (live) | 2026-09-13: the PostgreSQL cluster was stopped. HTTPS liveness remained 200 and readiness became 503; the running worker and Codex PIDs remained alive and unchanged. After the cluster restart, readiness returned 200. The control-plane test separately covers readiness/runtime isolation with an injected failed `Ping`. | Repeat after material deployment topology changes. |
 | AT-20 Worker cross-platform build | Verified (local CI job) | 2026-09-13: `scripts/ci.sh` completed with PostgreSQL: format check, `go vet ./...`, `go test -race ./...`, all ten CGO-free cross-build archives, and inner/outer SHA-256 verification. It builds `codex-worker` for Linux/Darwin × amd64/arm64. `.github/workflows/ci.yml` invokes this exact job. | See the latest hosted workflow for current CI results. |
 
 ## Hard invariants and security review
@@ -136,12 +136,12 @@ of the verification turn remains gated on delivery of that turn's final answer.
   is the hosted workflow job; no hosted trigger was run because no remote is
   configured.
 - [x] Gateway host: dedicated `codexgateway` service account, loopback listener,
-  HTTPS `/healthz` and `/readyz` 200, admin HTML 200/API 401 without authentication,
+  HTTPS liveness and readiness 200, admin HTML 200/API 401 without authentication,
   nginx configuration check and reload. Full passkey registration/login and
   rejection flows pass HTTP tests with a synthetic authenticator. First personal
   passkey enrollment is an operator setup step; no personal credential was fabricated.
-- [x] 2026-09-13 PostgreSQL outage/recovery drill for AT-19: `/healthz` 200,
-  `/readyz` 503 then 200, worker and Codex PIDs unchanged.
+- [x] 2026-09-13 PostgreSQL outage/recovery drill for AT-19: liveness 200,
+  readiness 503 then 200, worker and Codex PIDs unchanged.
 - [x] Automated WSS-loss/reconnect drill for AT-10, including Registry
   `unreachable` state and post-reconnect session reconciliation.
 - [x] Live worker runtime SIGTERM drill for AT-18: worker stayed alive,

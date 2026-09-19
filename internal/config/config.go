@@ -31,6 +31,7 @@ const (
 	DefaultUnreachableAfter  = 30 * time.Second
 	DefaultCommandExpiry     = time.Hour
 	DefaultReadHeaderTimeout = 5 * time.Second
+	WorkerConnectPath        = "/tgapi/v1/workers/connect"
 )
 
 // GatewayConfig is the JSON configuration for codex-gateway.
@@ -155,6 +156,7 @@ func LoadWorker(path string) (WorkerConfig, error) {
 	if err != nil || u.Scheme != "wss" || u.Hostname() == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
 		return WorkerConfig{}, errors.New("worker config: gateway_url must be wss without embedded credentials, query, or fragment")
 	}
+	cfg.GatewayURL = NormalizeGatewayURL(cfg.GatewayURL)
 	base, err := filepath.Abs(filepath.Dir(path))
 	if err != nil {
 		return WorkerConfig{}, err

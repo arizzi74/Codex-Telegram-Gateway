@@ -120,7 +120,7 @@ func run(args []string, logger *slog.Logger) error {
 		if err != nil {
 			return err
 		}
-		fmt.Printf("Open %s/admin/ and register a passkey with this one-time token (expires in 15 minutes):\n%s\n", cfg.PublicBaseURL, token)
+		fmt.Printf("Open %s/tgadmin/ and register a passkey with this one-time token (expires in 15 minutes):\n%s\n", cfg.PublicBaseURL, token)
 		return nil
 	case "webhook":
 		if len(args) != 2 {
@@ -148,7 +148,7 @@ func run(args []string, logger *slog.Logger) error {
 		if !strings.EqualFold(identity.Username, strings.TrimPrefix(cfg.Secrets.BotName, "@")) {
 			return errors.New("Telegram token belongs to a different bot than BOTNAME")
 		}
-		if err := api.SetWebhook(ctx, cfg.PublicBaseURL+"/api/v1/telegram/webhook", secret); err != nil {
+		if err := api.SetWebhook(ctx, cfg.PublicBaseURL+"/tgapi/v1/telegram/webhook", secret); err != nil {
 			return err
 		}
 		fmt.Println("Telegram webhook configured.")
@@ -166,7 +166,7 @@ func run(args []string, logger *slog.Logger) error {
 		hub.AckHandler = store.AcknowledgeCommand
 		mux := gateway.NewMux(store, hub)
 		api := gateway.NewTelegramClient(cfg.Secrets.BotToken)
-		mux.Handle("/api/v1/telegram/webhook", gateway.NewWebhook(store, cfg, secret, api, logger))
+		mux.Handle("/tgapi/v1/telegram/webhook", gateway.NewWebhook(store, cfg, secret, api, logger))
 		redactor, err := auth.NewRedactor([]string{regexp.QuoteMeta(cfg.Secrets.BotToken), regexp.QuoteMeta(secret), `cwk_[a-f0-9]+`, `sk-[A-Za-z0-9_-]{16,}`}, "[REDACTED]")
 		if err != nil {
 			return err
@@ -177,8 +177,8 @@ func run(args []string, logger *slog.Logger) error {
 		if err != nil {
 			return err
 		}
-		mux.Handle("/admin/", console)
-		mux.Handle("/api/v1/admin/", console)
+		mux.Handle("/tgadmin/", console)
+		mux.Handle("/tgapi/v1/admin/", console)
 		sender := gateway.NewSender(store, api, logger, gateway.SenderOptions{BotID: cfg.Secrets.BotName, OwnerID: cfg.Secrets.WLID, Redactor: redactor})
 		dispatcher := gateway.NewDispatcher(store, hub, logger)
 		server := &http.Server{Addr: cfg.Listen, Handler: mux, ReadHeaderTimeout: cfg.ReadHeaderTimeout, ReadTimeout: 15 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 16 << 10}

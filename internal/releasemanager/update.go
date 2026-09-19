@@ -349,7 +349,7 @@ func (m *Manager) GatewayReady(ctx context.Context, l *Layout) error {
 	if host == "" || host == "0.0.0.0" || host == "::" {
 		host = "127.0.0.1"
 	}
-	address := "http://" + net.JoinHostPort(host, port) + "/readyz"
+	address := "http://" + net.JoinHostPort(host, port) + "/tgreadyz"
 	ctx, cancel := m.readyContext(ctx)
 	defer cancel()
 	client := &http.Client{Timeout: 2 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}

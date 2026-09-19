@@ -84,7 +84,13 @@ sudo sh /tmp/codex-telegramgw-install.sh install gateway \
 ### Finish gateway setup
 
 Configure your public HTTPS reverse proxy to reach the selected local port
-(`127.0.0.1:8080` by default), including WebSocket upgrades. Then run these
+(`127.0.0.1:8080` by default), including WebSocket upgrades. The
+[nginx template](../deploy/nginx/telegramgw.conf) routes `/tgadmin/`,
+`/tgapi/`, `/tghealthz`, and `/tgreadyz`. Preserve these paths when forwarding:
+workers connect at `/tgapi/v1/workers/connect` and Telegram delivers updates
+to `/tgapi/v1/telegram/webhook`.
+
+Then run these
 commands on the gateway host to register the Telegram webhook and command menu
 and create the first administrator's one-time token:
 
@@ -104,7 +110,7 @@ gateway admin bootstrap
 
 This runs gateway administration as its service account and loads the private
 environment through systemd. The one-time token is printed to your terminal.
-Open the printed `/admin/` address, register a passkey within 15 minutes, and
+Open the printed `/tgadmin/` address, register a passkey within 15 minutes, and
 enroll a worker to obtain its ID and token.
 
 ## Install a worker
@@ -205,6 +211,39 @@ Applying an update preserves configuration, credentials, and database locations.
 Gateway updates back up SQLite before migrations and verify readiness after
 startup. Workers continue running while the gateway restarts and replay their
 durable outboxes when it returns.
+
+### Upgrade to the `tg` URL routes
+
+The gateway serves the console at `/tgadmin/`, API endpoints under `/tgapi/v1/`,
+and health checks at `/tghealthz` and `/tgreadyz`. Previous unprefixed routes
+return 404. Update proxy rules and external health checks together with the
+gateway; preserve WebSocket support for `/tgapi/v1/workers/connect`.
+
+Plan this first route change across the gateway and its workers. Finish active
+turns, then stop each worker from a separate terminal before changing the
+gateway. On Linux, use `systemctl --user stop codex-worker.service` as the
+worker's owning user. This also stops its app servers, so do not run it from
+a turn hosted by that worker.
+
+Use the bootstrap to run the new manager for this gateway update. Older managers
+continue checking the previous readiness URL even after installing a new binary:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/arizzi74/Codex-Telegram-Gateway/main/scripts/install.sh | sudo sh -s -- update gateway
+```
+
+Reload the matching proxy configuration, then run `gateway webhook set` using
+the helper from [Finish gateway setup](#finish-gateway-setup) so Telegram sends
+updates to the new URL. Update each stopped worker as its owning user with
+`codex-telegramgw update worker`; the updater starts it again. New workers
+automatically normalize the previous standard WebSocket URL when loading their
+configuration. Custom endpoints are preserved. Keep the public HTTPS origin
+unchanged; existing worker credentials, saved sessions, and passkeys remain valid.
+
+Verify `/tgreadyz`, worker reconnection, and bot webhook status in `/tgadmin/`
+before resuming turns.
+
+### Updating running workers
 
 Worker updates require cooperation from the running worker. It must have no
 active or waiting turns, queued work, unanswered native CLI requests or approvals,

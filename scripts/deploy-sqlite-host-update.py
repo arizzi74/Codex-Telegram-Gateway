@@ -210,7 +210,7 @@ def main():
         run(['systemctl', 'start', 'codex-gateway.service'])
         for _ in range(30):
             try:
-                with urllib.request.urlopen('http://' + cfg['listen'] + '/readyz', timeout=2) as response:
+                with urllib.request.urlopen('http://' + cfg['listen'] + '/tgreadyz', timeout=2) as response:
                     ready = response.status == 200
                 status = worker_status(after=start_time)
                 if ready and status['gateway_connected'] and status['event_ack'] == status['event_high']:

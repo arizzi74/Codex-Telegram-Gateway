@@ -1,6 +1,6 @@
 'use strict';
 
-const api = '/api/v1/admin';
+const api = '/tgapi/v1/admin';
 const $ = id => document.getElementById(id);
 const pageSize = 10;
 let csrf = cookie('__Host-telegramgw-csrf');

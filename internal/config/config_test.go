@@ -124,7 +124,7 @@ func TestGatewayPublicOriginAllowsConfiguredDomainsAndPreservesPort(t *testing.T
 	}
 	for _, origin := range []string{
 		"http://gateway.example.com", "https://:8443", "https://user:password@gateway.example.com",
-		"https://gateway.example.com/admin", "https://gateway.example.com?", "https://gateway.example.com#",
+		"https://gateway.example.com/tgadmin", "https://gateway.example.com?", "https://gateway.example.com#",
 		"https://gateway.example.com:", "https://gateway.example.com:0", "https://gateway.example.com:65536",
 	} {
 		if _, err := (gatewayJSON{PublicBaseURL: origin, DatabasePath: "gateway.db", WebhookSecretEnv: "WH"}).config(); err == nil {
