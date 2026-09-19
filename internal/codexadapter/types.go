@@ -87,10 +87,11 @@ func newEvent(method string, params json.RawMessage) Event {
 			Status string `json:"status"`
 		} `json:"turn"`
 		Item struct {
-			Status string `json:"status"`
-			Text   string `json:"text"`
-			Type   string `json:"type"`
-			Phase  string `json:"phase"`
+			Status  string          `json:"status"`
+			Text    string          `json:"text"`
+			Type    string          `json:"type"`
+			Phase   string          `json:"phase"`
+			Content json.RawMessage `json:"content"`
 		} `json:"item"`
 		RequestID json.RawMessage `json:"requestId"`
 	}
@@ -110,6 +111,12 @@ func newEvent(method string, params json.RawMessage) Event {
 			// Only this user-visible item's text is projected. Top-level payload
 			// additions must not override it with unrelated internal content.
 			event.Text = value.Item.Text
+		}
+		if method == "item/completed" && value.Item.Type == "userMessage" {
+			if text, err := historyUserText(value.Item.Content); err == nil {
+				event.Kind = "user_message_completed"
+				event.Text = text
+			}
 		}
 		if method == "turn/completed" {
 			switch event.State {

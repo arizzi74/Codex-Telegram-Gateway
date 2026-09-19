@@ -111,7 +111,7 @@ func (s *Sender) flush(ctx context.Context) error {
 }
 
 func (s *Sender) sendDelivery(ctx context.Context, row registry.Delivery) error {
-	if skip, err := s.skipProgress(ctx, row); err != nil || skip {
+	if skip, err := s.skipInvisibleDelivery(ctx, row); err != nil || skip {
 		return err
 	}
 	checkpoints, err := s.store.DeliveryChunks(ctx, row.ID)
@@ -149,19 +149,20 @@ func (s *Sender) sendDelivery(ctx context.Context, row registry.Delivery) error 
 		if chunk.Sent {
 			continue
 		}
-		if skip, err := s.skipProgress(ctx, row); err != nil || skip {
-			return err
-		}
 		if err := s.store.ExtendDelivery(ctx, row.ID); err != nil {
 			return err
 		}
-		var message SendMessage
-		if err := json.Unmarshal(chunk.Payload, &message); err != nil {
+		message, err := s.deliveryMessageForSend(ctx, row, chunk.Payload)
+		if err != nil {
+			return err
+		}
+		// Selection can change while rendering, retrying, or sending a previous
+		// chunk. Check immediately before every Telegram request, including finals.
+		if skip, err := s.skipInvisibleDelivery(ctx, row); err != nil || skip {
 			return err
 		}
 		sendCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 		var id int64
-		var err error
 		if isProgressDelivery(row.Kind) {
 			id, err = s.sendProgress(sendCtx, row, message)
 		} else {
@@ -169,6 +170,9 @@ func (s *Sender) sendDelivery(ctx context.Context, row registry.Delivery) error 
 		}
 		cancel()
 		if err != nil {
+			if errors.Is(err, errSessionDeliverySuppressed) {
+				return nil
+			}
 			return err
 		}
 		if id <= 0 {
@@ -191,6 +195,14 @@ func (s *Sender) renderDeliveryMessages(ctx context.Context, row registry.Delive
 	if len(parts) == 0 {
 		return nil, errors.New("empty Telegram delivery")
 	}
+	presentation, err := s.deliveryPresentation(renderCtx, row)
+	if err != nil {
+		return nil, err
+	}
+	parts, err = sessionDeliveryParts(parts, presentation, isProgressDelivery(row.Kind))
+	if err != nil {
+		return nil, err
+	}
 	messages := make([]json.RawMessage, 0, len(parts))
 	for index, part := range parts {
 		message := SendMessage{ChatID: row.ChatID, TopicID: row.TopicID, Text: part, DisableNotification: isProgressDelivery(row.Kind)}
@@ -201,7 +213,13 @@ func (s *Sender) renderDeliveryMessages(ctx context.Context, row registry.Delive
 		if index == len(parts)-1 {
 			message.Keyboard = keyboard
 		}
-		raw, err := json.Marshal(message)
+		checkpoint := sessionDeliveryMessage{SendMessage: message}
+		if presentation.Name != "" {
+			checkpoint.SessionName, checkpoint.SessionMarker = presentation.Name, presentation.Marker
+			checkpoint.SessionBody = part
+			checkpoint.SendMessage = formatSessionDeliveryMessage(checkpoint, presentation.MultiSession, row.Kind)
+		}
+		raw, err := json.Marshal(checkpoint)
 		if err != nil {
 			return nil, err
 		}

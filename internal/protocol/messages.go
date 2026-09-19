@@ -42,19 +42,20 @@ type Session struct {
 }
 
 type Hello struct {
-	WorkerID                  string    `json:"worker_id"`
-	WorkerName                string    `json:"worker_name"`
-	Hostname                  string    `json:"hostname"`
-	OS                        string    `json:"os"`
-	Arch                      string    `json:"arch"`
-	WorkerVersion             string    `json:"worker_version"`
-	SupportsImageInput        bool      `json:"supports_image_input,omitempty"`
-	SupportsSessionWorkspaces bool      `json:"supports_session_workspaces,omitempty"`
-	SupportsSessionDeletion   bool      `json:"supports_session_deletion,omitempty"`
-	ProtocolMin               int       `json:"protocol_min"`
-	ProtocolMax               int       `json:"protocol_max"`
-	LastAckedEventSeq         uint64    `json:"last_acked_event_seq"`
-	Runtimes                  []Runtime `json:"runtimes"`
+	WorkerID                    string    `json:"worker_id"`
+	WorkerName                  string    `json:"worker_name"`
+	Hostname                    string    `json:"hostname"`
+	OS                          string    `json:"os"`
+	Arch                        string    `json:"arch"`
+	WorkerVersion               string    `json:"worker_version"`
+	SupportsImageInput          bool      `json:"supports_image_input,omitempty"`
+	SupportsSessionWorkspaces   bool      `json:"supports_session_workspaces,omitempty"`
+	SupportsSessionDeletion     bool      `json:"supports_session_deletion,omitempty"`
+	SupportsConversationHistory bool      `json:"supports_conversation_history,omitempty"`
+	ProtocolMin                 int       `json:"protocol_min"`
+	ProtocolMax                 int       `json:"protocol_max"`
+	LastAckedEventSeq           uint64    `json:"last_acked_event_seq"`
+	Runtimes                    []Runtime `json:"runtimes"`
 }
 
 type HelloAck struct {
@@ -64,12 +65,13 @@ type HelloAck struct {
 }
 
 type Heartbeat struct {
-	WorkerID                  string    `json:"worker_id"`
-	SupportsImageInput        bool      `json:"supports_image_input,omitempty"`
-	SupportsSessionWorkspaces bool      `json:"supports_session_workspaces,omitempty"`
-	SupportsSessionDeletion   bool      `json:"supports_session_deletion,omitempty"`
-	UptimeSeconds             int64     `json:"uptime_seconds"`
-	Runtimes                  []Runtime `json:"runtimes"`
+	WorkerID                    string    `json:"worker_id"`
+	SupportsImageInput          bool      `json:"supports_image_input,omitempty"`
+	SupportsSessionWorkspaces   bool      `json:"supports_session_workspaces,omitempty"`
+	SupportsSessionDeletion     bool      `json:"supports_session_deletion,omitempty"`
+	SupportsConversationHistory bool      `json:"supports_conversation_history,omitempty"`
+	UptimeSeconds               int64     `json:"uptime_seconds"`
+	Runtimes                    []Runtime `json:"runtimes"`
 }
 
 type Operation string
@@ -243,6 +245,7 @@ type Result struct {
 }
 
 const DefaultHistoryLimit = 10
+const DefaultLastMessagesLimit = 1
 const MaxHistoryLimit = 50
 
 // HistoryCursor identifies an item within its turn. History reads never submit
@@ -253,8 +256,9 @@ type HistoryCursor struct {
 }
 
 type HistoryRequest struct {
-	Limit  int            `json:"limit"`
-	Before *HistoryCursor `json:"before,omitempty"`
+	Limit    int            `json:"limit"`
+	Before   *HistoryCursor `json:"before,omitempty"`
+	Messages bool           `json:"messages,omitempty"`
 }
 
 func (h *HistoryRequest) Validate() error {
@@ -275,9 +279,21 @@ type HistoryPrompt struct {
 }
 
 type HistoryPage struct {
-	Prompts []HistoryPrompt `json:"prompts"`
-	Next    *HistoryCursor  `json:"next,omitempty"`
-	Limit   int             `json:"limit"`
+	Prompts      []HistoryPrompt  `json:"prompts"`
+	Messages     []HistoryMessage `json:"messages,omitempty"`
+	Conversation bool             `json:"conversation,omitempty"`
+	Next         *HistoryCursor   `json:"next,omitempty"`
+	Limit        int              `json:"limit"`
+}
+
+// HistoryMessage is user-visible conversation text. Reasoning and tool items
+// are never part of this projection. Role is either user or assistant.
+type HistoryMessage struct {
+	TurnID    string `json:"turn_id"`
+	ItemID    string `json:"item_id"`
+	Role      string `json:"role"`
+	Text      string `json:"text"`
+	Truncated bool   `json:"truncated,omitempty"`
 }
 
 type Approval struct {

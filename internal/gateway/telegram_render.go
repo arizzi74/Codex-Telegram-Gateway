@@ -91,6 +91,8 @@ func (s *Sender) renderUIResponse(ctx context.Context, row registry.Delivery) (s
 		return helpText(), nil, nil
 	case "codex_help":
 		return codexHelpText(), nil, nil
+	case "multisession":
+		return s.renderMultiSession(ctx, row, response)
 	case "instances":
 		inventory, err := s.inventory(ctx)
 		if err != nil {
@@ -474,12 +476,21 @@ func (s *Sender) renderEvent(ctx context.Context, row registry.Delivery) (string
 		identity = workerLabel(inv.workerByID[runtime.WorkerID]) + " / " + runtimeLabel(runtime)
 	}
 	switch event.Kind {
+	case "user_message":
+		var result protocol.Result
+		if err := json.Unmarshal(event.Data, &result); err != nil {
+			return "", nil, fmt.Errorf("render user prompt: %w", err)
+		}
+		if strings.TrimSpace(result.Text) == "" {
+			return "", nil, errors.New("render user prompt: missing message")
+		}
+		return "👤 You · Codex\n\n" + result.Text, nil, nil
 	case "approval_requested":
 		var approval protocol.Approval
 		if err := json.Unmarshal(event.Data, &approval); err != nil {
 			return "", nil, fmt.Errorf("render approval request: %w", err)
 		}
-		return s.renderApproval(ctx, row, identity, event, approval)
+		return s.renderApproval(ctx, row, identity+"\nSession: "+s.sessionListLabel(session), event, approval)
 	case "user_input_requested":
 		var approval protocol.Approval
 		if err := json.Unmarshal(event.Data, &approval); err != nil {
@@ -564,7 +575,7 @@ func (s *Sender) renderEvent(ctx context.Context, row registry.Delivery) (string
 		if err != nil {
 			return "", nil, err
 		}
-		return "✅ New session ready · " + humanIdentity(createdWorker, createdRuntime, created) + "\n\nWorkspace: " + displayValue(created.CWD) + "\nStatus: " + titleCase(created.State) + "\n\nReply to this message to use this session, or select it with /tgconnect " + created.ID, nil, nil
+		return "✅ New session ready · " + humanIdentity(createdWorker, createdRuntime, created) + "\n\nWorkspace: " + displayValue(created.CWD) + "\nStatus: " + titleCase(created.State) + "\n\nReply to this message to use this session, or select it with /tgsessions.", nil, nil
 	case "command_result_unknown":
 		return "⚠️ " + identity + "\n\nThe command outcome is unknown. Use /tgstatus before retrying.", nil, nil
 	default:
@@ -622,7 +633,7 @@ func (s *Sender) renderQuestion(ctx context.Context, row registry.Delivery, iden
 	if heading == "" {
 		heading = "Input requested"
 	}
-	text := "❓ " + heading + " · " + identity + "\n\n" + question.Prompt
+	text := "❓ " + s.sessionListLabel(session) + "\n" + heading + " · " + identity + "\n\n" + question.Prompt
 	if len(approval.Questions) > 1 {
 		for i, candidate := range approval.Questions {
 			if candidate.ID == question.ID {
@@ -647,7 +658,7 @@ func (s *Sender) renderQuestion(ctx context.Context, row registry.Delivery, iden
 		return "", nil, fmt.Errorf("render input reply callback: %w", err)
 	}
 	keyboard.Rows = append(keyboard.Rows, []TelegramButton{{Text: "Reply with text", Data: token}})
-	text += "\n\nReply to this message with your answer, or tap Reply with text for a fresh prompt."
+	text += "\n\nReply to this message with your answer, or tap Reply with text for a fresh prompt. Your answer goes to this session and keeps your current session selected."
 	return text, keyboard, nil
 }
 
@@ -748,7 +759,7 @@ func findQuestion(questions []protocol.Question, id string) (protocol.Question, 
 }
 
 func helpText() string {
-	return "Gateway commands:\n/tgstart — getting started\n/tghelp — show this guide\n/tginstances — list workers and runtimes\n/tgsessions — list sessions\n/tgconnect <session> — select a session\n/tgstatus — show gateway session and queue state\n/tghistory [count] — show saved Codex prompts\n/tgdisconnect — clear the selection\n/tgnew — name a session and choose its folder\n/tgdeletesession — delete a session and keep its folder\n/tgsteer <text> — guide the active turn\n/tginterrupt — stop the active turn\n/tginput <approval-id> <question-id> <answer> — answer a request (or reply to its message)\n\nCodex commands use their usual names: /status, /model, /compact, /review and more. Use /help for the full list or the bot menu."
+	return "Gateway commands:\n/tgstart — getting started\n/tghelp — show this guide\n/tginstances — list workers and runtimes\n/tgsessions — list, select, or create sessions\n/tgstatus — show gateway session and queue state\n/tghistory [count] — show saved Codex prompts\n/tglastmessages [count] — show the last user and Codex messages (default 1)\n/tgmultisession [on|off] — toggle messages from all sessions\n/tgdisconnect — clear the selection\n/tgdeletesession — delete a session and keep its folder\n/tgsteer <text> — guide the active turn\n/tginterrupt — stop the active turn\n/tginput <approval-id> <question-id> <answer> — answer a request (or reply to its message)\n\nIn multisession mode, use /_<session_alias> <message> to send to a session without changing your selection, or /_<session_alias> to select it. Session commands appear in the bot menu.\n\nCodex commands use their usual names: /status, /model, /compact, /review and more. Use /help for the full list or the bot menu."
 }
 
 func codexHelpText() string {
@@ -780,6 +791,14 @@ func telegramErrorText(code string) string {
 		return "Use /tginput <approval-id> <question-id> <answer>, or reply to the input request message."
 	case "history_usage":
 		return "Use /tghistory to show the latest 10 saved Codex prompts, or /tghistory <count> with a count from 1 to 50."
+	case "last_messages_usage":
+		return "Use /tglastmessages to show the last message, or /tglastmessages <count> with a count from 1 to 50. Both user and Codex messages are included."
+	case "multisession_usage":
+		return "Use /tgmultisession to toggle multisession mode, or /tgmultisession on or off."
+	case "session_alias_unavailable":
+		return "This session command is unavailable. Use /tgsessions to choose a session, or /tgmultisession on to refresh the session commands."
+	case "session_answer_ambiguous":
+		return "This session has multiple questions waiting. Reply to the specific question or use its buttons."
 	case "command_outcome_unknown":
 		return "Codex did not confirm the outcome. Check /tgsessions and the working directory before trying again."
 	case "session_name_invalid":
@@ -789,13 +808,13 @@ func telegramErrorText(code string) string {
 	case "session_action_expired":
 		return "The worker did not confirm this session action before it timed out. You can send prompts again. The request may still complete; check /tgsessions before trying it again."
 	case "wizard_expired":
-		return "This session action expired. Start again with /tgnew or /tgdeletesession."
+		return "This session action expired. Start again with /tgsessions or /tgdeletesession."
 	case "session_busy":
 		return "This session or one of its child sessions has an active turn or pending work. Wait for it to finish or interrupt it before deleting the session."
 	case "invalid_workspace":
 		return "The folder is unavailable, outside the allowed workspaces, or the new folder already exists. Choose another parent folder or session name."
 	case "internal_error":
-		return "The worker could not complete this session action. Ensure the worker is up to date, then start again with /tgnew or /tgdeletesession."
+		return "The worker could not complete this session action. Ensure the worker is up to date, then start again with /tgsessions or /tgdeletesession."
 	case "unsupported_operation":
 		return "The worker needs an update to support this session action. Update it and start again."
 	case "callback_invalid":

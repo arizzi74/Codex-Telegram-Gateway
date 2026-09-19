@@ -11,12 +11,12 @@ menu names, so `/debug_config` is the menu spelling of `/debug-config`; both wor
 | --- | --- |
 | `/tgstart`, `/tghelp` | Show gateway help. |
 | `/tginstances` | List workers and their runtimes. |
-| `/tgsessions [runtime]` | Browse sessions, 10 per page, with selection and Previous/Next buttons. |
-| `/tgconnect NAME_OR_ID` | Select a session without starting a turn. |
+| `/tgsessions [runtime]` | Browse sessions, select one, or create a session with **New session**. |
 | `/tgstatus [session]` | Show gateway connectivity, queued commands and approvals. |
 | `/tghistory [count]` | Show saved Codex prompts for the selected session; defaults to 10, maximum 50 per page. |
+| `/tglastmessages [count]` | Show the last saved user or Codex message; request 1–50 messages from both sides. |
+| `/tgmultisession [on\|off]` | Toggle messages from all sessions, or explicitly enable/disable them. |
 | `/tgdisconnect` | Clear the selection. |
-| `/tgnew [runtime]` | Name a session, browse parent folders, and create its working directory. |
 | `/tgdeletesession [runtime]` | Choose a Codex session to delete while keeping its working directory and files. |
 | `/tgsteer TEXT` | Guide the exact active turn. |
 | `/tginterrupt` | Interrupt the exact active turn. |
@@ -39,7 +39,7 @@ show a different count because it has its own source and directory filters.
 
 ## Create and delete sessions
 
-Use `/tgnew`, choose a runtime when prompted, and send the session name. The
+Use `/tgsessions`, choose **New session** and a runtime when prompted, then send the session name. The
 folder browser starts at the worker user's `~/CODEX` if it exists, otherwise at
 that user's home directory. Existing restricted workspace settings still apply.
 Use numbered **Open** buttons to enter a subfolder, **Parent folder** to move up,
@@ -130,7 +130,7 @@ and [app-server protocol](https://learn.chatgpt.com/docs/app-server).
 Selecting a saved chat does not transfer ownership from another Codex app.
 If its writer lock is held elsewhere, the next turn reports `session_busy`
 with recovery instructions. Close that other client before retrying, use
-`/fork` to branch the saved conversation, or `/tgnew` to begin fresh.
+`/fork` to branch the saved conversation, or **New session** in `/tgsessions` to begin fresh.
 The gateway never silently redirects a failed command to a different chat.
 
 ## Images
@@ -159,7 +159,16 @@ worker produces an update-required reply instead of receiving only the caption.
 Images sent to earlier gateway versions were ignored before command storage;
 resend them after the upgrade.
 
-## Saved prompt history
+## Recent messages and saved prompt history
+
+Use `/tglastmessages` to display the selected session's last saved message, or
+`/tglastmessages 10` for the last ten. The count includes both user messages and
+final Codex responses, including user input sent through Telegram or the CLI.
+Messages are labelled by role and shown oldest first within the page. Request
+1–50 messages and use **Older messages** to continue back through the conversation.
+Commentary, reasoning and tool calls are not included. Reading messages does not
+start a turn or resume the session. An unavailable history or an older worker
+produces an explanatory error.
 
 Use `/tghistory` after selecting a session to display prompts previously entered
 in Codex. Each prompt appears as a separate bot message labelled **You · Codex**.
@@ -194,23 +203,62 @@ See the [Codex history API](https://learn.chatgpt.com/docs/app-server#read-a-sto
 ## Menu and typing indicator
 
 The gateway refreshes the bot command menu at startup, including after automatic
-updates. Publish or inspect it manually when needed:
+updates, and retries automatically if Telegram is temporarily unavailable.
+Publish or inspect it manually when needed:
 
 ```sh
 sudo /usr/local/sbin/codex-gateway-admin menu set
 sudo /usr/local/sbin/codex-gateway-admin menu status
 ```
 
-Typing is transient and refreshed every four seconds while accepted work waits
-for Codex. It is reconstructed from durable command/turn state after a gateway
-restart. It stops on completion, failure, expiry, disconnection, or a pending
-approval/input request. Telegram can retain the last indicator briefly after
+Typing is transient and refreshed every four seconds while work is pending or
+running in the selected session, including turns started from the CLI. In
+multisession mode, it follows all visible sessions. State is reconstructed after
+a gateway restart. Refresh stops on completion, failure, expiry, a pending input
+request, or a switch to an idle session. Disconnecting stops it in single-session
+mode. Telegram can retain the last indicator for up to five seconds after
 refreshing stops. API failures do not fail the underlying command.
 
-Replies retain their originating session even if selection changes. A delayed
-new/fork completion cannot replace a later selection or undo a disconnect.
-Command output is delivered to the requesting chat; session lifecycle events
-retain the gateway's normal subscriptions.
+## Session focus and multisession mode
+
+By default, turn progress and completion messages follow the selected session.
+Switching from A to B removes A's temporary messages and restores the latest
+commentary and tool message for B if its turn is running. A subsequent completion
+from A stays hidden. Final answers already displayed remain in the chat; use
+`/tglastmessages` to read a session's saved responses later.
+
+Questions and approvals are an exception: they arrive even when another session
+is selected or the chat is disconnected. Each names its originating session.
+Use its buttons or reply directly to its message; the answer is routed to the
+exact request without changing the selected session. A reply to a question also
+works while a new-session wizard is open. A delayed new/fork result cannot replace
+a later selection or undo a disconnect. Explicit command responses, such as a
+requested history page, return to their requesting chat.
+
+`/tgmultisession` toggles multisession mode; `/tgmultisession on` and
+`/tgmultisession off` set it explicitly. The setting is stored per user, chat and
+topic and survives a restart. When enabled, user sessions can all send progress,
+responses and live CLI user prompts. Accepted Telegram prompts are not echoed.
+Each message starts with the full session name and a stable colored square.
+Telegram offers no custom message background colors, so the square supplies the
+color cue. Extremely long imported names are shortened in message headers to
+leave room for the message; the session picker keeps the complete name. Internal
+helper sessions remain hidden. See [Telegram formatting](https://core.telegram.org/bots/api#formatting-options).
+
+The mode response lists session shortcuts such as `/_my_project`. Use a shortcut
+alone to select that session, or `/_my_project message` to send there without
+changing the selection. If it has exactly one unanswered Codex question, the text
+answers that question; with several questions, reply to the specific question
+message. Ordinary text still goes to the selected session.
+
+Shortcuts use lowercase ASCII letters, digits and underscores, have unique
+suffixes when necessary, and remain stable across renames. They appear in the
+Telegram menu while multisession mode is enabled, refreshed within five seconds.
+Telegram permits 100 commands in a menu, so a large installation may have more
+shortcuts in the mode response than fit in the menu. All listed shortcuts work.
+Menus are scoped to a private chat or a group member; Telegram cannot vary a menu
+by forum topic, so the menu includes shortcuts when any of that member's topics
+has multisession mode enabled. Message routing still uses the current topic.
 
 ## Temporary progress messages
 
@@ -232,7 +280,8 @@ progress messages. Progress received after a turn has ended is skipped.
 
 Message IDs and deletion retries are stored in SQLite, so gateway restarts
 and temporary Telegram errors do not lose cleanup work or resend the final
-answer. Cleanup follows the original chat/topic and turn even if you change
-the selected session. Telegram's Bot API permits deletion of these outgoing
+answer. Cleanup follows the original chat/topic and turn. Switching sessions in
+single-session mode also removes the previous session's progress without waiting
+for its turn to end. Telegram's Bot API permits deletion of these outgoing
 messages within 48 hours of sending; a longer outage or turn can exceed that
 limit. See [Telegram deleteMessage](https://core.telegram.org/bots/api#deletemessage).

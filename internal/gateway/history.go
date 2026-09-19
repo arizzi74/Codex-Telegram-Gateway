@@ -43,6 +43,9 @@ func (s *Sender) renderDeliveryParts(ctx context.Context, row registry.Delivery)
 }
 
 func (s *Sender) renderHistory(ctx context.Context, row registry.Delivery, event protocol.Event, page *protocol.HistoryPage, commandID string) ([]string, *TelegramKeyboard, error) {
+	if page != nil && page.Conversation {
+		return s.renderLastMessages(ctx, row, event, page, commandID)
+	}
 	if page == nil || page.Limit < 1 || page.Limit > protocol.MaxHistoryLimit || len(page.Prompts) > page.Limit {
 		return nil, nil, errors.New("render history: invalid page")
 	}
@@ -71,35 +74,43 @@ func (s *Sender) renderHistory(ctx context.Context, row registry.Delivery, event
 	if page.Next == nil {
 		return parts, nil, nil
 	}
-	request := &protocol.HistoryRequest{Limit: page.Limit, Before: page.Next}
+	keyboard, err := s.historyOlderKeyboard(ctx, row, event, session.ID, runtime.ID, commandID, &protocol.HistoryRequest{Limit: page.Limit, Before: page.Next})
+	return parts, keyboard, err
+}
+
+func (s *Sender) historyOlderKeyboard(ctx context.Context, row registry.Delivery, event protocol.Event, session, runtime, commandID string, request *protocol.HistoryRequest) (*TelegramKeyboard, error) {
 	if err := request.Validate(); err != nil {
-		return nil, nil, errors.New("render history: invalid older cursor")
+		return nil, errors.New("render history: invalid older cursor")
 	}
-	sessionID, err := requiredUUID("session", session.ID)
+	sessionID, err := requiredUUID("session", session)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
-	runtimeID, err := requiredUUID("runtime", runtime.ID)
+	runtimeID, err := requiredUUID("runtime", runtime)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	store, ok := s.store.(interface {
 		HistoryRequester(context.Context, uuid.UUID) (int64, error)
 	})
 	if !ok {
-		return nil, nil, errors.New("render history: requester lookup unavailable")
+		return nil, errors.New("render history: requester lookup unavailable")
 	}
 	id, err := requiredUUID("command", commandID)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	requester, err := store.HistoryRequester(ctx, id)
 	if err != nil || requester == 0 {
-		return nil, nil, errors.New("render history: requester unavailable")
+		return nil, errors.New("render history: requester unavailable")
 	}
 	token, err := s.callback(ctx, row, registry.Callback{Action: "history", UserID: requester, SessionID: sessionID, RuntimeID: runtimeID, Generation: int64(event.RuntimeGeneration), History: request})
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
-	return parts, &TelegramKeyboard{Rows: [][]TelegramButton{{{Text: "Older prompts", Data: token}}}}, nil
+	label := "Older prompts"
+	if request.Messages {
+		label = "Older messages"
+	}
+	return &TelegramKeyboard{Rows: [][]TelegramButton{{{Text: label, Data: token}}}}, nil
 }

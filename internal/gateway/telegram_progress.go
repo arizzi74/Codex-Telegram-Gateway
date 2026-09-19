@@ -48,7 +48,10 @@ func telegramTextLength(text string) int {
 // when its text exceeds Telegram's limit. Truncate after redaction and preserve
 // Unicode boundaries rather than sending additional messages.
 func compactProgress(text string) string {
-	const limit = 4000
+	return compactProgressLimit(text, 4000)
+}
+
+func compactProgressLimit(text string, limit int) string {
 	const suffix = "\n… (truncated)"
 	if telegramTextLength(text) <= limit {
 		return text
@@ -76,6 +79,11 @@ func (s *Sender) sendProgress(ctx context.Context, row registry.Delivery, messag
 	if err != nil {
 		return 0, err
 	}
+	if skip, err := s.skipInvisibleDelivery(ctx, row); err != nil {
+		return 0, err
+	} else if skip {
+		return 0, errSessionDeliverySuppressed
+	}
 	if id == 0 {
 		return s.api.Send(ctx, message)
 	}
@@ -91,6 +99,11 @@ func (s *Sender) sendProgress(ctx context.Context, row registry.Delivery, messag
 		// The user may delete the temporary message while the turn runs.
 		// Only a definite missing-message error permits a fresh send.
 		if description == "bad request: message to edit not found" {
+			if skip, err := s.skipInvisibleDelivery(ctx, row); err != nil {
+				return 0, err
+			} else if skip {
+				return 0, errSessionDeliverySuppressed
+			}
 			return s.api.Send(ctx, message)
 		}
 	}

@@ -587,7 +587,13 @@ func applyHistoryEvent(ctx context.Context, tx *dbTx, workerID uuid.UUID, event 
 }
 
 func validHistoryPage(page *protocol.HistoryPage, request *protocol.HistoryRequest) bool {
-	if page == nil || request.Validate() != nil || page.Limit != request.Limit || len(page.Prompts) > page.Limit {
+	if page == nil || request.Validate() != nil || page.Limit != request.Limit || page.Conversation != request.Messages {
+		return false
+	}
+	if page.Conversation {
+		return validLastMessagesPage(page, request)
+	}
+	if len(page.Messages) != 0 || len(page.Prompts) > page.Limit {
 		return false
 	}
 	seen := make(map[protocol.HistoryCursor]struct{}, len(page.Prompts))
@@ -657,7 +663,7 @@ func sessionTransition(kind string, result protocol.Result) (state, activeTurn, 
 
 func notificationRequired(kind string) bool {
 	switch kind {
-	case "agent_progress_message", "tool_progress_message", "turn_completed", "turn_interrupted", "approval_requested", "user_input_requested", "turn_failed", "runtime_failed", "runtime_degraded", "command_failed", "command_result_unknown":
+	case "user_message", "agent_progress_message", "tool_progress_message", "turn_completed", "turn_interrupted", "approval_requested", "user_input_requested", "turn_failed", "runtime_failed", "runtime_degraded", "command_failed", "command_result_unknown":
 		return true
 	default:
 		return false
@@ -767,25 +773,27 @@ func enqueueEventDeliveries(ctx context.Context, tx *dbTx, eventID uuid.UUID, ev
 	}
 	rows, err := tx.Query(ctx, `WITH targets AS (
         SELECT bot_id, chat_id, message_thread_id FROM telegram_bindings
-        WHERE session_id = $1 AND $3 <> 'command_completed'
-		  AND NOT EXISTS (SELECT 1 FROM commands WHERE command_id=$4 AND operation='read_history')
+        WHERE session_id = $1 AND $3 NOT IN ('command_completed','user_message')
+          AND NOT EXISTS (SELECT 1 FROM commands WHERE command_id=$4 AND operation='read_history')
+        UNION
+        SELECT mode.bot_id,mode.chat_id,mode.message_thread_id FROM telegram_chat_modes mode
+        WHERE $1 IS NOT NULL AND (mode.multi_session=1 OR $3 IN ('approval_requested','user_input_requested'))
+          AND EXISTS(SELECT 1 FROM sessions session WHERE session.session_id=$1 AND session.archived=FALSE)
+          AND $3 <> 'command_completed'
+          AND NOT EXISTS(SELECT 1 FROM commands WHERE command_id=$4 AND operation='read_history')
         UNION
         SELECT binding.bot_id, binding.chat_id, binding.message_thread_id
         FROM telegram_bindings AS binding
         JOIN sessions AS session ON session.session_id = binding.session_id
         WHERE session.runtime_id = $2 AND $3 IN ('runtime_failed','runtime_degraded')
         UNION
-        SELECT telegram_bot_id, telegram_chat_id, COALESCE(telegram_message_thread_id, 0)
-        FROM commands WHERE command_id = $4 AND telegram_bot_id IS NOT NULL AND telegram_chat_id IS NOT NULL
-        UNION
-        SELECT delivery.bot_id, delivery.chat_id, delivery.message_thread_id
-        FROM telegram_deliveries delivery JOIN events progress ON progress.event_id=delivery.event_id
-        WHERE delivery.kind IN ('agent_progress_message','tool_progress_message') AND progress.runtime_id=$2
-          AND progress.runtime_generation=$5
-          AND (($3 IN ('turn_completed','turn_failed','turn_interrupted') AND progress.session_id=$1
-                AND json_extract(progress.payload, '$.turn_id')=$6)
-               OR $3='runtime_failed')
-    ) SELECT bot_id, chat_id, message_thread_id FROM targets`, sessionID, runtimeID, event.Kind, commandID, int64(event.RuntimeGeneration), eventTurnID(event))
+        SELECT command.telegram_bot_id, command.telegram_chat_id, COALESCE(command.telegram_message_thread_id, 0)
+        FROM commands command WHERE command.command_id = $4 AND command.telegram_bot_id IS NOT NULL AND command.telegram_chat_id IS NOT NULL
+          AND ($1 IS NULL OR ($3 IN ('command_completed','command_failed') AND command.operation NOT IN ('start_turn','steer','interrupt'))
+               OR $3 IN ('approval_requested','user_input_requested') OR `+sessionVisibleSQL("command.telegram_bot_id", "command.telegram_chat_id", "COALESCE(command.telegram_message_thread_id,0)", "$1")+`)
+    ) SELECT bot_id, chat_id, message_thread_id FROM targets
+      WHERE $1 IS NULL OR EXISTS(SELECT 1 FROM sessions session WHERE session.session_id=$1 AND session.archived=FALSE)
+        OR ($3 IN ('command_completed','command_failed') AND EXISTS(SELECT 1 FROM commands command WHERE command.command_id=$4 AND command.operation NOT IN ('start_turn','steer','interrupt')))`, sessionID, runtimeID, event.Kind, commandID)
 	if err != nil {
 		return fmt.Errorf("registry: find notification targets: %w", err)
 	}

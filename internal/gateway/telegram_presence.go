@@ -21,6 +21,10 @@ type TelegramPresenceStore interface {
 	ListTelegramTypingTargets(context.Context, int) ([]registry.TelegramTypingTarget, error)
 }
 
+type telegramPresenceVisibilityStore interface {
+	IsTelegramTypingTargetActive(context.Context, registry.TelegramTypingTarget) (bool, error)
+}
+
 type TelegramChatActionAPI interface {
 	SendChatAction(context.Context, ChatAction) error
 }
@@ -97,6 +101,14 @@ func (p *Presence) flush(ctx context.Context, now time.Time) error {
 			defer func() { <-semaphore }()
 			requestCtx, cancel := context.WithTimeout(ctx, typingRequestTimeout)
 			defer cancel()
+			// A chat may switch to an idle session while another typing request
+			// occupies the semaphore. Recheck the selection at the send boundary.
+			if store, ok := p.store.(telegramPresenceVisibilityStore); ok {
+				active, err := store.IsTelegramTypingTargetActive(requestCtx, target)
+				if err != nil || !active {
+					return
+				}
+			}
 			if err := p.api.SendChatAction(requestCtx, ChatAction{ChatID: target.ChatID, TopicID: target.TopicID, Action: "typing"}); err != nil && ctx.Err() == nil {
 				p.log.Debug("Telegram typing indicator unavailable", "chat_id", target.ChatID, "topic_id", target.TopicID, "error", err)
 			}

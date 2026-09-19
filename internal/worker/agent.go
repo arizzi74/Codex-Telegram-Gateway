@@ -424,7 +424,7 @@ func (a *Agent) executionError(c protocol.Command, err error) error {
 		if rpc != nil {
 			if threadWriterConflict(rpc.Message) {
 				code = protocol.SessionBusy
-				message = "This thread is open in another Codex client. Close that client and retry, use /fork to create a branch, or use /tgnew to start fresh."
+				message = "This thread is open in another Codex client. Close that client and retry, use /fork to create a branch, or choose New session in /tgsessions to start fresh."
 				retryable = true
 			} else if code == protocol.CodexProtocolError {
 				message = codexRPCMessage(a.redactor, rpc)
@@ -514,6 +514,8 @@ type sessionActor struct {
 	legacyFinalText                 string
 	hasFinalAnswer                  bool
 	toolItems                       map[string]struct{}
+	userItems                       map[string]struct{}
+	userPrompts                     []codexadapter.UserPrompt
 }
 
 func (s *sessionActor) runtimeEvents() chan actorEvent     { return s.eventQueue }
@@ -867,6 +869,8 @@ func (s *sessionActor) resetMessages() {
 	s.legacyFinalText = ""
 	s.hasFinalAnswer = false
 	s.toolItems = nil
+	s.userItems = nil
+	s.userPrompts = nil
 }
 
 func (s *sessionActor) event(event codexadapter.Event) {
@@ -907,6 +911,8 @@ func (s *sessionActor) event(event codexadapter.Event) {
 		} else {
 			s.agent.report(s.agent.emit(s.runtime, s.session.ID, "turn_started", result))
 		}
+	case "user_message_completed":
+		s.observeUserMessage(event)
 	case "tool_call_started":
 		if event.TurnID == "" || event.TurnID != s.session.ActiveTurnID || event.ItemID == "" {
 			return

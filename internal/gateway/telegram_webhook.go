@@ -171,7 +171,7 @@ func parseTelegramText(text, botName string) (action, target, prompt string, ign
 		return "help", "", "", false
 	case "tginstances":
 		return "instances", "", "", false
-	case "tgsessions", "tgconnect", "tgstatus", "tgnew":
+	case "tgsessions", "tgstatus":
 		return strings.TrimPrefix(name, "tg"), tail, "", false
 	case "tgdeletesession":
 		return "delete_session", tail, "", false
@@ -179,12 +179,19 @@ func parseTelegramText(text, botName string) (action, target, prompt string, ign
 		return "disconnect", "", "", false
 	case "tghistory":
 		return "history", "", tail, false
+	case "tglastmessages":
+		return "last_messages", "", tail, false
+	case "tgmultisession":
+		return "multisession", "", tail, false
 	case "tgsteer":
 		return "steer", "", tail, false
 	case "tginterrupt":
 		return "interrupt", "", "", false
 	case "tginput":
 		return "input_command", "", tail, false
+	}
+	if strings.HasPrefix(name, "_") {
+		return "session_alias", name, tail, false
 	}
 	if canonical, ok := telegramcommands.Canonical(name); ok {
 		return "codex", canonical, tail, false

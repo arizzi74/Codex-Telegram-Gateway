@@ -211,7 +211,10 @@ func bindCommandSession(ctx context.Context, tx *dbTx, commandID, sessionID uuid
 		*botID, *userID, *chatID, topic, sessionID); err != nil {
 		return fmt.Errorf("registry: bind returned session: %w", err)
 	}
-	return bumpSelectionRevision(ctx, tx, in)
+	if err := bumpSelectionRevision(ctx, tx, in); err != nil {
+		return err
+	}
+	return reconcileTelegramSelection(ctx, tx, in)
 }
 
 // SessionSnapshot returns the normalized session registry state for worker

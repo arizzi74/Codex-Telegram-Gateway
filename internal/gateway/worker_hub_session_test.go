@@ -19,8 +19,8 @@ import (
 
 func TestHubSessionCapabilitiesRejectOldWorkersWithoutDisconnecting(t *testing.T) {
 	for _, tc := range []struct {
-		name, version        string
-		workspaces, deletion bool
+		name, version                      string
+		workspaces, deletion, conversation bool
 	}{
 		{name: "legacy", version: "0.5.17"},
 		{name: "released without flags", version: "0.5.19", workspaces: true, deletion: true},
@@ -28,6 +28,8 @@ func TestHubSessionCapabilitiesRejectOldWorkersWithoutDisconnecting(t *testing.T
 		{name: "new worker", version: "dev", workspaces: true, deletion: true},
 		{name: "workspace only", version: "dev", workspaces: true},
 		{name: "deletion only", version: "dev", deletion: true},
+		{name: "conversation only", version: "dev", conversation: true},
+		{name: "all capabilities", version: "dev", workspaces: true, deletion: true, conversation: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
@@ -60,12 +62,13 @@ func TestHubSessionCapabilitiesRejectOldWorkersWithoutDisconnecting(t *testing.T
 			hello := protocol.Hello{WorkerID: workerID.String(), WorkerName: "worker", OS: "linux", Arch: "amd64", WorkerVersion: tc.version, ProtocolMin: 1, ProtocolMax: 1}
 			if tc.version == "dev" {
 				hello.SupportsSessionWorkspaces, hello.SupportsSessionDeletion = tc.workspaces, tc.deletion
+				hello.SupportsConversationHistory = tc.conversation
 			}
 			sendFrame(t, ctx, conn, "hello", hello)
 			if frame, err := readEnvelope(ctx, conn); err != nil || frame.Type != "hello_ack" {
 				t.Fatalf("hello acknowledgement: %s %v", frame.Type, err)
 			}
-			for _, operation := range []protocol.Operation{protocol.BrowseWorkspace, protocol.DeleteSession, protocol.NewSession, protocol.StartTurn} {
+			for _, operation := range []protocol.Operation{protocol.BrowseWorkspace, protocol.DeleteSession, protocol.NewSession, protocol.ReadHistory, protocol.StartTurn} {
 				command := protocol.Command{ID: uuid.NewString(), WorkerID: workerID.String(), RuntimeID: uuid.NewString(), RuntimeGeneration: 1,
 					Operation: operation, CreatedAt: time.Now(), ExpiresAt: time.Now().Add(time.Minute)}
 				supported := true
@@ -76,6 +79,10 @@ func TestHubSessionCapabilitiesRejectOldWorkersWithoutDisconnecting(t *testing.T
 				case protocol.NewSession:
 					command.Arguments = protocol.Arguments{CWD: "/work", SessionName: "Project name", CreateDirectory: true}
 					supported = tc.workspaces
+				case protocol.ReadHistory:
+					command.SessionID, command.ThreadID = uuid.NewString(), "thread"
+					command.Arguments.History = &protocol.HistoryRequest{Messages: true, Limit: 1}
+					supported = tc.conversation
 				case protocol.DeleteSession, protocol.StartTurn:
 					command.SessionID, command.ThreadID = uuid.NewString(), "thread"
 					if operation == protocol.StartTurn {

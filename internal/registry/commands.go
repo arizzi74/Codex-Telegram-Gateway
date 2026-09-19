@@ -43,6 +43,7 @@ type IncomingUpdate struct {
 // AcceptResult is a durable UI response descriptor. The Telegram renderer owns
 // presentation; the registry only records a bounded view/result code.
 type AcceptResult struct {
+	MultiSession   bool                    `json:"multi_session,omitempty"`
 	WizardID       string                  `json:"wizard_id,omitempty"`
 	WizardRevision int64                   `json:"wizard_revision,omitempty"`
 	SessionName    string                  `json:"session_name,omitempty"`
@@ -168,13 +169,17 @@ func (s *Store) AcceptTelegram(ctx context.Context, in IncomingUpdate) (AcceptRe
 		return AcceptResult{Duplicate: true}, nil
 	}
 
+	if err := rememberTelegramContext(ctx, tx, in); err != nil {
+		return AcceptResult{}, err
+	}
+
 	var result AcceptResult
 	if in.CallbackToken != "" {
 		result, err = s.consumeCallback(ctx, tx, in)
-	} else if handled, wizardResult, wizardErr := s.acceptWizardText(ctx, tx, in); handled || wizardErr != nil {
-		result, err = wizardResult, wizardErr
 	} else if (strings.TrimSpace(in.Action) == "" || strings.EqualFold(strings.TrimSpace(in.Action), "text")) && in.ReplyToMessageID > 0 {
 		result, err = s.acceptReplyInput(ctx, tx, in)
+	} else if handled, wizardResult, wizardErr := s.acceptWizardText(ctx, tx, in); handled || wizardErr != nil {
+		result, err = wizardResult, wizardErr
 	} else {
 		result, err = s.acceptAction(ctx, tx, in)
 	}
@@ -232,34 +237,41 @@ func (s *Store) acceptAction(ctx context.Context, tx *dbTx, in IncomingUpdate) (
 			}
 			return mediaErrorResult("image_unsupported"), nil
 		}
-		if action != "" && action != "text" && action != "start_turn" && action != "steer" {
+		if action != "" && action != "text" && action != "start_turn" && action != "steer" && action != "session_alias" {
 			return mediaErrorResult("image_unsupported"), nil
 		}
 	}
 	switch action {
+	case "multisession":
+		return s.acceptMultiSession(ctx, tx, in)
+	case "session_alias":
+		return s.acceptSessionAlias(ctx, tx, in)
 	case "unknown_command":
 		return AcceptResult{View: "error", ErrorCode: "unknown_command", Action: in.Target}, nil
 	case "codex":
 		return s.acceptCodexCommand(ctx, tx, in)
-	case "history":
-		limit := protocol.DefaultHistoryLimit
+	case "history", "last_messages":
+		limit, usage := protocol.DefaultHistoryLimit, "history_usage"
+		if action == "last_messages" {
+			limit, usage = protocol.DefaultLastMessagesLimit, "last_messages_usage"
+		}
 		if count := strings.TrimSpace(in.Text); count != "" {
 			for _, digit := range count {
 				if digit < '0' || digit > '9' {
-					return AcceptResult{View: "error", ErrorCode: "history_usage"}, nil
+					return AcceptResult{View: "error", ErrorCode: usage}, nil
 				}
 			}
 			var err error
 			limit, err = strconv.Atoi(count)
 			if err != nil || limit < 1 || limit > protocol.MaxHistoryLimit {
-				return AcceptResult{View: "error", ErrorCode: "history_usage"}, nil
+				return AcceptResult{View: "error", ErrorCode: usage}, nil
 			}
 		}
 		target, err := resolveRoute(ctx, tx, in)
 		if err != nil {
 			return AcceptResult{}, err
 		}
-		return acceptHistoryCommand(ctx, tx, in, target, &protocol.HistoryRequest{Limit: limit})
+		return acceptHistoryCommand(ctx, tx, in, target, &protocol.HistoryRequest{Limit: limit, Messages: action == "last_messages"})
 	case "input_command":
 		parts := strings.Fields(in.Text)
 		if len(parts) < 3 {
@@ -306,6 +318,9 @@ func (s *Store) acceptAction(ctx context.Context, tx *dbTx, in IncomingUpdate) (
 		}
 		if _, err := tx.Exec(ctx, `DELETE FROM telegram_bindings WHERE bot_id=$1 AND user_id=$2 AND chat_id=$3 AND message_thread_id=$4`, in.BotID, in.UserID, in.ChatID, in.TopicID); err != nil {
 			return AcceptResult{}, fmt.Errorf("registry: disconnect selection: %w", err)
+		}
+		if err := reconcileTelegramSelection(ctx, tx, in); err != nil {
+			return AcceptResult{}, err
 		}
 		return AcceptResult{View: "disconnected"}, nil
 	case "new", "delete_session":
@@ -415,7 +430,11 @@ func acceptInput(ctx context.Context, tx *dbTx, in IncomingUpdate) (AcceptResult
 	if err != nil {
 		return AcceptResult{}, ErrTelegramTarget
 	}
-	return acceptInputApproval(ctx, tx, in, id, in.QuestionID, true)
+	var delivered bool
+	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM bot_message_routes WHERE bot_id=$1 AND chat_id=$2 AND approval_id=$3)`, in.BotID, in.ChatID, id).Scan(&delivered); err != nil {
+		return AcceptResult{}, err
+	}
+	return acceptInputApproval(ctx, tx, in, id, in.QuestionID, !delivered)
 }
 
 // acceptReplyInput gives a reply to an input request precedence over normal
@@ -427,6 +446,9 @@ func (s *Store) acceptReplyInput(ctx context.Context, tx *dbTx, in IncomingUpdat
         WHERE bot_id=$1 AND chat_id=$2 AND message_id=$3`, in.BotID, in.ChatID, in.ReplyToMessageID).
 		Scan(&approvalID, &questionID)
 	if errors.Is(err, sql.ErrNoRows) || approvalID == nil {
+		if handled, result, err := s.acceptWizardText(ctx, tx, in); handled || err != nil {
+			return result, err
+		}
 		return s.acceptAction(ctx, tx, in)
 	}
 	if err != nil {
@@ -794,7 +816,7 @@ func setBinding(ctx context.Context, tx *dbTx, in IncomingUpdate, sessionID uuid
 	if err != nil {
 		return fmt.Errorf("registry: set binding: %w", err)
 	}
-	return nil
+	return reconcileTelegramSelection(ctx, tx, in)
 }
 
 func bindingMatches(ctx context.Context, tx *dbTx, in IncomingUpdate, sessionID uuid.UUID) (bool, error) {
@@ -925,6 +947,9 @@ func (s *Store) AcknowledgeCommand(ctx context.Context, workerID, connectionID u
 	}
 	if ct.RowsAffected() > 0 && status == "failed" {
 		if err := recoverSessionWizardAcknowledgement(ctx, tx, commandID, code); err != nil {
+			return err
+		}
+		if err := notifyUnsupportedHistoryAcknowledgement(ctx, tx, commandID, code); err != nil {
 			return err
 		}
 	}

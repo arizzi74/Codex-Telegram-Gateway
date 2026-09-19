@@ -169,16 +169,30 @@ func run(args []string, logger *slog.Logger) error {
 		serviceCtx, stopService := context.WithCancel(ctx)
 		var services sync.WaitGroup
 		services.Go(func() {
-			menuCtx, cancel := context.WithTimeout(serviceCtx, 45*time.Second)
-			defer cancel()
-			if err := gateway.SyncCommandMenu(menuCtx, api, cfg.Secrets.BotName); err != nil && serviceCtx.Err() == nil {
-				logger.Warn("Telegram command menu update failed; retry with codex-gateway menu set")
+			for serviceCtx.Err() == nil {
+				menuCtx, cancel := context.WithTimeout(serviceCtx, 45*time.Second)
+				err := gateway.SyncCommandMenu(menuCtx, api, cfg.Secrets.BotName)
+				cancel()
+				if err == nil || serviceCtx.Err() != nil {
+					return
+				}
+				logger.Warn("Telegram command menu update deferred; retrying automatically")
+				retry := time.NewTimer(30 * time.Second)
+				select {
+				case <-serviceCtx.Done():
+					retry.Stop()
+					return
+				case <-retry.C:
+				}
 			}
 		})
 		services.Go(func() { hub.Run(serviceCtx) })
 		services.Go(func() { _ = sender.Run(serviceCtx) })
 		services.Go(func() { _ = dispatcher.Run(serviceCtx) })
 		services.Go(func() { _ = gateway.NewPresence(store, api, logger).Run(serviceCtx) })
+		services.Go(func() {
+			_ = gateway.NewSessionMenus(store, api, logger, gateway.SessionMenuOptions{BotID: cfg.Secrets.BotName, AllowedUserIDs: cfg.AllowedUserIDs, AllowedChatIDs: cfg.AllowedChatIDs, Redactor: redactor}).Run(serviceCtx)
+		})
 		defer func() { stopService(); services.Wait() }()
 		errCh := make(chan error, 1)
 		go func() { errCh <- server.ListenAndServe() }()

@@ -117,7 +117,7 @@ func TestAgentReportsThreadWriterConflictActionably(t *testing.T) {
 	if record.Result.Error.Code != protocol.SessionBusy || !record.Result.Error.Retryable {
 		t.Fatalf("writer conflict result = %#v", record.Result.Error)
 	}
-	if record.Result.Error.Message != "This thread is open in another Codex client. Close that client and retry, use /fork to create a branch, or use /tgnew to start fresh." {
+	if record.Result.Error.Message != "This thread is open in another Codex client. Close that client and retry, use /fork to create a branch, or choose New session in /tgsessions to start fresh." {
 		t.Fatalf("writer conflict message = %q", record.Result.Error.Message)
 	}
 }

@@ -106,8 +106,10 @@ operations you authorize Codex to perform.
 The bot authorizes only the numeric `WLID` in its private `.botsecrets` file.
 Changing a Telegram username does not grant access. To use the bot, send
 `/tgstart`, then `/tginstances` or `/tgsessions` and select a session.
-All gateway commands begin with `/tg`: `/tgconnect`, `/tgstatus`, `/tgnew`, `/tgdeletesession`,
-`/tghistory`, `/tgdisconnect`, `/tgsteer`, `/tginterrupt`, and `/tginput`. Telegram's initial
+Use `/tgsessions` to select a session or create one with **New session**.
+Gateway commands begin with `/tg`: `/tgstatus`, `/tgdeletesession`,
+`/tglastmessages`, `/tghistory`, `/tgmultisession`, `/tgdisconnect`, `/tgsteer`,
+`/tginterrupt`, and `/tginput`. Telegram's initial
 `/start` button remains an alias for `/tgstart`.
 
 Unprefixed commands control Codex: `/status` shows the selected session's model,
@@ -121,6 +123,9 @@ See [Telegram commands](docs/telegram-commands.md) for syntax and supported acti
 Use `/tghistory` to display saved Codex prompts as separate **You · Codex** bot
 messages, with an **Older prompts** button for earlier pages. This reads the
 selected session's history without running those prompts again.
+Use `/tglastmessages` for the last saved user or Codex message, or
+`/tglastmessages 10` for the last ten messages from both sides, including prompts
+sent through Telegram.
 
 Send a photo or a JPEG, PNG, WebP or GIF image file to the selected session,
 with an optional caption. Images can be up to 10 MiB; both the gateway and
@@ -130,14 +135,21 @@ Ordinary messages submit turns to the selection frozen when each message is
 accepted, without a separate “Queued for…” acknowledgement. Codex's commentary
 and tool calls appear temporarily while the turn runs. The latest tool call
 appears in a monospace message that each subsequent tool call replaces.
-Temporary messages are removed after the final response is delivered.
-Cleanup also handles interruption and failure, and
-resumes after gateway restarts. Replies to earlier bot messages retain that
-session's routing.
+Temporary messages are removed after the final response is delivered. Switching
+sessions removes the previous session's progress and shows the selected session's
+latest progress if it is running. Only the selected session's turn responses and
+typing appear by default. Questions and approvals from any session still arrive,
+labelled with its name; answering them does not change your selection.
+
+Use `/tgmultisession` to toggle messages from all sessions. A colored square and
+the session name identify each message; Telegram does not support custom message
+background colors. The menu gains shortcuts such as `/_my_project`: use one alone
+to select that session, or `/_my_project your message` to target it without changing
+your selection. Cleanup handles interruption, failure, and gateway restarts.
 Approval and input buttons refer to the exact pending request and expire.
 If a saved session is open in another independent Codex process, close it there
-before sending a turn, use `/fork` to branch its saved conversation, or `/tgnew`
-to start fresh. Merely selecting a session does not take its writer lock.
+before sending a turn, use `/fork` to branch its saved conversation, or choose
+**New session** in `/tgsessions`. Merely selecting a session does not take its writer lock.
 
 ## Admin console
 

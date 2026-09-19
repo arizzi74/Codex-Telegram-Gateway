@@ -107,7 +107,7 @@ func TestProgressDeliveryIsTemporarySilentAndKeepsItsTurnRoute(t *testing.T) {
 }
 
 func TestProgressDeliveryStopsSendingWhenTurnEnds(t *testing.T) {
-	for _, suppressAt := range []int{1, 2} {
+	for _, suppressAt := range []int{1, 2, 3} {
 		store, api := progressReplacementFixture()
 		store.suppressAt = suppressAt
 		sender := NewSender(store, api, nil)
@@ -144,6 +144,19 @@ func TestAgentProgressReplacesPreviousUpdateAfterSenderRestart(t *testing.T) {
 	}
 	if !strings.Contains(api.messages[0].Text, "<literal> & `text`") || !strings.Contains(api.edits[0].Text, "Latest update.") || strings.Contains(api.edits[0].Text, "First update") {
 		t.Fatal("progress updates were escaped, appended, or lost")
+	}
+}
+
+func TestMissingProgressMessageIsNotRecreatedAfterSelectionChanges(t *testing.T) {
+	store, api := progressReplacementFixture()
+	store.target, store.suppressAt = 44, 4
+	api.editErr = &TelegramError{Code: 400, Description: "Bad Request: message to edit not found"}
+	row := eventRow(t, "tool_progress_message", protocol.Result{TurnID: "turn-a", Text: "go test ./..."}, testSessionID.String())
+	if err := NewSender(store, api, nil).sendDelivery(context.Background(), row); err != nil {
+		t.Fatal(err)
+	}
+	if len(api.edits) != 1 || len(api.messages) != 0 || len(store.marked) != 0 || len(store.skipped) != 1 {
+		t.Fatalf("invisible progress was recreated: edits=%v sends=%v marked=%v skipped=%v", api.edits, api.messages, store.marked, store.skipped)
 	}
 }
 

@@ -89,3 +89,32 @@ func TestPresenceRegistryErrorsAreReturnedWithoutSending(t *testing.T) {
 		t.Fatal("typing action sent without registry state")
 	}
 }
+
+type changingPresenceStore struct {
+	*presenceStore
+	active bool
+	errNow error
+}
+
+func (s *changingPresenceStore) IsTelegramTypingTargetActive(context.Context, registry.TelegramTypingTarget) (bool, error) {
+	return s.active, s.errNow
+}
+
+func TestPresenceRechecksSelectionImmediatelyBeforeTyping(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		err  error
+	}{{name: "switched to idle session"}, {name: "current selection unavailable", err: errors.New("registry unavailable")}} {
+		t.Run(test.name, func(t *testing.T) {
+			store := &changingPresenceStore{presenceStore: &presenceStore{targets: []registry.TelegramTypingTarget{{BotID: "bot", ChatID: 42}}}, errNow: test.err}
+			api := &presenceAPI{}
+			presence := NewPresence(store, api, nil)
+			if err := presence.flush(context.Background(), time.Now()); err != nil {
+				t.Fatal(err)
+			}
+			if api.count() != 0 {
+				t.Fatal("typing continued after the active session changed")
+			}
+		})
+	}
+}

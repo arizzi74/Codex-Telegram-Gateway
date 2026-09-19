@@ -55,7 +55,7 @@ func (s *Store) TelegramProgressTarget(ctx context.Context, deliveryID string) (
         SELECT progress.telegram_message_id FROM telegram_progress_messages progress
         JOIN telegram_deliveries prior_delivery ON prior_delivery.delivery_id=progress.delivery_id
         JOIN events prior_event ON prior_event.event_id=prior_delivery.event_id
-        WHERE prior_delivery.kind=delivery.kind AND progress.status='pending'
+        WHERE prior_delivery.kind=delivery.kind AND progress.status='pending' AND progress.retire_requested=0 AND prior_delivery.visibility_revoked=0
           AND progress.bot_id=delivery.bot_id AND progress.chat_id=delivery.chat_id
           AND progress.message_thread_id=delivery.message_thread_id
           AND progress.runtime_id=event.runtime_id AND progress.runtime_generation=event.runtime_generation
@@ -144,6 +144,21 @@ func checkpointTelegramProgress(ctx context.Context, tx *dbTx, deliveryID uuid.U
 	if err != nil {
 		return fmt.Errorf("registry: checkpoint temporary message: %w", err)
 	}
+	// A terminal API call may already have started when the selection changes.
+	// Checkpoint that message into the same durable cleanup queue so it does not
+	// remain in the newly selected conversation. Finals sent before switching
+	// have no cleanup record and are preserved.
+	_, err = tx.Exec(ctx, `INSERT INTO telegram_progress_messages
+   (cleanup_id,delivery_id,chunk_index,bot_id,chat_id,message_thread_id,telegram_message_id,runtime_id,runtime_generation,session_id,turn_id,retire_requested)
+   SELECT $1,delivery.delivery_id,$2,delivery.bot_id,delivery.chat_id,delivery.message_thread_id,$3,event.runtime_id,event.runtime_generation,event.session_id,json_extract(event.payload,'$.turn_id'),1
+   FROM telegram_deliveries delivery JOIN events event ON event.event_id=delivery.event_id
+   WHERE delivery.delivery_id=$4 AND event.kind IN ('turn_completed','turn_failed','turn_interrupted')
+     AND event.session_id IS NOT NULL AND COALESCE(json_extract(event.payload,'$.turn_id'),'')<>''
+     AND (delivery.visibility_revoked=1 OR NOT `+eventVisibleSQL()+`)
+   ON CONFLICT(delivery_id,chunk_index) DO NOTHING`, uuid.New(), index, messageID, deliveryID)
+	if err != nil {
+		return fmt.Errorf("registry: checkpoint hidden terminal message: %w", err)
+	}
 	return nil
 }
 
@@ -161,7 +176,7 @@ func (s *Store) ClaimTelegramDeletions(ctx context.Context, limit int) ([]Telegr
 	rows, err := s.pool.Query(ctx, `WITH due AS (
         SELECT progress.cleanup_id FROM telegram_progress_messages progress
         WHERE progress.status IN ('pending','deleting') AND progress.next_attempt_at<=(strftime('%Y-%m-%dT%H:%M:%f','now') || '000000Z')
-          AND (EXISTS (
+          AND (progress.retire_requested=1 OR EXISTS(SELECT 1 FROM telegram_deliveries revoked WHERE revoked.delivery_id=progress.delivery_id AND revoked.visibility_revoked=1) OR NOT `+sessionVisibleSQL("progress.bot_id", "progress.chat_id", "progress.message_thread_id", "progress.session_id")+` OR EXISTS (
             SELECT 1 FROM telegram_progress_messages replacement
             JOIN telegram_deliveries newer_delivery ON newer_delivery.delivery_id=replacement.delivery_id
             JOIN events newer ON newer.event_id=newer_delivery.event_id

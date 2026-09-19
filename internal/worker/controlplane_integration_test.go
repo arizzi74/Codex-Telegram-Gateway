@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -107,11 +108,16 @@ func TestControlPlaneWorkerOutboxSurvivesGatewayRestartIntegration(t *testing.T)
 	postTelegram(t, gw.server.Client(), gw.server.URL, "secret", 1, "/tgsessions "+runtimeID, 0)
 	waitControl(t, func() bool { return tg.hasText("Sessions", "Alpha", "Beta", "Gamma") })
 
-	a, b := sessions[0], sessions[1]
+	var a protocol.Session
+	for _, session := range sessions {
+		if session.Name == "Alpha" {
+			a = session
+		}
+	}
 	targetThread := a.ThreadID
 
 	// Selection and a normal Telegram message travel through the actual webhook.
-	postTelegram(t, gw.server.Client(), gw.server.URL, "secret", 2, "/tgconnect "+a.ID, 0)
+	selectControlSession(t, gw, tg, 10001, runtimeID, 1)
 	postTelegram(t, gw.server.Client(), gw.server.URL, "secret", 3, "perform an offline-safe turn", 0)
 	waitControl(t, func() bool {
 		fakeMu.Lock()
@@ -211,8 +217,15 @@ func TestControlPlaneWorkerOutboxSurvivesGatewayRestartIntegration(t *testing.T)
 	beforeStart := countFixtureCalls(f.Calls(), "turn/start")
 	beforeInterrupt := countFixtureCalls(f.Calls(), "turn/interrupt")
 	beforeResume := countFixtureCalls(f.Calls(), "thread/resume")
-	postTelegram(t, gw.server.Client(), gw.server.URL, "secret", 4, "/tgconnect "+b.ID, 0)
+	selectControlSession(t, gw, tg, 10003, runtimeID, 2)
 	waitControl(t, func() bool { return tg.hasText("Connected to", "Beta") })
+	waitControl(t, func() bool { return tg.deletedCount() == len(progressIDs) })
+	for _, id := range progressIDs {
+		if !tg.wasDeleted(id) {
+			t.Fatalf("switching to Beta left Alpha temporary message %d visible", id)
+		}
+	}
+	removedOnSwitch := len(progressIDs)
 	time.Sleep(250 * time.Millisecond)
 	fakeMu.Lock()
 	if got := countFixtureCalls(f.Calls(), "turn/start"); got != beforeStart {
@@ -252,9 +265,14 @@ func TestControlPlaneWorkerOutboxSurvivesGatewayRestartIntegration(t *testing.T)
 	// AT-13: the approval button is persisted by the sender, then Codex clears
 	// the exact server request before the click. The click produces only the
 	// durable stale-button UI response and no App Server reply.
-	connected := tg.countText("Connected to")
-	postTelegram(t, gw.server.Client(), gw.server.URL, "secret", 5, "/tgconnect "+a.ID, 0)
-	waitControl(t, func() bool { return tg.countText("Connected to") > connected })
+	selectControlSession(t, gw, tg, 10005, runtimeID, 1)
+	waitControl(t, func() bool { return tg.countText(progressTexts[2]) == 1 && tg.countText(toolCommands[2]) == 1 })
+	progressIDs = []int64{tg.latestMessageID(progressTexts[2]), tg.latestMessageID(toolCommands[2])}
+	for _, id := range progressIDs {
+		if id == 0 || tg.wasDeleted(id) {
+			t.Fatalf("switching back did not restore a fresh Alpha progress message: %d", id)
+		}
+	}
 	if err := f.Request("item/commandExecution/requestApproval", 91, map[string]any{"threadId": targetThread, "turnId": active, "command": "go test ./...", "availableDecisions": []string{"accept", "decline"}}); err != nil {
 		t.Fatal(err)
 	}
@@ -302,7 +320,7 @@ func TestControlPlaneWorkerOutboxSurvivesGatewayRestartIntegration(t *testing.T)
 		}
 		return false
 	})
-	if tg.deletedCount() != 0 {
+	if tg.deletedCount() != removedOnSwitch {
 		t.Fatal("temporary progress was removed before the offline final answer was delivered")
 	}
 
@@ -311,7 +329,7 @@ func TestControlPlaneWorkerOutboxSurvivesGatewayRestartIntegration(t *testing.T)
 	defer gw.close()
 	waitControl(t, func() bool { return len(gw.hub.ConnectedWorkers()) == 1 })
 	waitControl(t, func() bool { return tg.countText("final emitted while gateway was offline") == 1 })
-	waitControl(t, func() bool { return tg.deletedCount() == len(progressIDs) })
+	waitControl(t, func() bool { return tg.deletedCount() == removedOnSwitch+len(progressIDs) })
 	time.Sleep(500 * time.Millisecond)
 	if got := tg.countText("final emitted while gateway was offline"); got != 1 {
 		t.Fatalf("final delivery duplicated after replay: %d", got)
@@ -341,10 +359,11 @@ func TestControlPlaneWorkerOutboxSurvivesGatewayRestartIntegration(t *testing.T)
 }
 
 type gatewayRun struct {
-	hub    *gateway.Hub
-	server *httptest.Server
-	cancel context.CancelFunc
-	done   sync.WaitGroup
+	hub      *gateway.Hub
+	server   *httptest.Server
+	cancel   context.CancelFunc
+	done     sync.WaitGroup
+	handlers sync.WaitGroup
 }
 
 func startControlGateway(t *testing.T, store *registry.Store, telegram gateway.TelegramAPI, log *slog.Logger) *gatewayRun {
@@ -355,9 +374,14 @@ func startControlGateway(t *testing.T, store *registry.Store, telegram gateway.T
 	hub.AckHandler = store.AcknowledgeCommand
 	mux := gateway.NewMux(store, hub)
 	mux.Handle("/tgapi/v1/telegram/webhook", gateway.NewWebhook(store, config.GatewayConfig{AllowedUserIDs: []int64{7}, AllowedChatIDs: []int64{9}, CommandExpiry: time.Hour, Secrets: config.BotSecrets{BotName: "bot"}}, "secret", telegram, log))
-	server := httptest.NewUnstartedServer(mux)
+	run := &gatewayRun{hub: hub, cancel: cancel}
+	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		run.handlers.Add(1)
+		defer run.handlers.Done()
+		mux.ServeHTTP(w, r)
+	}))
 	server.StartTLS()
-	run := &gatewayRun{hub: hub, server: server, cancel: cancel}
+	run.server = server
 	run.done.Add(3)
 	go func() { defer run.done.Done(); hub.Run(ctx) }()
 	go func() { defer run.done.Done(); _ = gateway.NewDispatcher(store, hub, log).Run(ctx) }()
@@ -408,6 +432,10 @@ func (g *gatewayRun) close() {
 	g.cancel()
 	g.server.Close()
 	g.done.Wait()
+	// httptest.Server.Close does not join hijacked WebSocket handlers. The
+	// handler persists worker disconnection after the hub closes its socket;
+	// finish that registry write before any test closes/removes SQLite files.
+	g.handlers.Wait()
 }
 func dialTestServer(slot *gatewaySlot) func(config.WorkerConfig, *Store, *slog.Logger, func() []protocol.Runtime, func(context.Context, protocol.Command) (protocol.CommandAck, error)) (*Connection, error) {
 	return func(cfg config.WorkerConfig, local *Store, log *slog.Logger, snapshot func() []protocol.Runtime, command func(context.Context, protocol.Command) (protocol.CommandAck, error)) (*Connection, error) {
@@ -583,6 +611,29 @@ func (t *telegramRecorder) messageID(text string) int64 {
 	return 0
 }
 
+func (t *telegramRecorder) latestMessageID(text string) int64 {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	for index := len(t.actions) - 1; index >= 0; index-- {
+		action := t.actions[index]
+		if action.kind == "send" && strings.Contains(action.text, text) {
+			return action.messageID
+		}
+	}
+	return 0
+}
+
+func (t *telegramRecorder) wasDeleted(messageID int64) bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	for _, action := range t.actions {
+		if action.kind == "delete" && action.messageID == messageID {
+			return true
+		}
+	}
+	return false
+}
+
 func (t *telegramRecorder) deletedCount() int {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -614,16 +665,24 @@ func (t *telegramRecorder) assertProgressCleanup(test *testing.T, progressIDs []
 		if action.kind != "delete" {
 			continue
 		}
+		pending, tracked := expected[action.messageID]
+		if !tracked {
+			// Earlier focus changes already removed a previous presentation of
+			// this turn. This check concerns the restored visible progress only.
+			continue
+		}
 		if !finalDelivered {
 			test.Fatalf("message %d deleted before the final answer was sent", action.messageID)
 		}
-		if action.chatID != 9 || !expected[action.messageID] {
+		if action.chatID != 9 || !pending {
 			test.Fatalf("unexpected or duplicate message deletion: chat=%d message=%d", action.chatID, action.messageID)
 		}
-		delete(expected, action.messageID)
+		expected[action.messageID] = false
 	}
-	if len(expected) != 0 {
-		test.Fatalf("temporary progress messages were not deleted after final delivery: %v", expected)
+	for id, pending := range expected {
+		if pending {
+			test.Fatalf("temporary progress message was not deleted after final delivery: %d", id)
+		}
 	}
 }
 func (t *telegramRecorder) Edit(context.Context, int64, int64, string, *gateway.TelegramKeyboard) error {
@@ -739,6 +798,21 @@ func postCallback(t *testing.T, c *http.Client, base, secret string, id int64, d
 	if res.StatusCode != http.StatusOK {
 		t.Fatalf("Telegram callback %d status %d", id, res.StatusCode)
 	}
+}
+
+func selectControlSession(t *testing.T, run *gatewayRun, telegram *telegramRecorder, updateID int64, runtime string, number int) {
+	t.Helper()
+	label := fmt.Sprintf("Connect %d", number)
+	previous := wizardButton(telegram, "Sessions ·", label)
+	postTelegram(t, run.server.Client(), run.server.URL, "secret", updateID, "/tgsessions "+runtime, 0)
+	var button string
+	waitControl(t, func() bool {
+		button = wizardButton(telegram, "Sessions ·", label)
+		return button != "" && button != previous
+	})
+	connected := telegram.countText("Connected to")
+	postCallback(t, run.server.Client(), run.server.URL, "secret", updateID+1, button)
+	waitControl(t, func() bool { return telegram.countText("Connected to") > connected })
 }
 func currentActive(t *testing.T, local *Store, runtimeID, threadID string) string {
 	t.Helper()

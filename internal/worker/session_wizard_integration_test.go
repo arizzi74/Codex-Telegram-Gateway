@@ -106,7 +106,9 @@ func TestControlPlaneGuidedSessionCreationAndDeletionIntegration(t *testing.T) {
 	if f == nil {
 		t.Fatal("Codex fixture was not started")
 	}
-	postTelegram(t, gw.server.Client(), gw.server.URL, "secret", 100, "/tgnew "+runtimeID, 0)
+	postTelegram(t, gw.server.Client(), gw.server.URL, "secret", 99, "/tgsessions "+runtimeID, 0)
+	waitControl(t, func() bool { return wizardButton(tg, "Sessions ·", "New session") != "" })
+	postCallback(t, gw.server.Client(), gw.server.URL, "secret", 100, wizardButton(tg, "Sessions ·", "New session"))
 	waitControl(t, func() bool { return tg.hasText("What would you like to name the new session?") })
 	const sessionName = "Guided integration session"
 	postTelegram(t, gw.server.Client(), gw.server.URL, "secret", 101, sessionName, 0)

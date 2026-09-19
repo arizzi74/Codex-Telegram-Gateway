@@ -187,7 +187,7 @@ func TestTelegramProgressSuppressesLateRetriesAndCleansInFlightSendIntegration(t
 	claimProgress(t, env.store, 0)
 }
 
-func TestTelegramProgressFinalRoutingIncludesFrozenOriginAndOldBindingsIntegration(t *testing.T) {
+func TestTelegramProgressFinalRoutingExcludesUnselectedOriginsIntegration(t *testing.T) {
 	env := progressEnv(t)
 	ctx := context.Background()
 	command := uuid.NewString()
@@ -198,7 +198,7 @@ func TestTelegramProgressFinalRoutingIncludesFrozenOriginAndOldBindingsIntegrati
 		t.Fatal(err)
 	}
 	progressEvent(t, env, 2, "agent_progress_message", "turn-a", command)
-	progress := claimProgress(t, env.store, 2)
+	progress := claimProgress(t, env.store, 1)
 	for _, delivery := range progress {
 		sendProgressChunks(t, env.store, delivery, 1)
 	}
@@ -206,16 +206,8 @@ func TestTelegramProgressFinalRoutingIncludesFrozenOriginAndOldBindingsIntegrati
 		t.Fatal(err)
 	}
 	progressEvent(t, env, 3, "turn_completed", "turn-a", command)
-	finals := claimProgress(t, env.store, 2)
-	for _, delivery := range finals {
-		if delivery.ChatID != 99 && delivery.ChatID != 20 {
-			t.Fatalf("wrong final route: %+v", delivery)
-		}
-		if err := env.store.MarkDeliverySent(ctx, delivery.ID, 501, "", "", ""); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if due, err := env.store.ClaimTelegramDeletions(ctx, 100); err != nil || len(due) != 2 {
+	claimProgress(t, env.store, 0)
+	if due, err := env.store.ClaimTelegramDeletions(ctx, 100); err != nil || len(due) != 1 {
 		t.Fatalf("old binding cleanup: %v %v", due, err)
 	}
 }

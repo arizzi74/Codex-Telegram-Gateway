@@ -104,7 +104,7 @@ func (m *Manager) printWorkerSetupCommands(l *Layout) {
 		fmt.Fprintln(m.Out, `  export PATH="$HOME/.local/bin:$PATH"`)
 		fmt.Fprintln(m.Out, "Add that line to your shell startup file to keep it in future terminals.")
 	}
-	fmt.Fprintln(m.Out, "Open your Telegram bot, send /tgstart, then use /tgsessions to select a session or /tgnew to create one.")
+	fmt.Fprintln(m.Out, "Open your Telegram bot, send /tgstart, then use /tgsessions to select a session or choose New session to create one.")
 }
 
 // Paths are printed as copyable shell commands, including homes containing a

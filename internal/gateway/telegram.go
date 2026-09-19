@@ -209,6 +209,30 @@ func (t *TelegramClient) GetMyCommands(ctx context.Context) ([]BotCommand, error
 	return commands, err
 }
 
+// BotCommandScope restricts session aliases to the authenticated conversation.
+// Private chats use chat; group members use chat_member so menus stay personal.
+type BotCommandScope struct {
+	Type   string `json:"type"`
+	ChatID int64  `json:"chat_id"`
+	UserID int64  `json:"user_id,omitempty"`
+}
+
+func (t *TelegramClient) SetScopedCommands(ctx context.Context, scope BotCommandScope, commands []BotCommand) error {
+	if commands == nil {
+		commands = []BotCommand{}
+	}
+	return t.call(ctx, "setMyCommands", struct {
+		Commands []BotCommand    `json:"commands"`
+		Scope    BotCommandScope `json:"scope"`
+	}{commands, scope}, nil)
+}
+
+func (t *TelegramClient) DeleteScopedCommands(ctx context.Context, scope BotCommandScope) error {
+	return t.call(ctx, "deleteMyCommands", struct {
+		Scope BotCommandScope `json:"scope"`
+	}{scope}, nil)
+}
+
 // SetChatMenuButton changes the default menu when chatID is zero, or the menu
 // for one private chat otherwise.
 func (t *TelegramClient) SetChatMenuButton(ctx context.Context, chatID int64, button MenuButton) error {

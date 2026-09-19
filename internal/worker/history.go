@@ -21,6 +21,9 @@ const (
 // readHistory only projects saved input. In particular, it never resumes a
 // cold thread or changes the actor's active command, turn, or session state.
 func (s *sessionActor) readHistory(client *codexadapter.Client, request *protocol.HistoryRequest) (*protocol.HistoryPage, error) {
+	if request != nil && request.Messages {
+		return s.readLastMessages(client, request)
+	}
 	if err := request.Validate(); err != nil {
 		return nil, historyError(protocol.CodexCommandInvalid, "Use /tghistory with a page size from 1 to 50.")
 	}

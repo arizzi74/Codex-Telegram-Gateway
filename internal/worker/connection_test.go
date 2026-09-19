@@ -38,7 +38,7 @@ func TestConnectionAdvertisesCapabilitiesThroughoutConnection(t *testing.T) {
 			return
 		}
 		hello, err := protocol.Payload[protocol.Hello](helloEnvelope)
-		if err != nil || helloEnvelope.Type != "hello" || !hello.SupportsImageInput || !hello.SupportsSessionWorkspaces || !hello.SupportsSessionDeletion {
+		if err != nil || helloEnvelope.Type != "hello" || !hello.SupportsImageInput || !hello.SupportsSessionWorkspaces || !hello.SupportsSessionDeletion || !hello.SupportsConversationHistory {
 			t.Errorf("hello did not advertise capabilities: %#v, %v", hello, err)
 			return
 		}
@@ -52,7 +52,7 @@ func TestConnectionAdvertisesCapabilitiesThroughoutConnection(t *testing.T) {
 			return
 		}
 		heartbeat, err := protocol.Payload[protocol.Heartbeat](heartbeatEnvelope)
-		if err != nil || heartbeatEnvelope.Type != "heartbeat" || !heartbeat.SupportsImageInput || !heartbeat.SupportsSessionWorkspaces || !heartbeat.SupportsSessionDeletion {
+		if err != nil || heartbeatEnvelope.Type != "heartbeat" || !heartbeat.SupportsImageInput || !heartbeat.SupportsSessionWorkspaces || !heartbeat.SupportsSessionDeletion || !heartbeat.SupportsConversationHistory {
 			t.Errorf("heartbeat lost capabilities: %#v, %v", heartbeat, err)
 			return
 		}

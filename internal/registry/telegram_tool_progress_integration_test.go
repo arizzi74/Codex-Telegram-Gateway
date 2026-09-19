@@ -273,7 +273,7 @@ func TestTelegramProgressReplacementScopeIntegration(t *testing.T) {
 	})
 }
 
-func TestTelegramProgressFrozenRoutesAndTerminalCleanupIntegration(t *testing.T) {
+func TestTelegramProgressDisconnectedRoutesAndTerminalCleanupIntegration(t *testing.T) {
 	forProgressKinds(t, func(t *testing.T, kind, otherKind string) {
 		for _, terminal := range []string{"turn_completed", "turn_failed", "turn_interrupted", "runtime_failed", "runtime_stopped"} {
 			t.Run(terminal, func(t *testing.T) {
@@ -287,32 +287,20 @@ func TestTelegramProgressFrozenRoutesAndTerminalCleanupIntegration(t *testing.T)
 					t.Fatal(err)
 				}
 				progressEvent(t, env, 2, kind, "turn-a", command)
-				for _, delivery := range claimProgress(t, env.store, 2) {
+				for _, delivery := range claimProgress(t, env.store, 1) {
 					checkpointProgress(t, env.store, delivery, 160)
 				}
 				if _, err := env.store.pool.Exec(ctx, `DELETE FROM telegram_bindings`); err != nil {
 					t.Fatal(err)
 				}
 				progressEvent(t, env, 3, terminal, "turn-a", command)
-				if terminal != "runtime_stopped" {
-					for _, delivery := range claimProgress(t, env.store, 2) {
-						if delivery.ChatID != 20 && delivery.ChatID != 99 {
-							t.Fatalf("terminal target lost frozen route: %+v", delivery)
-						}
-						if err := env.store.MarkDeliverySent(ctx, delivery.ID, 170, "", "", ""); err != nil {
-							t.Fatal(err)
-						}
-					}
-				}
+				claimProgress(t, env.store, 0)
 				deletions, err := env.store.ClaimTelegramDeletions(ctx, 100)
-				if err != nil || len(deletions) != 2 {
+				if err != nil || len(deletions) != 1 {
 					t.Fatalf("terminal cleanup lost frozen routes: %+v: %v", deletions, err)
 				}
 				progressEvent(t, env, 4, kind, "turn-a", command)
-				late := claimProgress(t, env.store, 1)[0]
-				if suppress, err := env.store.SuppressProgressDelivery(ctx, late.ID); err != nil || !suppress {
-					t.Fatalf("late tool escaped terminal suppression: %v: %v", suppress, err)
-				}
+				claimProgress(t, env.store, 0)
 			})
 		}
 	})

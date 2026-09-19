@@ -49,11 +49,11 @@ func TestWebhookRejectsActorBeforeProcessing(t *testing.T) {
 }
 
 func TestParseTelegramCommands(t *testing.T) {
-	action, target, text, ignore := parseTelegramText("/tgconnect@mybot session name", "mybot")
-	if action != "connect" || target != "session name" || text != "" || ignore {
+	action, target, text, ignore := parseTelegramText("/tgsessions@mybot runtime name", "mybot")
+	if action != "sessions" || target != "runtime name" || text != "" || ignore {
 		t.Fatal(action, target, text, ignore)
 	}
-	_, _, _, ignore = parseTelegramText("/tgnew@otherbot", "mybot")
+	_, _, _, ignore = parseTelegramText("/_my_project@otherbot prompt", "mybot")
 	if !ignore {
 		t.Fatal("foreign bot mention processed")
 	}
@@ -77,7 +77,14 @@ func TestCodexAndGatewayNamespaces(t *testing.T) {
 		{"/model@mybot gpt-5.6-sol high", "codex", "model", "gpt-5.6-sol high"},
 		{"/debug_config", "codex", "debug-config", ""},
 		{"/debug-config", "codex", "debug-config", ""},
-		{"/tgnew", "new", "", ""},
+		{"/tgnew", "unknown_command", "tgnew", ""},
+		{"/tgconnect old session", "unknown_command", "tgconnect", ""},
+		{"/tglastmessages", "last_messages", "", ""},
+		{"/tglastmessages@mybot 12", "last_messages", "", "12"},
+		{"/tgmultisession", "multisession", "", ""},
+		{"/tgmultisession off", "multisession", "", "off"},
+		{"/_My_Project@mybot please check /status", "session_alias", "_my_project", "please check /status"},
+		{"/_my_project", "session_alias", "_my_project", ""},
 		{"/tgdeletesession", "delete_session", "", ""},
 		{"/tgdeletesession@mybot runtime", "delete_session", "runtime", ""},
 		{"/new", "codex", "new", ""},

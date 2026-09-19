@@ -32,7 +32,7 @@ func TestCommandMenuSyncPublishesSessionControlsForMatchingBot(t *testing.T) {
 	for _, c := range m.commands {
 		found[c.Command] = true
 	}
-	if !found["tgnew"] || !found["tgdeletesession"] || !found["status"] || m.menu.Type != "commands" {
+	if found["tgnew"] || found["tgconnect"] || !found["tglastmessages"] || !found["tgmultisession"] || !found["tgdeletesession"] || !found["status"] || m.menu.Type != "commands" {
 		t.Fatal("session controls missing from synchronized menu")
 	}
 	wrong := &menuRecorder{username: "anotherbot"}

@@ -10,6 +10,32 @@ Database integration tests now run automatically against fresh temporary SQLite
 files. Historical entries below describe the release and backend tested on their
 recorded date; PostgreSQL outage evidence applies to the retired backend.
 
+## Telegram session focus and multisession (2026-09-19)
+
+Automated tests verify these behaviors through the actual webhook, registry,
+worker transport and Telegram sender, with Telegram and Codex endpoints replaced
+by isolated fixtures:
+
+- Switching running sessions removes old progress and restores the new session's
+  latest commentary and tool message. Idle selections and disconnects stop typing.
+- Background completions remain hidden, including delayed deliveries and a
+  selection change during an in-flight send. Their saved history stays available.
+- Questions from another session retain their name and immutable answer target;
+  replying or choosing an option preserves the selected session.
+- Multisession messages carry a session name and color marker. Aliases select a
+  session or target text without changing selection, and can answer an
+  unambiguous pending question. Helper and archived sessions remain hidden.
+- Recent-message history includes user and final Codex messages, preserves
+  chronological pagination, includes Telegram input, and excludes temporary
+  progress, tools and reasoning. Old workers return an actionable upgrade error.
+- Scoped menus retain Codex commands, remove retired gateway commands, and
+  refresh aliases after changes. Revoked destinations lose their stored menus;
+  an unavailable destination cannot block other menu updates.
+
+The full Go suite passes with race detection. The session-focus integration
+also passed ten consecutive race-enabled runs after its fixture was changed to
+join WebSocket handlers before removing the temporary SQLite database.
+
 ## SQLite registry (2026-09-15)
 
 Version 0.3.0 passes `VERSION=0.3.0 ./scripts/ci.sh`: formatting, vet,
@@ -185,7 +211,7 @@ Verification includes:
 
 The reported production rejection was a separate Codex process holding the
 selected thread's writer lock. It now yields actionable `session_busy`
-instructions, including `/fork` and `/tgnew`, instead of a generic protocol error.
+instructions, including `/fork` and **New session** in `/tgsessions`, instead of a generic protocol error.
 
 Deployment verification: version 0.2.0 gateway and worker services are active,
 HTTPS health/readiness return 200, the unauthenticated admin session API returns

@@ -64,7 +64,7 @@ func TestTelegramTypingTargetsFollowDurableTurnLifecycleIntegration(t *testing.T
 	if _, err := env.store.AcceptTelegram(ctx, reselectedElsewhere); err != nil {
 		t.Fatal(err)
 	}
-	assertTypingTargets(t, env.store, TelegramTypingTarget{BotID: "bot", ChatID: 20, TopicID: 17})
+	assertTypingTargets(t, env.store)
 
 	disconnect := telegramUpdate(env, 4)
 	disconnect.TopicID, disconnect.Action = 17, "disconnect"

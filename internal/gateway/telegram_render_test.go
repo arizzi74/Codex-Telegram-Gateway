@@ -238,7 +238,7 @@ func TestRenderStatusSelectedDisconnectAndHelp(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, command := range []string{"/tgstart", "/tghelp", "/tginstances", "/tgsessions", "/tgconnect", "/tgstatus", "/tgdisconnect", "/tgnew", "/tgdeletesession", "/tgsteer", "/tginterrupt"} {
+	for _, command := range []string{"/tgstart", "/tghelp", "/tginstances", "/tgsessions", "/tgstatus", "/tgdisconnect", "/tgdeletesession", "/tgsteer", "/tginterrupt", "/tglastmessages", "/tgmultisession"} {
 		if !strings.Contains(help, command) {
 			t.Fatalf("help omits %s", command)
 		}

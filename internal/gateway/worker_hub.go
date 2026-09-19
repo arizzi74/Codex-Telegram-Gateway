@@ -42,14 +42,15 @@ type Hub struct {
 }
 
 type peer struct {
-	workerID, connectionID    uuid.UUID
-	supportsImageInput        bool
-	supportsSessionWorkspaces bool
-	supportsSessionDeletion   bool
-	conn                      *websocket.Conn
-	ctx                       context.Context
-	cancel                    context.CancelFunc
-	writes                    chan writeRequest
+	workerID, connectionID      uuid.UUID
+	supportsImageInput          bool
+	supportsSessionWorkspaces   bool
+	supportsSessionDeletion     bool
+	supportsConversationHistory bool
+	conn                        *websocket.Conn
+	ctx                         context.Context
+	cancel                      context.CancelFunc
+	writes                      chan writeRequest
 }
 
 type writeRequest struct {
@@ -126,9 +127,10 @@ func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// builds advertise their actual capabilities, including development builds.
 	legacySessionSupport := strings.TrimPrefix(hello.WorkerVersion, "v") == "0.5.19"
 	p := &peer{workerID: worker.ID, connectionID: connectionID, supportsImageInput: hello.SupportsImageInput,
-		supportsSessionWorkspaces: hello.SupportsSessionWorkspaces || legacySessionSupport,
-		supportsSessionDeletion:   hello.SupportsSessionDeletion || legacySessionSupport,
-		conn:                      conn, ctx: ctx, cancel: cancel, writes: make(chan writeRequest, 128)}
+		supportsSessionWorkspaces:   hello.SupportsSessionWorkspaces || legacySessionSupport,
+		supportsSessionDeletion:     hello.SupportsSessionDeletion || legacySessionSupport,
+		supportsConversationHistory: hello.SupportsConversationHistory,
+		conn:                        conn, ctx: ctx, cancel: cancel, writes: make(chan writeRequest, 128)}
 	h.mu.Lock()
 	old := h.peers[hello.WorkerID]
 	h.peers[hello.WorkerID] = p
@@ -311,7 +313,8 @@ func (h *Hub) SendCommand(ctx context.Context, c protocol.Command) error {
 		return err
 	}
 	needsWorkspaces := c.Operation == protocol.BrowseWorkspace || (c.Operation == protocol.NewSession && (c.Arguments.CreateDirectory || c.Arguments.SessionName != ""))
-	if (needsWorkspaces && !p.supportsSessionWorkspaces) || (c.Operation == protocol.DeleteSession && !p.supportsSessionDeletion) {
+	needsConversationHistory := c.Operation == protocol.ReadHistory && c.Arguments.History != nil && c.Arguments.History.Messages
+	if (needsWorkspaces && !p.supportsSessionWorkspaces) || (c.Operation == protocol.DeleteSession && !p.supportsSessionDeletion) || (needsConversationHistory && !p.supportsConversationHistory) {
 		// Old workers disconnect before acknowledging unknown operations. A
 		// transport error here would just replay the command until expiry.
 		// Record a terminal rejection through the same durable path as a worker
@@ -320,7 +323,7 @@ func (h *Hub) SendCommand(ctx context.Context, c protocol.Command) error {
 			return errors.New("command ingestion unavailable")
 		}
 		return h.AckHandler(ctx, p.workerID, p.connectionID, protocol.CommandAck{CommandID: c.ID, Status: "rejected",
-			Error: &protocol.Error{Code: protocol.UnsupportedOperation, Message: "Update the worker to use session creation and deletion, then try again."}})
+			Error: &protocol.Error{Code: protocol.UnsupportedOperation, Message: "Update the worker to support this session action, then try again."}})
 	}
 	return p.send(ctx, "command", c)
 }

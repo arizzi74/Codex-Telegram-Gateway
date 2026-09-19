@@ -45,6 +45,9 @@ func (s *Store) ClaimDeliveries(ctx context.Context, limit int) ([]Delivery, err
 		return nil, err
 	}
 	defer tx.Rollback(ctx)
+	if _, err := tx.Exec(ctx, `UPDATE telegram_deliveries SET status='cancelled' WHERE visibility_revoked=1 AND (status IN ('pending','failed') OR (status='sending' AND next_attempt_at<=`+sqliteNow+`))`); err != nil {
+		return nil, err
+	}
 	if _, err := tx.Exec(ctx, `UPDATE telegram_deliveries AS delivery SET status='cancelled',last_error=NULL
         WHERE kind IN ('agent_progress_message','tool_progress_message')
           AND (status IN ('pending','failed') OR (status='sending' AND next_attempt_at<=`+sqliteNow+`))
@@ -53,7 +56,7 @@ func (s *Store) ClaimDeliveries(ctx context.Context, limit int) ([]Delivery, err
 	}
 	rows, err := tx.Query(ctx, `WITH claimed AS (
  SELECT delivery.delivery_id FROM telegram_deliveries delivery
- WHERE delivery.status IN ('pending','failed','sending') AND delivery.next_attempt_at <= `+sqliteNow+`
+ WHERE delivery.status IN ('pending','failed','sending') AND delivery.visibility_revoked=0 AND delivery.next_attempt_at <= `+sqliteNow+`
    AND (delivery.kind NOT IN ('agent_progress_message','tool_progress_message') OR (NOT `+newerProgressDeliverySQL+` AND NOT EXISTS (
      SELECT 1 FROM events progress
      JOIN events active_event ON active_event.runtime_id=progress.runtime_id
