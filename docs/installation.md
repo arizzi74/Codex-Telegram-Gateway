@@ -12,20 +12,35 @@ Install curl and provide `sha256sum` (Linux) or `shasum` (macOS). The bootstrap
 uses the system POSIX shell and standard utilities. Installation and updates run
 in the downloaded native Go manager. Linux binaries are statically linked;
 macOS binaries use the normal macOS system libraries. Linux service installation
-uses systemd; macOS workers use launchd. Workers also need the supported Codex executable, its normal
-account credentials, and access to their configured workspaces.
+uses systemd; macOS workers use launchd. Run Linux worker setup from a direct
+login as the developer account, including SSH, so its systemd user session is
+available. On macOS, sign in to the desktop and use Terminal; the worker's
+LaunchAgent runs while that desktop account remains logged in.
+Installing Codex when it is missing also requires the standard `tar` and `gzip`
+utilities. See the official [Codex CLI](https://developers.openai.com/codex/cli)
+and [authentication](https://developers.openai.com/codex/auth) instructions for
+its account and sign-in options.
 
 For a gateway, have your public HTTPS address, Telegram bot username and token,
-and allowed numeric Telegram user ID ready. Guided setup creates the JSON
+and allowed numeric Telegram user ID ready. In Telegram, use `@BotFather`'s
+`/newbot` command to create the bot or `/token` to obtain an existing bot's token.
+The allowed user ID belongs to your personal account; it is a number, not your
+username or the bot's ID. Guided setup creates the JSON
 configuration and private secret files for you, including a random webhook
-secret and a SQLite database at `/var/lib/codex-gateway/gateway.db`. Configure
-HTTPS termination separately using the [proxy template](../deploy/nginx/telegramgw.conf).
+secret and a SQLite database at `/var/lib/codex-gateway/gateway.db`. Point your
+domain's DNS records to the gateway and open inbound TCP ports 80 and 443 in
+both its host and cloud firewalls. The wizard can install Caddy and configure
+HTTPS on a fresh Debian or Ubuntu host, check an existing proxy, or guide manual
+setup using the [proxy template](../deploy/nginx/telegramgw.conf).
 For custom settings, prepare the [JSON configuration](../examples/gateway.json)
 and a private environment file instead. The managed gateway database must be
 under `/var/lib/codex-gateway`.
 
 For a worker, enroll it in the gateway admin console and copy its worker ID and
-one-time token. The guided installer creates the configuration for you, or you
+one-time token. Setup offers to install the standalone Codex CLI if it is missing
+and guides its account sign-in. You can use device login over SSH, opening the
+displayed link on another computer. The guided installer creates the worker
+configuration for you, or you
 can prepare [worker.json](../examples/worker.json) with its private token file,
 gateway WSS URL, allowed workspace roots, and runtime profiles. Keep all real configuration and
 credentials outside the repository. See [operations](operations.md) for setup
@@ -63,12 +78,17 @@ setup. No installer arguments are needed. Daily automatic updates are enabled.
 - If no configuration exists, the wizard asks for your HTTPS address, bot
   username, allowed Telegram user ID and display label, local port, and bot
   token. Token entry is hidden; the webhook secret is generated automatically.
+- After installation, the wizard guides HTTPS setup, checks the public routes,
+  registers the Telegram menu and webhook, and prints the admin console address
+  and a one-time token for the first passkey. Enroll your worker in that console
+  before running the worker installer.
 
 The prompts read the terminal directly, so they work through the pipe. Without
 a terminal, prepare the configuration files first. The installer sets up the
 service account, private configuration, SQLite data directory, gateway binary,
-systemd service, and updater. It does not install PostgreSQL or configure DNS,
-TLS certificates, or a reverse proxy.
+systemd service, and updater. It uses SQLite, so no separate database server is
+needed. DNS and firewall changes remain your responsibility; the prompts explain
+what is required and let you retry or finish later.
 
 You can also use `sudo sh /tmp/codex-telegramgw-install.sh` or
 `sudo codex-telegramgw setup gateway`. For an unattended installation using
@@ -83,16 +103,44 @@ sudo sh /tmp/codex-telegramgw-install.sh install gateway \
 
 ### Finish gateway setup
 
-Configure your public HTTPS reverse proxy to reach the selected local port
+The fresh guided installation includes these steps. To resume them later, or
+finish an installation made from prepared configuration files, run:
+
+```sh
+sudo codex-telegramgw finish gateway
+```
+
+Choose **auto** for automatic HTTPS on a fresh Debian or Ubuntu host, **check**
+if your existing proxy is ready, **manual** for configuration instructions, or
+**later** to leave setup and resume with the same command. Automatic setup uses
+Caddy to obtain and renew certificates and preserves existing web servers and
+proxy configurations. Certificate issuance requires the public DNS and ports
+described above and a hostname using the standard HTTPS port 443. Automatic
+setup installs the distribution's `caddy` package and creates its own
+`codex-gateway-proxy.service` with configuration in
+`/etc/codex-gateway-proxy/Caddyfile`. It refuses to replace an existing proxy or
+take over occupied ports; choose **check** or **manual** for those hosts. The
+system package manager maintains Caddy, separately from gateway binary updates.
+
+If you manage the proxy yourself, forward it to the selected local port
 (`127.0.0.1:8080` by default), including WebSocket upgrades. The
 [nginx template](../deploy/nginx/telegramgw.conf) routes `/tgadmin/`,
 `/tgapi/`, `/tghealthz`, and `/tgreadyz`. Preserve these paths when forwarding:
 workers connect at `/tgapi/v1/workers/connect` and Telegram delivers updates
 to `/tgapi/v1/telegram/webhook`.
 
-Then run these
-commands on the gateway host to register the Telegram webhook and command menu
-and create the first administrator's one-time token:
+Once public HTTPS passes its checks, the wizard registers the Telegram webhook
+and command menu, then creates a first administrator's one-time token if needed.
+Open the printed `/tgadmin/` address, register a passkey within 15 minutes, and
+enroll a worker to obtain its ID and token. Existing administrator passkeys are
+preserved when completion is rerun.
+If an existing gateway predates guided administrator setup, the wizard prints
+`sudo codex-telegramgw update gateway`; run that command when convenient, then
+run `sudo codex-telegramgw finish gateway` again. Existing administrators can
+continue signing in while that step is pending.
+
+For manual maintenance, the equivalent gateway administration helper loads the
+private environment through systemd and runs as the service account:
 
 ```sh
 gateway() {
@@ -108,10 +156,9 @@ gateway menu set
 gateway admin bootstrap
 ```
 
-This runs gateway administration as its service account and loads the private
-environment through systemd. The one-time token is printed to your terminal.
-Open the printed `/tgadmin/` address, register a passkey within 15 minutes, and
-enroll a worker to obtain its ID and token.
+The last command prints a one-time token to your terminal. Use the guided finish
+command for normal setup; this helper is also useful when manually changing
+the webhook or command menu.
 
 ## Install a worker
 
@@ -127,9 +174,17 @@ automatic updates enabled:
 - If a worker is already installed in the standard location, setup adopts it
   without changing its configuration or restarting its sessions.
 - Otherwise, it uses a private `worker.json` in the current directory if present.
-- If neither exists, it asks for the gateway address, enrolled worker ID and
-  token, worker name, and workspace. Token entry is hidden. It detects Codex
-  on your `PATH` and creates one primary runtime for the selected workspace.
+- If neither exists, it checks your user service session, offers to install Codex
+  if needed, and guides Codex sign-in. It asks for the gateway address, enrolled
+  worker ID and token, worker name, and initial working directory. Invalid
+  entries can be corrected without restarting the wizard; token entry is hidden.
+- A newly generated configuration allows the user's entire home directory and
+  its subfolders. The initial working directory selects where the primary runtime
+  starts; it does not restrict access to that one project. Explicit workspace
+  restrictions in prepared or existing configurations are preserved. Choosing an
+  initial directory outside your home adds that directory as an allowed root,
+  alongside your home. Symlinks pointing outside an allowed root do not expand
+  access; configure another root explicitly when needed.
 
 The prompts use the terminal directly, so they work when the script is piped
 into `sh`. Without an interactive terminal, provide `worker.json` beforehand.
@@ -138,7 +193,23 @@ or run the native manager's `codex-telegramgw setup worker` command.
 
 This installs both `codex-worker` and `codex-local` for the current user and sets
 up the worker service. Relative configuration paths are resolved before the
-configuration is installed. Add `~/.local/bin` to the terminal's `PATH` if needed.
+configuration is installed. On Linux, setup enables systemd lingering so the
+worker can stay online after logout and start at boot. If administrator access
+is needed, it offers to run `sudo loginctl enable-linger` and verifies the result.
+Declining leaves the worker installed but it may stop after logout. On macOS,
+the worker starts when the user signs in to the desktop.
+
+Setup prints immediately usable `codex-worker status`, `doctor`, and
+`attach --latest` commands with full executable paths. If `~/.local/bin` is not
+on your terminal's `PATH`, it also prints:
+
+```sh
+export PATH="$HOME/.local/bin:$PATH"
+```
+
+Run that line in your current terminal and add it to your shell's startup file
+for future terminals. The installer cannot change the environment of the shell
+that launched the curl command.
 
 For unattended installation with a configuration at another location, the
 explicit command is still available:
@@ -149,8 +220,12 @@ sh /tmp/codex-telegramgw-install.sh install worker \
   --auto-update
 ```
 
-The installer requires an existing, authenticated Codex executable. Once worker
-automatic updates are enabled, the updater also checks the official stable Codex
+Prepared or unattended worker installations require an existing authenticated
+Codex executable. Fresh interactive setup can install and authenticate it for
+you using OpenAI's standalone installer; Node.js, npm, Python, and a compiler are
+not required. Existing Codex installations and credentials are reused.
+
+Once worker automatic updates are enabled, the updater also checks the official stable Codex
 release channel once per UTC day. User-owned standalone installations are
 updated through the native `codex update` command. Installations managed by npm,
 Homebrew, or a manually pinned release retain their existing update mechanism.

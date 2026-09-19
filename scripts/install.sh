@@ -62,6 +62,7 @@ fi
 case "$(uname -s)" in Linux) platform=linux ;; Darwin) platform=darwin ;; *) fail 'unsupported operating system' ;; esac
 case "$(uname -m)" in x86_64|amd64) architecture=amd64 ;; aarch64|arm64) architecture=arm64 ;; *) fail 'unsupported CPU architecture' ;; esac
 asset="codex-telegramgw-$platform-$architecture"
+printf 'Preparing the %s installer for %s/%s...\n' "$1" "$platform" "$architecture"
 download() {
   curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' \
     --tlsv1.2 --connect-timeout 15 --max-time 180 --retry 2 "$@"
@@ -81,6 +82,7 @@ temporary=$(mktemp -d "${TMPDIR:-/tmp}/codex-telegramgw-install.XXXXXXXX")
 trap 'rm -rf -- "$temporary"' EXIT
 trap 'exit 1' HUP INT TERM
 base="https://github.com/$repository/releases/download/$release_tag"
+printf 'Downloading and verifying installer %s...\n' "$release_tag"
 download --max-filesize 1048576 --output "$temporary/SHA256SUMS" "$base/SHA256SUMS" || fail 'could not download release checksums'
 expected=
 seen=' '
@@ -108,4 +110,5 @@ fi
 chmod 0700 "$temporary/$asset"
 CODEX_TELEGRAMGW_BOOTSTRAP_RELEASE=$release_tag
 export CODEX_TELEGRAMGW_BOOTSTRAP_RELEASE
+printf 'Installer verified. Follow the terminal prompts; press Enter to accept defaults.\n'
 "$temporary/$asset" "$@"

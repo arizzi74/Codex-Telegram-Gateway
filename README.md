@@ -8,30 +8,40 @@ processes and support local terminal attachment.
 ## Quick install
 
 Requires curl and `sha256sum` or `shasum`. Downloads are verified native Go
-binaries; Python and a Go compiler are not required.
+binaries; Python and a Go compiler are not required. Installing Codex when it
+is missing also needs the standard `tar` and `gzip` utilities.
 
-**Worker (Linux or macOS):** install and authenticate Codex first, then run as
-the account that owns your workspaces:
-
-```sh
-curl -fsSL https://raw.githubusercontent.com/arizzi74/Codex-Telegram-Gateway/main/scripts/install.sh | sh
-```
-
-Follow the prompts for your gateway address, enrolled worker ID and token, and
-workspace. An existing `worker.json` is reused; rerunning on an installed worker
-preserves its configuration and running sessions.
-
-**Gateway (Linux with systemd):** run the same installer with sudo:
+**Gateway (Linux with systemd):** run on the gateway machine:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/arizzi74/Codex-Telegram-Gateway/main/scripts/install.sh | sudo sh
 ```
 
-Follow the prompts for your public HTTPS address, Telegram bot username and
-token, and allowed Telegram user ID. The installer creates the configuration,
-private secrets, SQLite database, and service. Existing installations are adopted
-without restarting. Configure HTTPS separately, then follow the
-[gateway setup steps](docs/installation.md#finish-gateway-setup).
+Have a domain pointing to this machine, inbound ports 80/443 open, your Telegram
+bot username and token, and your numeric Telegram user ID ready. The wizard
+creates the gateway, guides HTTPS setup, registers the bot menu and webhook, and
+prints the admin address and first passkey enrollment token. On a fresh Debian
+or Ubuntu host it can install Caddy and configure HTTPS automatically. Existing
+proxies can be checked or configured manually within the wizard.
+
+**Worker (Linux with systemd or macOS):** enroll a worker in the gateway console,
+then run on its machine as the account that owns your projects, without sudo:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/arizzi74/Codex-Telegram-Gateway/main/scripts/install.sh | sh
+```
+
+Follow the prompts for your gateway address, worker ID and token, and initial
+working directory. Setup offers to install Codex if missing and guides sign-in,
+including device login over SSH. New guided workers can access your home
+directory and all its subfolders by default. On Linux, setup enables background
+startup after logout, requesting sudo if required. On macOS, the worker runs
+while your desktop account is logged in.
+
+Prompts work through the pipe and secret input is hidden. Rerunning the installer
+preserves existing configurations and running sessions; prepared private JSON
+configurations are also supported. Gateway completion can be resumed with
+`sudo codex-telegramgw finish gateway`.
 
 Gateway URLs use `/tgadmin/` for the console, `/tgapi/v1/` for APIs,
 and `/tghealthz` and `/tgreadyz` for health checks.

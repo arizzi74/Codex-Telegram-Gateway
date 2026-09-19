@@ -59,7 +59,7 @@ func run(args []string, logger *slog.Logger) error {
 		return nil
 	}
 	if args[0] == "help" || args[0] == "--help" {
-		fmt.Println("codex-gateway [--config gateway.json] serve|migrate|admin bootstrap|webhook set|webhook status|menu set|menu status|worker create --name NAME|worker list|worker revoke ID|worker rotate-token ID")
+		fmt.Println("codex-gateway [--config gateway.json] serve|migrate|admin bootstrap|admin bootstrap-if-needed|webhook set|webhook status|menu set|menu status|worker create --name NAME|worker list|worker revoke ID|worker rotate-token ID")
 		return nil
 	}
 	cfg, err := config.LoadGateway(path)
@@ -113,15 +113,10 @@ func run(args []string, logger *slog.Logger) error {
 	case "worker":
 		return workerCommand(ctx, store, args[1:])
 	case "admin":
-		if len(args) != 2 || args[1] != "bootstrap" {
-			return errors.New("use admin bootstrap")
+		if len(args) != 2 || (args[1] != "bootstrap" && args[1] != "bootstrap-if-needed") {
+			return errors.New("use admin bootstrap or admin bootstrap-if-needed")
 		}
-		token, err := store.BootstrapAdmin(ctx)
-		if err != nil {
-			return err
-		}
-		fmt.Printf("Open %s/tgadmin/ and register a passkey with this one-time token (expires in 15 minutes):\n%s\n", cfg.PublicBaseURL, token)
-		return nil
+		return bootstrapGatewayAdmin(ctx, store, cfg.PublicBaseURL, args[1] == "bootstrap-if-needed", os.Stdout)
 	case "webhook":
 		if len(args) != 2 {
 			return errors.New("use webhook set or webhook status")

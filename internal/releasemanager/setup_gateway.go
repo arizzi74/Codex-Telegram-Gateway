@@ -47,7 +47,16 @@ func (m *Manager) setupGateway(ctx context.Context, l *Layout, cwd string, openP
 	}
 	if _, err := os.Lstat(l.Config); err == nil {
 		// Existing gateway adoption performs its own ownership and path checks.
-		return execute(ctx, options{Action: "adopt", Component: "gateway", AutoUpdate: true})
+		if err := execute(ctx, options{Action: "adopt", Component: "gateway", AutoUpdate: true}); err != nil {
+			return err
+		}
+		prompt, err := openPrompt()
+		if err != nil {
+			m.gatewayFinishInstructions()
+			return nil
+		}
+		defer prompt.Close()
+		return m.finishGateway(ctx, l, prompt)
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
@@ -72,68 +81,77 @@ func (m *Manager) setupGateway(ctx context.Context, l *Layout, cwd string, openP
 		if err := validatePreparedGateway(prepared, environment); err != nil {
 			return err
 		}
-		return m.installGuidedGateway(ctx, options{Action: "install", Component: "gateway", Config: prepared, Environment: environment, Version: version, AutoUpdate: true}, execute)
+		return m.installGuidedGateway(ctx, l, options{Action: "install", Component: "gateway", Config: prepared, Environment: environment, Version: version, AutoUpdate: true}, nil, execute)
 	}
 	prompt, err := openPrompt()
 	if err != nil {
 		return errors.New("gateway setup needs a terminal or private gateway.json, .botsecrets, and secrets.env files in the current directory; run this command in an interactive terminal")
 	}
 	defer prompt.Close()
-	fmt.Fprintln(m.Out, "Set up a gateway using your Telegram bot and public HTTPS address. Daily automatic updates will be enabled.")
-	origin, err := prompt.Ask(ctx, "Public HTTPS address", "", false)
+	fmt.Fprintln(m.Out, "Set up a gateway using your Telegram bot and public HTTPS address. Press Enter to accept each default. Daily automatic updates will be enabled.")
+	fmt.Fprintln(m.Out, "Have a domain pointing to this machine. In Telegram, use @BotFather /newbot to create a bot, or /token to retrieve an existing bot's token.")
+	fmt.Fprintln(m.Out, "The allowed Telegram account needs your numeric personal user ID, not your @username and not the bot's ID.")
+	origin, err := askSetupValue(ctx, prompt, m.Out, "Public gateway hostname or HTTPS address", "", false, setupGatewayOrigin)
 	if err != nil {
 		return err
 	}
-	publicURL, err := config.ParseHTTPSOrigin(strings.TrimSpace(origin))
-	if err != nil {
-		return errors.New("public address must be an HTTPS origin without credentials, path, query, or fragment")
-	}
-	bot, err := prompt.Ask(ctx, "Telegram bot username", "", false)
-	if err != nil {
-		return err
-	}
-	bot = strings.TrimPrefix(strings.TrimSpace(bot), "@")
-	if !regexp.MustCompile(`^[A-Za-z0-9_]+$`).MatchString(bot) {
-		return errors.New("Telegram bot username must contain only letters, digits, and underscores")
-	}
-	owner, err := prompt.Ask(ctx, "Your Telegram user ID", "", false)
+	bot, err := askSetupValue(ctx, prompt, m.Out, "Telegram bot username", "", false, func(value string) (string, error) {
+		value = strings.TrimPrefix(strings.TrimSpace(value), "@")
+		if !regexp.MustCompile(`^[A-Za-z0-9_]+$`).MatchString(value) {
+			return "", errors.New("Telegram bot username must contain only letters, digits, and underscores")
+		}
+		return value, nil
+	})
 	if err != nil {
 		return err
 	}
-	owner = strings.TrimSpace(owner)
-	ownerID, err := strconv.ParseInt(owner, 10, 64)
-	if err != nil || ownerID <= 0 || !regexp.MustCompile(`^[0-9]+$`).MatchString(owner) {
-		return errors.New("Telegram user ID must be a positive number")
-	}
-	label, err := prompt.Ask(ctx, "Your display name", "owner", false)
+	owner, err := askSetupValue(ctx, prompt, m.Out, "Your Telegram user ID", "", false, func(value string) (string, error) {
+		value = strings.TrimSpace(value)
+		id, err := strconv.ParseInt(value, 10, 64)
+		if err != nil || id <= 0 || !regexp.MustCompile(`^[0-9]+$`).MatchString(value) {
+			return "", errors.New("Telegram user ID must be a positive number")
+		}
+		return strconv.FormatInt(id, 10), nil
+	})
 	if err != nil {
 		return err
 	}
-	if strings.ContainsFunc(label, unicode.IsControl) {
-		return errors.New("display name must be a single line without control characters")
-	}
-	if label = strings.TrimSpace(label); label == "" {
-		label = "owner"
-	}
-	portValue, err := prompt.Ask(ctx, "Local listen port", "8080", false)
+	ownerID, _ := strconv.ParseInt(owner, 10, 64)
+	label, err := askSetupValue(ctx, prompt, m.Out, "Your display name", "owner", false, func(value string) (string, error) {
+		if strings.ContainsFunc(value, unicode.IsControl) {
+			return "", errors.New("display name must be a single line without control characters")
+		}
+		if value = strings.TrimSpace(value); value == "" {
+			value = "owner"
+		}
+		return value, nil
+	})
 	if err != nil {
 		return err
 	}
-	port, err := strconv.Atoi(strings.TrimSpace(portValue))
-	if err != nil || port < 1024 || port > 65535 {
-		return errors.New("local listen port must be 1024..65535")
+	portValue, err := askSetupValue(ctx, prompt, m.Out, "Local listen port", "8080", false, func(value string) (string, error) {
+		port, err := strconv.Atoi(strings.TrimSpace(value))
+		if err != nil || port < 1024 || port > 65535 {
+			return "", errors.New("local listen port must be 1024..65535")
+		}
+		return strconv.Itoa(port), nil
+	})
+	if err != nil {
+		return err
 	}
 	// Collect the token last, after the public settings have been validated.
-	token, err := prompt.Ask(ctx, "Telegram bot token (hidden)", "", true)
+	token, err := askSetupValue(ctx, prompt, m.Out, "Telegram bot token (hidden)", "", true, func(value string) (string, error) {
+		if strings.ContainsFunc(value, unicode.IsControl) {
+			return "", errors.New("Telegram bot token must be a single line without control characters")
+		}
+		value = strings.TrimSpace(value)
+		if !regexp.MustCompile(`^[0-9]+:[A-Za-z0-9_-]+$`).MatchString(value) {
+			return "", errors.New("Telegram bot token must have the numeric ID and secret separated by a colon")
+		}
+		return value, nil
+	})
 	if err != nil {
 		return err
-	}
-	if strings.ContainsFunc(token, unicode.IsControl) {
-		return errors.New("Telegram bot token must be a single line without control characters")
-	}
-	token = strings.TrimSpace(token)
-	if !regexp.MustCompile(`^[0-9]+:[A-Za-z0-9_-]+$`).MatchString(token) {
-		return errors.New("Telegram bot token must have the numeric ID and secret separated by a colon")
 	}
 	if err := ctx.Err(); err != nil {
 		return err
@@ -162,7 +180,7 @@ func (m *Manager) setupGateway(ctx context.Context, l *Layout, cwd string, openP
 	}
 	configuration := filepath.Join(stage, "gateway.json")
 	if err := WriteJSON(configuration, map[string]any{
-		"listen": fmt.Sprintf("127.0.0.1:%d", port), "public_base_url": publicURL.String(),
+		"listen": "127.0.0.1:" + portValue, "public_base_url": origin,
 		"database_path": filepath.Join(root, "gateway.db"), "bot_secrets_file": botPath,
 		"webhook_secret_env": setupWebhookSecretEnv, "allowed_user_ids": []int64{ownerID},
 	}); err != nil {
@@ -174,10 +192,22 @@ func (m *Manager) setupGateway(ctx context.Context, l *Layout, cwd string, openP
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	return m.installGuidedGateway(ctx, options{Action: "install", Component: "gateway", Config: configuration, Environment: environment, Version: version, AutoUpdate: true}, execute)
+	return m.installGuidedGateway(ctx, l, options{Action: "install", Component: "gateway", Config: configuration, Environment: environment, Version: version, AutoUpdate: true}, prompt, execute)
 }
 
-func (m *Manager) installGuidedGateway(ctx context.Context, opts options, execute func(context.Context, options) error) error {
+func setupGatewayOrigin(value string) (string, error) {
+	value = strings.TrimSpace(value)
+	if !strings.Contains(value, "://") {
+		value = "https://" + value
+	}
+	publicURL, err := config.ParseHTTPSOrigin(value)
+	if err != nil {
+		return "", errors.New("public address must be a hostname or HTTPS origin without credentials, path, query, or fragment")
+	}
+	return publicURL.String(), nil
+}
+
+func (m *Manager) installGuidedGateway(ctx context.Context, l *Layout, opts options, prompt workerSetupPrompt, execute func(context.Context, options) error) error {
 	cfg, err := config.LoadGateway(opts.Config)
 	if err != nil {
 		return errors.New("gateway setup configuration failed validation")
@@ -185,8 +215,12 @@ func (m *Manager) installGuidedGateway(ctx context.Context, opts options, execut
 	if err := execute(ctx, opts); err != nil {
 		return err
 	}
-	fmt.Fprintf(m.Out, "Configure your HTTPS reverse proxy to %s, then finish Telegram webhook, menu, and admin setup:\nhttps://github.com/%s/blob/main/docs/installation.md#finish-gateway-setup\n", strconv.Quote(cfg.Listen), DefaultRepo)
-	return nil
+	if prompt == nil {
+		fmt.Fprintf(m.Out, "Gateway installed and listening at %s.\n", cfg.Listen)
+		m.gatewayFinishInstructions()
+		return nil
+	}
+	return m.guideGatewayCompletion(ctx, l, cfg, prompt)
 }
 
 func validatePreparedGateway(path, environment string) error {

@@ -5,6 +5,8 @@ import (
 	"context"
 	"encoding/hex"
 	"errors"
+	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -28,7 +30,11 @@ func gatewaySetupFixture(t *testing.T) (*Manager, *Layout, string) {
 		t.Fatal(err)
 	}
 	t.Setenv("CODEX_TELEGRAMGW_BOOTSTRAP_RELEASE", "v0.5.2")
-	return New(nil), l, cwd
+	m := New(nil)
+	m.HTTP = &http.Client{Transport: gatewaySetupRoundTrip(func(*http.Request) (*http.Response, error) {
+		return nil, errors.New("HTTPS not configured")
+	})}
+	return m, l, cwd
 }
 
 func preparedGatewayConfig(t *testing.T, cwd string, l *Layout) (string, string) {
@@ -54,14 +60,13 @@ func TestSetupGatewayRequiresSudoBeforeReadingConfiguration(t *testing.T) {
 	}
 }
 
-func TestSetupGatewayAdoptsWithoutPromptsOrConfigurationChanges(t *testing.T) {
+func TestSetupGatewayAdoptsWithoutTerminalAndPreservesConfiguration(t *testing.T) {
 	m, l, cwd := gatewaySetupFixture(t)
 	platformWrite(t, l.Config, "existing gateway configuration", 0640)
 	before, _ := os.ReadFile(l.Config)
 	called := false
 	err := m.setupGateway(context.Background(), l, cwd, func() (workerSetupPrompt, error) {
-		t.Fatal("existing installation should not prompt")
-		return nil, nil
+		return nil, errors.New("no terminal")
 	}, func(_ context.Context, opts options) error {
 		called = true
 		if opts != (options{Action: "adopt", Component: "gateway", AutoUpdate: true}) {
@@ -72,6 +77,40 @@ func TestSetupGatewayAdoptsWithoutPromptsOrConfigurationChanges(t *testing.T) {
 	after, _ := os.ReadFile(l.Config)
 	if err != nil || !called || !bytes.Equal(before, after) {
 		t.Fatal("existing installation was not preserved", err)
+	}
+}
+
+func TestSetupGatewayAdoptsThenResumesCompletion(t *testing.T) {
+	m, l, cwd := gatewaySetupFixture(t)
+	prepared, _ := preparedGatewayConfig(t, cwd, l)
+	cfg, err := ReadJSON(prepared)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg["bot_secrets_file"] = filepath.Join(cwd, ".botsecrets")
+	if err := WriteJSON(l.Config, cfg); err != nil {
+		t.Fatal(err)
+	}
+	before, _ := os.ReadFile(l.Config)
+	var output bytes.Buffer
+	m.Out = &output
+	prompt := &scriptedWorkerSetup{t: t, answers: []string{"later"}}
+	adopted := false
+	err = m.setupGateway(context.Background(), l, cwd, func() (workerSetupPrompt, error) {
+		if !adopted {
+			t.Fatal("completion started before adoption")
+		}
+		return prompt, nil
+	}, func(_ context.Context, opts options) error {
+		adopted = true
+		if opts != (options{Action: "adopt", Component: "gateway", AutoUpdate: true}) {
+			t.Fatalf("unexpected adoption options: %+v", opts)
+		}
+		return nil
+	})
+	after, _ := os.ReadFile(l.Config)
+	if err != nil || !adopted || !prompt.closed || !bytes.Equal(before, after) || !strings.Contains(output.String(), "sudo codex-telegramgw finish gateway") {
+		t.Fatal("adoption did not preserve configuration and resume completion", err)
 	}
 }
 
@@ -98,7 +137,7 @@ func TestSetupGatewayUsesPreparedFilesWithoutPrompts(t *testing.T) {
 	if err != nil || !called || FileExists(l.Config) || !bytes.Equal(configBefore, configAfter) || !bytes.Equal(envBefore, envAfter) {
 		t.Fatal("prepared configuration flow failed", err)
 	}
-	if !strings.Contains(output.String(), "127.0.0.1:8080") || !strings.Contains(output.String(), "#finish-gateway-setup") {
+	if !strings.Contains(output.String(), "127.0.0.1:8080") || !strings.Contains(output.String(), "sudo codex-telegramgw finish gateway") {
 		t.Fatal("gateway completion instructions missing")
 	}
 }
@@ -113,7 +152,7 @@ func TestSetupGatewayGuidedConfigIsPrivateValidatedAndTemporary(t *testing.T) {
 			token := "123456789:private-bot-token_aZ-123"
 			label := `Owner "quoted" $(not-evaluated) &=:`
 			prompt := &scriptedWorkerSetup{t: t, answers: []string{
-				"https://gateway.example.com:8443/", "@example_bot", "12345", label, "8090", token,
+				"https://gateway.example.com:8443/", "@example_bot", "12345", label, "8090", token, "later",
 			}}
 			var stage string
 			installErr := errors.New("test install failure")
@@ -156,7 +195,11 @@ func TestSetupGatewayGuidedConfigIsPrivateValidatedAndTemporary(t *testing.T) {
 			if (installFails && !errors.Is(err, installErr)) || (!installFails && err != nil) {
 				t.Fatal(err)
 			}
-			if stage == "" || FileExists(stage) || !prompt.closed || !reflect.DeepEqual(prompt.secrets, []bool{false, false, false, false, false, true}) {
+			wantSecrets := []bool{false, false, false, false, false, true}
+			if !installFails {
+				wantSecrets = append(wantSecrets, false)
+			}
+			if stage == "" || FileExists(stage) || !prompt.closed || !reflect.DeepEqual(prompt.secrets, wantSecrets) {
 				t.Fatal("setup did not hide token or clean temporary files")
 			}
 			if strings.Contains(output.String(), token) || (err != nil && strings.Contains(err.Error(), token)) {
@@ -167,7 +210,7 @@ func TestSetupGatewayGuidedConfigIsPrivateValidatedAndTemporary(t *testing.T) {
 					t.Fatal("setup leaked webhook secret")
 				}
 			}
-			if installFails && strings.Contains(output.String(), "#finish-gateway-setup") {
+			if installFails && strings.Contains(output.String(), "sudo codex-telegramgw finish gateway") {
 				t.Fatal("failed install showed completion instructions")
 			}
 		})
@@ -179,10 +222,10 @@ func TestSetupGatewayGuidedConfigIsPrivateValidatedAndTemporary(t *testing.T) {
 
 func TestSetupGatewayDefaults(t *testing.T) {
 	m, l, cwd := gatewaySetupFixture(t)
-	prompt := &scriptedWorkerSetup{t: t, answers: []string{"https://gateway.example.com", "example_bot", "12345", "", "", "12345:token"}}
+	prompt := &scriptedWorkerSetup{t: t, answers: []string{"gateway.example.com", "example_bot", "12345", "", "", "12345:token", "later"}}
 	err := m.setupGateway(context.Background(), l, cwd, func() (workerSetupPrompt, error) { return prompt, nil }, func(_ context.Context, opts options) error {
 		cfg, err := config.LoadGateway(opts.Config)
-		if err != nil || cfg.Listen != "127.0.0.1:8080" || cfg.Secrets.WLName != "owner" {
+		if err != nil || cfg.Listen != "127.0.0.1:8080" || cfg.Secrets.WLName != "owner" || cfg.PublicBaseURL != "https://gateway.example.com" {
 			t.Fatal("default setup values failed", err)
 		}
 		return nil
@@ -192,7 +235,72 @@ func TestSetupGatewayDefaults(t *testing.T) {
 	}
 }
 
-func TestSetupGatewayRejectsInvalidInputBeforeInstallation(t *testing.T) {
+func TestSetupGatewayCorrectsFieldsWithoutRestarting(t *testing.T) {
+	m, l, cwd := gatewaySetupFixture(t)
+	var output bytes.Buffer
+	m.Out = &output
+	prompt := &scriptedWorkerSetup{t: t, answers: []string{
+		"https://private-token@gateway.example.com", "gateway.example.com",
+		"private-token\nWLID=2", "@example_bot",
+		"-1", "12345",
+		"private-token\nBOTTOKEN=bad", "Owner",
+		"443", "8080",
+		"private-token", "12345:valid-bot-token",
+		"later",
+	}}
+	installed := false
+	err := m.setupGateway(context.Background(), l, cwd, func() (workerSetupPrompt, error) { return prompt, nil }, func(_ context.Context, opts options) error {
+		installed = true
+		cfg, err := config.LoadGateway(opts.Config)
+		if err != nil {
+			return err
+		}
+		if cfg.PublicBaseURL != "https://gateway.example.com" || cfg.Secrets.BotName != "example_bot" || cfg.Secrets.WLID != 12345 || cfg.Secrets.WLName != "Owner" || cfg.Listen != "127.0.0.1:8080" || cfg.Secrets.BotToken != "12345:valid-bot-token" {
+			t.Fatal("corrected fields did not reach installation")
+		}
+		return nil
+	})
+	if err != nil || !installed || !prompt.closed || len(prompt.answers) != 0 || strings.Count(output.String(), "Please try again.") != 6 {
+		t.Fatal("fields could not be corrected in place", err, output.String())
+	}
+	if strings.Contains(output.String(), "private-token") || strings.Contains(output.String(), "valid-bot-token") {
+		t.Fatal("correction printed private input")
+	}
+	if !prompt.secrets[10] || !prompt.secrets[11] {
+		t.Fatal("token retry did not retain hidden input")
+	}
+}
+
+func TestSetupGatewayOrigin(t *testing.T) {
+	for _, tc := range []struct{ input, want string }{
+		{"gateway.example.com", "https://gateway.example.com"},
+		{" gateway.example.com:8443/ ", "https://gateway.example.com:8443"},
+		{"https://gateway.example.com/", "https://gateway.example.com"},
+		{"http://gateway.example.com", ""},
+		{"", ""},
+		{"//gateway.example.com", ""},
+		{"private-token@gateway.example.com", ""},
+		{"gateway.example.com/path", ""},
+		{"gateway.example.com?token=private-token", ""},
+		{"gateway.example.com#private-token", ""},
+	} {
+		got, err := setupGatewayOrigin(tc.input)
+		if got != tc.want || (err == nil) != (tc.want != "") || (err != nil && strings.Contains(err.Error(), "private-token")) {
+			t.Errorf("origin normalization = %q, %v; want %q", got, err, tc.want)
+		}
+	}
+}
+
+type endedGatewaySetup struct{ *scriptedWorkerSetup }
+
+func (p *endedGatewaySetup) Ask(ctx context.Context, label, fallback string, secret bool) (string, error) {
+	if len(p.answers) == 0 {
+		return "", io.EOF
+	}
+	return p.scriptedWorkerSetup.Ask(ctx, label, fallback, secret)
+}
+
+func TestSetupGatewayRepromptsInvalidInputBeforeInstallation(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
 		answers []string
@@ -219,12 +327,12 @@ func TestSetupGatewayRejectsInvalidInputBeforeInstallation(t *testing.T) {
 			m.Out = &output
 			temp := t.TempDir()
 			t.Setenv("TMPDIR", temp)
-			prompt := &scriptedWorkerSetup{t: t, answers: tc.answers}
+			prompt := &endedGatewaySetup{&scriptedWorkerSetup{t: t, answers: tc.answers}}
 			err := m.setupGateway(context.Background(), l, cwd, func() (workerSetupPrompt, error) { return prompt, nil }, func(context.Context, options) error {
 				t.Fatal("invalid setup attempted an installation")
 				return nil
 			})
-			if err == nil || !prompt.closed || FileExists(l.Config) || strings.Contains(err.Error()+output.String(), "private-token") {
+			if !errors.Is(err, io.EOF) || !prompt.closed || FileExists(l.Config) || !strings.Contains(output.String(), "Please try again.") || strings.Contains(err.Error()+output.String(), "private-token") {
 				t.Fatal("invalid setup was not rejected privately", err)
 			}
 			files, _ := os.ReadDir(temp)

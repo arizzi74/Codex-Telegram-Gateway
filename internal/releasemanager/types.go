@@ -27,6 +27,7 @@ type Runner func(context.Context, ...string) (CommandResult, error)
 type Manager struct {
 	Run          Runner
 	CodexRun     Runner
+	SetupRun     Runner
 	Out          io.Writer
 	HTTP         *http.Client
 	Self         string

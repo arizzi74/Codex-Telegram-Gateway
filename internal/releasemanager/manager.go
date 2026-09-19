@@ -70,6 +70,7 @@ const usage = `Install and update Codex Telegram Gateway from verified GitHub Re
 
 Usage:
   codex-telegramgw setup [gateway|worker]
+  codex-telegramgw finish gateway
   codex-telegramgw install gateway --config PATH --secrets-env PATH [--auto-update]
   codex-telegramgw install worker --config PATH [--auto-update]
   codex-telegramgw adopt gateway|worker [--auto-update]
@@ -82,8 +83,8 @@ Install and update accept --version vMAJOR.MINOR.PATCH and --repo OWNER/REPOSITO
 Run gateway administration with sudo and worker administration as its user.
 Setup defaults to gateway under sudo/root and worker otherwise.
 Gateway setup reuses ./gateway.json and ./secrets.env or prompts for settings.
-It generates the webhook secret; HTTPS must be configured separately.
-Worker installation requires an installed, authenticated Codex executable.
+It guides HTTPS, Telegram activation, and administrator enrollment.
+Worker setup can install Codex and guide sign-in when needed.
 Worker setup reuses ./worker.json or prompts for enrollment and workspace details.
 Setup enables daily updates and adopts existing services without restarting them.
 Worker updates also check the stable Codex runtime once per day and apply it when idle.
@@ -192,6 +193,12 @@ func Execute(ctx context.Context, args []string, out, errOut io.Writer) int {
 			} else {
 				err = New(out).SetupWorker(ctx)
 			}
+		}
+	} else if args[0] == "finish" {
+		if len(args) != 2 || args[1] != "gateway" {
+			err = errors.New("usage: codex-telegramgw finish gateway")
+		} else {
+			err = New(out).FinishGateway(ctx)
 		}
 	} else {
 		var opts options

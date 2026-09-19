@@ -6,11 +6,11 @@ import (
 	"fmt"
 	"net/url"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 
 	"github.com/google/uuid"
+	"github.com/iaia/telegramgw/internal/auth"
 	"github.com/iaia/telegramgw/internal/config"
 )
 
@@ -69,68 +69,65 @@ func (m *Manager) setupWorker(ctx context.Context, l *Layout, cwd string, openPr
 		return errors.New("worker setup needs a terminal or a private worker.json in the current directory; run this command in an interactive terminal")
 	}
 	defer prompt.Close()
-	codex, err := exec.LookPath("codex")
-	if err != nil {
-		return errors.New("Codex CLI is not available in PATH; install and authenticate Codex, then run this installer again")
+	if err := m.prepareWorkerSetupService(ctx, l); err != nil {
+		return err
 	}
-	codex, err = filepath.Abs(codex)
+	fmt.Fprintln(m.Out, "Set up this machine as a worker. Press Enter to accept each default. Daily automatic updates will be enabled.")
+	gateway, err := askSetupValue(ctx, prompt, m.Out, "Gateway address (hostname or HTTPS URL)", "", false, setupGatewayURL)
 	if err != nil {
 		return err
 	}
-	fmt.Fprintln(m.Out, "Set up a worker using the worker ID and enrollment token from your gateway. Daily automatic updates will be enabled.")
-	gateway, err := prompt.Ask(ctx, "Gateway HTTPS address (or full WSS URL)", "", false)
+	adminURL, _ := url.Parse(gateway)
+	adminURL.Scheme, adminURL.Path, adminURL.RawPath = "https", "/tgadmin/", ""
+	fmt.Fprintf(m.Out, "Open %s, sign in, and choose Enroll worker. Keep its Worker ID and enrollment token ready; the token is shown only once.\n", adminURL.String())
+	workerID, err := askSetupValue(ctx, prompt, m.Out, "Enrolled worker ID (UUID)", "", false, func(value string) (string, error) {
+		id, err := uuid.Parse(strings.TrimSpace(value))
+		if err != nil {
+			return "", errors.New("worker ID must be the UUID assigned by your gateway during enrollment")
+		}
+		return id.String(), nil
+	})
 	if err != nil {
 		return err
 	}
-	gateway, err = setupGatewayURL(gateway)
+	name, err := askSetupValue(ctx, prompt, m.Out, "Worker name", "my-worker", false, func(value string) (string, error) {
+		value = strings.TrimSpace(value)
+		if value == "" || strings.ContainsAny(value, "\r\n\x00") {
+			return "", errors.New("worker name must be a nonempty single line")
+		}
+		return value, nil
+	})
 	if err != nil {
 		return err
 	}
-	workerID, err := prompt.Ask(ctx, "Enrolled worker ID (UUID)", "", false)
+	roots, err := auth.CanonicalWorkspaceRoots([]string{l.Home})
+	if err != nil {
+		return errors.New("worker home must be an existing directory")
+	}
+	fmt.Fprintf(m.Out, "The worker can use your entire home directory (%s), including all subfolders. Choosing a starting directory elsewhere also allows that directory and its subfolders.\n", l.Home)
+	workspace, err := askSetupValue(ctx, prompt, m.Out, "Starting directory", l.Home, false, func(value string) (string, error) {
+		return setupWorkerDirectory(value, l.Home, cwd)
+	})
 	if err != nil {
 		return err
 	}
-	id, err := uuid.Parse(strings.TrimSpace(workerID))
-	if err != nil {
-		return errors.New("worker ID must be the UUID assigned by your gateway during enrollment")
-	}
-	name, err := prompt.Ask(ctx, "Worker name", "my-worker", false)
-	if err != nil {
-		return err
-	}
-	if name = strings.TrimSpace(name); name == "" {
-		name = "my-worker"
-	}
-	workspace, err := prompt.Ask(ctx, "Workspace directory", cwd, false)
-	if err != nil {
-		return err
-	}
-	workspace = strings.TrimSpace(workspace)
-	if workspace == "" {
-		workspace = cwd
-	}
-	if workspace == "~" {
-		workspace = l.Home
-	} else if strings.HasPrefix(workspace, "~/") {
-		workspace = filepath.Join(l.Home, workspace[2:])
-	} else if !filepath.IsAbs(workspace) {
-		workspace = filepath.Join(cwd, workspace)
-	}
-	workspace, err = filepath.Abs(workspace)
-	if err != nil {
-		return errors.New("workspace must be an existing directory")
-	}
-	if info, err := os.Stat(workspace); err != nil || !info.IsDir() {
-		return errors.New("workspace must be an existing directory")
+	if _, err := auth.CanonicalWorkspace(workspace, roots); err != nil {
+		roots = append(roots, workspace)
 	}
 	// Ask for the secret last, after validating the non-secret settings.
-	token, err := prompt.Ask(ctx, "Worker enrollment token (hidden)", "", true)
+	token, err := askSetupValue(ctx, prompt, m.Out, "Worker enrollment token (hidden)", "", true, func(value string) (string, error) {
+		value = strings.TrimSpace(value)
+		if value == "" || strings.ContainsAny(value, "\r\n\x00") {
+			return "", errors.New("worker enrollment token must be a nonempty single line")
+		}
+		return value, nil
+	})
 	if err != nil {
 		return err
 	}
-	token = strings.TrimSpace(token)
-	if token == "" || strings.ContainsAny(token, "\r\n\x00") {
-		return errors.New("worker enrollment token must be a nonempty single line")
+	codex, err := m.setupWorkerCodex(ctx, prompt, l)
+	if err != nil {
+		return err
 	}
 	stage, err := os.MkdirTemp("", "codex-telegramgw-setup-")
 	if err != nil {
@@ -142,10 +139,10 @@ func (m *Manager) setupWorker(ctx context.Context, l *Layout, cwd string, openPr
 		return err
 	}
 	cfg := config.WorkerConfig{
-		WorkerID: id.String(), Name: name,
+		WorkerID: workerID, Name: name,
 		StateFile:  filepath.Join(l.Home, ".local/state/codex-worker/worker.db"),
 		GatewayURL: gateway, TokenFile: tokenPath,
-		AllowedWorkspaceRoots: []string{workspace}, MaxQueuedTurns: 20,
+		AllowedWorkspaceRoots: roots, MaxQueuedTurns: 20,
 		Runtimes: []config.RuntimeProfile{{
 			ID: "primary", Name: "Primary Codex", CodexBinary: codex,
 			WorkingDirectory: workspace, Autostart: true, RestartPolicy: "on-failure",
@@ -161,14 +158,43 @@ func (m *Manager) setupWorker(ctx context.Context, l *Layout, cwd string, openPr
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	return execute(ctx, options{Action: "install", Component: "worker", Config: configPath, Version: version, AutoUpdate: true})
+	if err := execute(ctx, options{Action: "install", Component: "worker", Config: configPath, Version: version, AutoUpdate: true}); err != nil {
+		return err
+	}
+	return m.finishWorkerSetup(ctx, l, prompt)
+}
+
+func setupWorkerDirectory(value, home, cwd string) (string, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "", errors.New("starting directory must be an existing accessible directory")
+	}
+	if value == "~" {
+		value = home
+	} else if strings.HasPrefix(value, "~/") {
+		value = filepath.Join(home, value[2:])
+	} else if !filepath.IsAbs(value) {
+		value = filepath.Join(cwd, value)
+	}
+	roots, err := auth.CanonicalWorkspaceRoots([]string{value})
+	if err != nil {
+		return "", errors.New("starting directory must be an existing accessible directory")
+	}
+	return roots[0], nil
 }
 
 func setupGatewayURL(value string) (string, error) {
 	value = strings.TrimSpace(value)
+	if !strings.Contains(value, "://") {
+		value = "https://" + value
+	}
 	u, err := url.Parse(value)
-	if err == nil && u.Scheme == "https" {
-		u, err = config.ParseHTTPSOrigin(value)
+	if err == nil && u.Scheme == "https" && u.User == nil && u.RawQuery == "" && !u.ForceQuery && !strings.Contains(value, "#") {
+		// Users often copy the admin-console address from their browser.
+		if u.EscapedPath() == "/tgadmin" || u.EscapedPath() == "/tgadmin/" {
+			u.Path, u.RawPath = "", ""
+		}
+		u, err = config.ParseHTTPSOrigin(u.String())
 		if err == nil {
 			u.Scheme = "wss"
 			u.Path = config.WorkerConnectPath
@@ -183,5 +209,5 @@ func setupGatewayURL(value string) (string, error) {
 			return config.NormalizeGatewayURL(u.String()), nil
 		}
 	}
-	return "", errors.New("gateway address must be an HTTPS origin or WSS URL without credentials, query, or fragment")
+	return "", errors.New("gateway address must be a hostname, an HTTPS address (optionally ending in /tgadmin/), or a WSS URL without credentials, query, or fragment")
 }

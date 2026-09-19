@@ -6,7 +6,11 @@ for custom deployments and recovery.
 
 Run the gateway behind TLS termination at its configured public HTTPS origin,
 such as `https://gateway.example.com`. The gateway
-listens only on loopback; public access goes through nginx. The sample
+listens only on loopback; public access goes through an HTTPS proxy. Guided setup
+can configure Caddy on a fresh Debian or Ubuntu host, using
+`codex-gateway-proxy.service` and `/etc/codex-gateway-proxy/Caddyfile`.
+Run `sudo codex-telegramgw finish gateway` to resume HTTPS, Telegram, and first
+administrator setup. For a manually managed nginx deployment, the sample
 [nginx configuration](../deploy/nginx/telegramgw.conf) proxies health checks,
 the admin interface, HTTP APIs, and WebSocket upgrades with bounded body and
 timeout settings. Check it with `nginx -t` before a reload.
@@ -65,6 +69,18 @@ normal repositories and credentials. Use `--no-start` when staging a
 configuration for review. The user-service installer rejects paths containing
 spaces or shell/XML control characters; stage the bundle under a simple
 absolute path.
+
+Fresh guided installation permits the owning user's home directory and all its
+subfolders by default, while prepared configurations keep their explicit
+`allowed_workspace_roots`. Selecting a starting project does not narrow the
+home-directory root. Files remain subject to the account's normal filesystem
+permissions and Codex's configured execution policy.
+
+Linux workers need systemd lingering to remain available after logout and start
+at boot. The guided installer checks and enables it, asking for sudo if needed.
+For a manual installation, an administrator can run
+`sudo loginctl enable-linger USER` for the worker's account. Verify with
+`loginctl show-user USER --property=Linger`.
 
 On macOS the same installer creates and validates a native LaunchAgent plist
 with `PlistBuddy`, then bootstraps it for the current GUI user. It does not use
