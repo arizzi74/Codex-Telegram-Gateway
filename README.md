@@ -106,7 +106,7 @@ operations you authorize Codex to perform.
 The bot authorizes only the numeric `WLID` in its private `.botsecrets` file.
 Changing a Telegram username does not grant access. To use the bot, send
 `/tgstart`, then `/tginstances` or `/tgsessions` and select a session.
-All gateway commands begin with `/tg`: `/tgconnect`, `/tgstatus`, `/tgnew`,
+All gateway commands begin with `/tg`: `/tgconnect`, `/tgstatus`, `/tgnew`, `/tgdeletesession`,
 `/tghistory`, `/tgdisconnect`, `/tgsteer`, `/tginterrupt`, and `/tginput`. Telegram's initial
 `/start` button remains an alias for `/tgstart`.
 

@@ -18,6 +18,10 @@ import (
 // only the returned opaque token; all authorization context remains in SQL.
 type Callback struct {
 	Action, BotID, Decision, QuestionID, Answer string
+	WizardID                                    string
+	WizardRevision                              int64
+	Path                                        string
+	Offset                                      int
 	UserID, ChatID, TopicID                     int64
 	SessionID, RuntimeID, ApprovalID            uuid.UUID
 	Generation                                  int64
@@ -27,6 +31,10 @@ type Callback struct {
 }
 
 type callbackPayload struct {
+	WizardID        string `json:"wizard_id,omitempty"`
+	WizardRevision  int64  `json:"wizard_revision,omitempty"`
+	Path            string `json:"path,omitempty"`
+	Offset          int    `json:"offset,omitempty"`
 	BotID           string `json:"bot_id"`
 	ChatID, TopicID int64
 	RuntimeID       string                   `json:"runtime_id,omitempty"`
@@ -48,7 +56,10 @@ func (s *Store) CreateCallback(ctx context.Context, callback Callback) (string, 
 	if callback.Action == "history" && (callback.SessionID == uuid.Nil || callback.RuntimeID == uuid.Nil || callback.Generation <= 0 || callback.History.Validate() != nil) {
 		return "", errors.New("registry: invalid history callback")
 	}
-	payload, err := json.Marshal(callbackPayload{BotID: callback.BotID, ChatID: callback.ChatID, TopicID: callback.TopicID, RuntimeID: uuidText(callback.RuntimeID), Generation: callback.Generation, SessionPage: callback.SessionPage, Decision: callback.Decision, QuestionID: callback.QuestionID, Answer: callback.Answer, History: callback.History})
+	if isWizardCallback(callback.Action) && (callback.WizardID == "" || callback.WizardRevision <= 0 || callback.Offset < 0 || callback.Offset > 1_000_000 || len(callback.Path) > 4096) {
+		return "", errors.New("registry: invalid wizard callback")
+	}
+	payload, err := json.Marshal(callbackPayload{WizardID: callback.WizardID, WizardRevision: callback.WizardRevision, Path: callback.Path, Offset: callback.Offset, BotID: callback.BotID, ChatID: callback.ChatID, TopicID: callback.TopicID, RuntimeID: uuidText(callback.RuntimeID), Generation: callback.Generation, SessionPage: callback.SessionPage, Decision: callback.Decision, QuestionID: callback.QuestionID, Answer: callback.Answer, History: callback.History})
 	if err != nil {
 		return "", err
 	}
@@ -78,7 +89,7 @@ func (s *Store) CreateCallback(ctx context.Context, callback Callback) (string, 
 }
 
 func validSessionPage(action string, page int) bool {
-	return page >= 0 && page <= 1_000_000 && (page == 0 || action == "sessions")
+	return page >= 0 && page <= 1_000_000 && (page == 0 || action == "sessions" || action == "delete_sessions")
 }
 
 func callbackToken() (string, error) {
@@ -128,6 +139,16 @@ func (s *Store) consumeCallback(ctx context.Context, tx *dbTx, in IncomingUpdate
 			return ErrCallbackInvalid
 		}
 		return nil
+	}
+	if isWizardCallback(action) {
+		result, err := s.consumeWizardCallback(ctx, tx, in, action, context, sessionID)
+		if err != nil {
+			return AcceptResult{}, err
+		}
+		if err := markUsed(); err != nil {
+			return AcceptResult{}, err
+		}
+		return result, nil
 	}
 	switch action {
 	case "history":
@@ -219,14 +240,15 @@ func (s *Store) consumeCallback(ctx context.Context, tx *dbTx, in IncomingUpdate
 		if !callbackMatchesTarget(context, runtime) {
 			return AcceptResult{}, ErrCallbackInvalid
 		}
-		command, err := createTelegramCommand(ctx, tx, in, runtime, protocol.NewSession, "", "", protocol.Arguments{})
+		in.Target = runtime.runtimeID.String()
+		result, err := s.startSessionWizard(ctx, tx, in, "new")
 		if err != nil {
 			return AcceptResult{}, err
 		}
 		if err := markUsed(); err != nil {
 			return AcceptResult{}, err
 		}
-		return AcceptResult{View: "queued", RuntimeID: runtime.runtimeID.String(), CommandID: command.ID}, nil
+		return result, nil
 	case "approval", "input", "input_prompt":
 	default:
 		return AcceptResult{}, ErrCallbackInvalid

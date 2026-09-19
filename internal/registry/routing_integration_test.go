@@ -230,12 +230,12 @@ func TestAcceptTelegramNewAndRoutingWritesIntegration(t *testing.T) {
 	ctx := context.Background()
 	newRequest := telegramUpdate(env, 1)
 	newRequest.Action, newRequest.Target = "new", "main"
-	_, err := env.store.AcceptTelegram(ctx, newRequest)
-	if err != nil {
-		t.Fatal(err)
+	result, err := env.store.AcceptTelegram(ctx, newRequest)
+	if err != nil || result.View != "new_session_name" || result.WizardID == "" {
+		t.Fatalf("new session wizard = %#v, %v", result, err)
 	}
 	pending, err := env.store.PendingCommandsForWorker(ctx, env.worker, 10)
-	if err != nil || len(pending) != 1 || pending[0].Operation != protocol.NewSession || pending[0].SessionID != "" {
+	if err != nil || len(pending) != 0 {
 		t.Fatalf("new session command = %#v, %v", pending, err)
 	}
 
@@ -259,7 +259,7 @@ func TestAcceptTelegramNewAndRoutingWritesIntegration(t *testing.T) {
 		t.Fatalf("status = %#v, %v", result, err)
 	}
 	pending, err = env.store.PendingCommandsForWorker(ctx, env.worker, 10)
-	if err != nil || len(pending) != 1 {
+	if err != nil || len(pending) != 0 {
 		t.Fatalf("routing write created command: %#v, %v", pending, err)
 	}
 }

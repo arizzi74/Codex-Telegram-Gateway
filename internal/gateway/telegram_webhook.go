@@ -173,6 +173,8 @@ func parseTelegramText(text, botName string) (action, target, prompt string, ign
 		return "instances", "", "", false
 	case "tgsessions", "tgconnect", "tgstatus", "tgnew":
 		return strings.TrimPrefix(name, "tg"), tail, "", false
+	case "tgdeletesession":
+		return "delete_session", tail, "", false
 	case "tgdisconnect":
 		return "disconnect", "", "", false
 	case "tghistory":

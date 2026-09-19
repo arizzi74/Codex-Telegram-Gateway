@@ -43,16 +43,22 @@ type IncomingUpdate struct {
 // AcceptResult is a durable UI response descriptor. The Telegram renderer owns
 // presentation; the registry only records a bounded view/result code.
 type AcceptResult struct {
-	Duplicate   bool   `json:"duplicate,omitempty"`
-	View        string `json:"view,omitempty"`
-	Action      string `json:"action,omitempty"`
-	SessionID   string `json:"session_id,omitempty"`
-	RuntimeID   string `json:"runtime_id,omitempty"`
-	SessionPage int    `json:"session_page,omitempty"`
-	CommandID   string `json:"command_id,omitempty"`
-	ApprovalID  string `json:"approval_id,omitempty"`
-	QuestionID  string `json:"question_id,omitempty"`
-	ErrorCode   string `json:"error_code,omitempty"`
+	WizardID       string                  `json:"wizard_id,omitempty"`
+	WizardRevision int64                   `json:"wizard_revision,omitempty"`
+	SessionName    string                  `json:"session_name,omitempty"`
+	CWD            string                  `json:"cwd,omitempty"`
+	Workspace      *protocol.WorkspacePage `json:"workspace,omitempty"`
+	UserID         int64                   `json:"user_id,omitempty"`
+	Duplicate      bool                    `json:"duplicate,omitempty"`
+	View           string                  `json:"view,omitempty"`
+	Action         string                  `json:"action,omitempty"`
+	SessionID      string                  `json:"session_id,omitempty"`
+	RuntimeID      string                  `json:"runtime_id,omitempty"`
+	SessionPage    int                     `json:"session_page,omitempty"`
+	CommandID      string                  `json:"command_id,omitempty"`
+	ApprovalID     string                  `json:"approval_id,omitempty"`
+	QuestionID     string                  `json:"question_id,omitempty"`
+	ErrorCode      string                  `json:"error_code,omitempty"`
 }
 
 // SessionStatus is the compact, current read model used by Telegram status
@@ -165,6 +171,8 @@ func (s *Store) AcceptTelegram(ctx context.Context, in IncomingUpdate) (AcceptRe
 	var result AcceptResult
 	if in.CallbackToken != "" {
 		result, err = s.consumeCallback(ctx, tx, in)
+	} else if handled, wizardResult, wizardErr := s.acceptWizardText(ctx, tx, in); handled || wizardErr != nil {
+		result, err = wizardResult, wizardErr
 	} else if (strings.TrimSpace(in.Action) == "" || strings.EqualFold(strings.TrimSpace(in.Action), "text")) && in.ReplyToMessageID > 0 {
 		result, err = s.acceptReplyInput(ctx, tx, in)
 	} else {
@@ -300,19 +308,12 @@ func (s *Store) acceptAction(ctx context.Context, tx *dbTx, in IncomingUpdate) (
 			return AcceptResult{}, fmt.Errorf("registry: disconnect selection: %w", err)
 		}
 		return AcceptResult{View: "disconnected"}, nil
-	case "new":
-		runtime, picker, err := resolveOptionalRuntime(ctx, tx, in.Target)
-		if err != nil {
-			return AcceptResult{}, err
+	case "new", "delete_session":
+		kind := "new"
+		if action == "delete_session" {
+			kind = "delete"
 		}
-		if picker {
-			return AcceptResult{View: "runtime_picker", Action: "new"}, nil
-		}
-		command, err := createTelegramCommand(ctx, tx, in, runtime, protocol.NewSession, "", "", protocol.Arguments{})
-		if err != nil {
-			return AcceptResult{}, err
-		}
-		return AcceptResult{View: "queued", RuntimeID: runtime.runtimeID.String(), CommandID: command.ID}, nil
+		return s.startSessionWizard(ctx, tx, in, kind)
 	case "input":
 		return acceptInput(ctx, tx, in)
 	case "steer", "interrupt":
@@ -354,23 +355,16 @@ func (s *Store) acceptCodexCommand(ctx context.Context, tx *dbTx, in IncomingUpd
 		return s.acceptAction(ctx, tx, in)
 	case "new", "clear":
 		target, err := resolveRoute(ctx, tx, in)
-		if errors.Is(err, ErrTelegramTarget) {
-			in.Action, in.Target = "new", ""
-			return s.acceptAction(ctx, tx, in)
-		}
-		if err != nil {
+		in.Action, in.Target = "new", ""
+		if err == nil {
+			in.Target = target.runtimeID.String()
+		} else if !errors.Is(err, ErrTelegramTarget) {
 			return AcceptResult{}, err
 		}
-		var cwd string
-		if err := tx.QueryRow(ctx, "SELECT COALESCE(cwd,'') FROM sessions WHERE session_id=$1", target.sessionID).Scan(&cwd); err != nil {
-			return AcceptResult{}, err
-		}
-		target.sessionID, target.threadID, target.activeTurnID = uuid.Nil, "", ""
-		command, err := createTelegramCommand(ctx, tx, in, target, protocol.NewSession, "", "", protocol.Arguments{CWD: cwd})
-		if err != nil {
-			return AcceptResult{}, err
-		}
-		return AcceptResult{View: "queued", RuntimeID: target.runtimeID.String(), CommandID: command.ID}, nil
+		return s.acceptAction(ctx, tx, in)
+	case "delete":
+		in.Action, in.Target = "delete_session", ""
+		return s.acceptAction(ctx, tx, in)
 	}
 	target, err := resolveRoute(ctx, tx, in)
 	if err != nil {
@@ -928,6 +922,11 @@ func (s *Store) AcknowledgeCommand(ctx context.Context, workerID, connectionID u
         WHERE command_id=$1 AND worker_id=$2 AND status IN ('pending','dispatched','acknowledged')`, commandID, workerID, status, code, message)
 	if err != nil {
 		return fmt.Errorf("registry: acknowledge command: %w", err)
+	}
+	if ct.RowsAffected() > 0 && status == "failed" {
+		if err := recoverSessionWizardAcknowledgement(ctx, tx, commandID, code); err != nil {
+			return err
+		}
 	}
 	if ct.RowsAffected() == 0 {
 		var commandStatus string

@@ -18,7 +18,7 @@ func TestMenuNamesAreValidAndUnique(t *testing.T) {
 		}
 		seen[command.Command] = true
 	}
-	for _, required := range []string{"tgstatus", "status", "tgsessions", "model", "tginput", "tghistory", "compact"} {
+	for _, required := range []string{"tgstatus", "status", "tgsessions", "tgdeletesession", "model", "tginput", "tghistory", "compact"} {
 		if !seen[required] {
 			t.Fatalf("missing menu entry: %s", required)
 		}

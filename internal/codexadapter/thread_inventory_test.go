@@ -68,6 +68,13 @@ func TestThreadStartedPreservesHelperClassification(t *testing.T) {
 	}
 }
 
+func TestSpawnedThreadParentUsesSessionSourceFallback(t *testing.T) {
+	thread, err := decodeThread(json.RawMessage(`{"id":"child","source":{"subAgent":{"thread_spawn":{"parent_thread_id":"parent","depth":1}}}}`))
+	if err != nil || thread.ParentThreadID != "parent" {
+		t.Fatalf("spawned parent = %q, %v", thread.ParentThreadID, err)
+	}
+}
+
 func TestListAllThreadsComplete(t *testing.T) {
 	type page struct {
 		count  int

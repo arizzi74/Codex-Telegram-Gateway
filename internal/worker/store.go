@@ -409,6 +409,12 @@ func (s *Store) UpsertSession(session protocol.Session) (protocol.Session, error
 			if err := json.Unmarshal(value, &old); err != nil {
 				return err
 			}
+			// Permanent Codex deletion wins over an older in-flight discovery
+			// snapshot or notification. This identity can never be restored.
+			if old.Deleted {
+				saved = old
+				return nil
+			}
 			saved.ID = old.ID
 		} else if saved.ID == "" {
 			saved.ID = uuid.NewString()
@@ -473,6 +479,9 @@ func (s *Store) changeDiscoveredSessionVisibility(runtime protocol.Runtime, expe
 			return err
 		}
 		saved = current
+		if current.Deleted {
+			return nil
+		}
 		previous := expected
 		current.UpdatedAt, previous.UpdatedAt = time.Time{}, time.Time{}
 		if saved.Archived == candidate.Archived || !reflect.DeepEqual(current, previous) || !saved.UpdatedAt.Equal(expected.UpdatedAt) {

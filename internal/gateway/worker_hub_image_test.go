@@ -27,7 +27,8 @@ func TestHubImageCapabilityProtectsOldWorkersAndTransfersImageBytes(t *testing.T
 		}
 		t.Run(name, func(t *testing.T) {
 			store := testRegistry(t)
-			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+			const testTimeout = 30 * time.Second
+			ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
 			defer cancel()
 			token, err := auth.GenerateWorkerToken()
 			if err != nil {
@@ -37,7 +38,11 @@ func TestHubImageCapabilityProtectsOldWorkersAndTransfersImageBytes(t *testing.T
 			if _, err := store.CreateWorker(ctx, registry.CreateWorkerInput{ID: id, Name: "worker", OS: "linux", Arch: "amd64", TokenHash: auth.HashWorkerToken(token)}); err != nil {
 				t.Fatal(err)
 			}
-			hub := NewHub(store, slog.New(slog.NewTextHandler(io.Discard, nil)), time.Second, 3*time.Second)
+			// This fixture sends its next heartbeat only after decoding the
+			// image. Race instrumentation can spend several seconds processing
+			// that frame, so do not expire the connection as if this were a
+			// heartbeat-liveness test. The context still bounds the whole test.
+			hub := NewHub(store, slog.New(slog.NewTextHandler(io.Discard, nil)), time.Second, testTimeout)
 			server := httptest.NewTLSServer(hub)
 			defer server.Close()
 			conn, _, err := websocket.Dial(ctx, "wss"+strings.TrimPrefix(server.URL, "https"), &websocket.DialOptions{HTTPClient: server.Client(), HTTPHeader: http.Header{"Authorization": []string{"Bearer " + token}}})

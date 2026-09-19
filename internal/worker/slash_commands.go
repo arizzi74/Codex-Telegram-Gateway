@@ -216,7 +216,7 @@ func (s *sessionActor) executeCodexCommand(ctx context.Context, client *codexada
 	case "approve":
 		return protocol.Result{Text: terminalGuidance(name, "retrying an automatic approval review requires the original denial event")}, nil
 	case "delete":
-		return protocol.Result{Text: "Telegram does not delete Codex history. Use `/archive` for a reversible action, or run `/delete` in the local Codex terminal if permanent deletion is intended."}, nil
+		return protocol.Result{Text: "Use `/tgdeletesession` to choose and delete a Codex session while keeping its working directory. Use `/archive` for reversible archival."}, nil
 	case "side", "btw":
 		return protocol.Result{Text: terminalGuidance(name, "side conversations need the interactive agent-thread picker")}, nil
 	case "mention":

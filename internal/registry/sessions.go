@@ -48,7 +48,8 @@ func upsertProtocolSession(ctx context.Context, tx *dbTx, workerID, runtimeID uu
                     OR julianday(json_extract(EXCLUDED.metadata, '$.stats.observed_at')) >= julianday(json_extract(sessions.metadata, '$.stats.observed_at')))
                 THEN json_set(sessions.metadata, '$.stats', json_extract(EXCLUDED.metadata, '$.stats')) ELSE sessions.metadata END,
             last_reconciled_at = (strftime('%Y-%m-%dT%H:%M:%f','now') || '000000Z')
-        WHERE sessions.worker_id = EXCLUDED.worker_id AND sessions.runtime_id = EXCLUDED.runtime_id`,
+        WHERE sessions.worker_id = EXCLUDED.worker_id AND sessions.runtime_id = EXCLUDED.runtime_id
+          AND COALESCE(json_extract(sessions.metadata, '$.deleted'), 0) = 0`,
 		id, workerID, runtimeID, session.ThreadID, session.Name, session.Preview, session.CWD,
 		session.GitBranch, session.GitRoot, session.State, session.ActiveTurnID,
 		session.Loaded, session.Archived, activity, json.RawMessage(metadata))
@@ -56,6 +57,14 @@ func upsertProtocolSession(ctx context.Context, tx *dbTx, workerID, runtimeID uu
 		return fmt.Errorf("registry: upsert session: %w", err)
 	}
 	if ct.RowsAffected() == 0 {
+		var deleted bool
+		err := tx.QueryRow(ctx, `SELECT COALESCE(json_extract(metadata,'$.deleted'),0)=1 FROM sessions WHERE session_id=$1 AND worker_id=$2 AND runtime_id=$3 AND codex_thread_id=$4`, id, workerID, runtimeID, session.ThreadID).Scan(&deleted)
+		if err == nil && deleted {
+			return nil
+		}
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
 		return ErrEventTarget
 	}
 	return nil
@@ -285,4 +294,33 @@ func (s *Store) RuntimeSnapshot(ctx context.Context) ([]protocol.Runtime, error)
 		return nil, fmt.Errorf("registry: list runtime snapshot: %w", err)
 	}
 	return result, nil
+}
+
+// Permanent deletion is a durable fact about one exact Codex thread. A worker
+// restart does not undo it, so confirmed tombstones also apply across runtime
+// generations. Preserve descriptive metadata and retain the row for audit FKs.
+func applyDeletedSession(ctx context.Context, tx *dbTx, workerID, runtimeID uuid.UUID, expectedID *uuid.UUID, session protocol.Session) error {
+	id, err := uuid.Parse(session.ID)
+	if err != nil || expectedID == nil || id != *expectedID || session.WorkerID != workerID.String() || session.RuntimeID != runtimeID.String() || session.ThreadID == "" || !session.Deleted || !session.Archived || session.Loaded || session.ActiveTurnID != "" || session.State != "not_loaded" {
+		return ErrEventTarget
+	}
+	ct, err := tx.Exec(ctx, `UPDATE sessions SET archived=TRUE,loaded=FALSE,state='not_loaded',active_turn_id=NULL,last_reconciled_at=(strftime('%Y-%m-%dT%H:%M:%f','now') || '000000Z'),metadata=json_set(metadata,'$.deleted',json('true')) WHERE session_id=$1 AND worker_id=$2 AND runtime_id=$3 AND codex_thread_id=$4`, id, workerID, runtimeID, session.ThreadID)
+	if err != nil {
+		return fmt.Errorf("registry: record deleted session: %w", err)
+	}
+	if ct.RowsAffected() != 1 {
+		return ErrEventTarget
+	}
+	if _, err := tx.Exec(ctx, `INSERT INTO telegram_selection_revisions (bot_id,user_id,chat_id,message_thread_id,revision)
+  SELECT bot_id,user_id,chat_id,message_thread_id,1 FROM telegram_bindings WHERE session_id=$1
+  ON CONFLICT(bot_id,user_id,chat_id,message_thread_id) DO UPDATE SET revision=telegram_selection_revisions.revision+1`, id); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `DELETE FROM telegram_bindings WHERE session_id=$1`, id); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `UPDATE approvals SET state='cleared',resolved_at=(strftime('%Y-%m-%dT%H:%M:%f','now') || '000000Z') WHERE session_id=$1 AND state='pending'`, id); err != nil {
+		return err
+	}
+	return nil
 }

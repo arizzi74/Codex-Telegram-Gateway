@@ -227,6 +227,8 @@ func eventKind(method string) string {
 		return "thread_status_changed"
 	case "thread/closed":
 		return "thread_closed"
+	case "thread/deleted":
+		return "thread_deleted"
 	case "turn/started":
 		return "turn_started"
 	case "turn/completed":
@@ -373,6 +375,13 @@ func (c *Client) track(event Event) {
 		if event.ThreadID != "" && (event.TurnID == "" || c.active[event.ThreadID] == event.TurnID) {
 			delete(c.active, event.ThreadID)
 		}
+	case "thread/deleted":
+		delete(c.active, event.ThreadID)
+		for id, request := range c.serverRequests {
+			if request.ThreadID == event.ThreadID {
+				delete(c.serverRequests, id)
+			}
+		}
 	case "serverRequest/resolved":
 		if event.RequestID != "" {
 			delete(c.serverRequests, event.RequestID)
@@ -453,6 +462,20 @@ func decodeThread(raw json.RawMessage) (Thread, error) {
 		return Thread{}, err
 	}
 	thread := Thread{ID: wire.ID, SessionID: wire.SessionID, ParentThreadID: wire.ParentThreadID, Source: threadSourceName(wire.Source), ThreadSource: wire.ThreadSource, Name: wire.Name, Preview: wire.Preview, CWD: wire.CWD, Model: wire.Model, ModelProvider: wire.ModelProvider, GitBranch: wire.GitInfo.Branch, Status: statusName(wire.Status), CreatedAt: wire.CreatedAt, UpdatedAt: wire.UpdatedAt, Ephemeral: wire.Ephemeral, Raw: cloneRaw(raw)}
+	if thread.ParentThreadID == "" {
+		// Older app-server versions retain spawned-thread ancestry only in
+		// SessionSource, before the top-level parentThreadId projection.
+		var source struct {
+			SubAgent struct {
+				ThreadSpawn struct {
+					ParentThreadID string `json:"parent_thread_id"`
+				} `json:"thread_spawn"`
+			} `json:"subAgent"`
+		}
+		if json.Unmarshal(wire.Source, &source) == nil {
+			thread.ParentThreadID = source.SubAgent.ThreadSpawn.ParentThreadID
+		}
+	}
 	for _, turn := range wire.Turns {
 		if turn.Status == "inProgress" {
 			thread.ActiveTurnID = turn.ID

@@ -13,4 +13,4 @@ import "embed"
 var SQL embed.FS
 
 // Files is the ordered migration list. Versions are encoded in the filename.
-var Files = []string{"001_registry.sql", "002_admin_session_activity.sql"}
+var Files = []string{"001_registry.sql", "002_admin_session_activity.sql", "003_telegram_session_wizards.sql"}

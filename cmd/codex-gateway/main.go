@@ -23,7 +23,6 @@ import (
 	"github.com/iaia/telegramgw/internal/config"
 	"github.com/iaia/telegramgw/internal/gateway"
 	"github.com/iaia/telegramgw/internal/registry"
-	"github.com/iaia/telegramgw/internal/telegramcommands"
 )
 
 func main() {
@@ -86,17 +85,7 @@ func run(args []string, logger *slog.Logger) error {
 		}
 		api := gateway.NewTelegramClient(cfg.Secrets.BotToken)
 		if args[1] == "set" {
-			identity, err := api.Identity(ctx)
-			if err != nil {
-				return err
-			}
-			if !strings.EqualFold(identity.Username, strings.TrimPrefix(cfg.Secrets.BotName, "@")) {
-				return errors.New("Telegram token belongs to a different bot than BOTNAME")
-			}
-			if err := api.SetMyCommands(ctx, telegramcommands.Commands()); err != nil {
-				return err
-			}
-			if err := api.SetChatMenuButton(ctx, 0, gateway.MenuButton{Type: "commands"}); err != nil {
+			if err := gateway.SyncCommandMenu(ctx, api, cfg.Secrets.BotName); err != nil {
 				return err
 			}
 			fmt.Println("Telegram command menu configured.")
@@ -179,6 +168,13 @@ func run(args []string, logger *slog.Logger) error {
 		server := &http.Server{Addr: cfg.Listen, Handler: mux, ReadHeaderTimeout: cfg.ReadHeaderTimeout, ReadTimeout: 15 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 16 << 10}
 		serviceCtx, stopService := context.WithCancel(ctx)
 		var services sync.WaitGroup
+		services.Go(func() {
+			menuCtx, cancel := context.WithTimeout(serviceCtx, 45*time.Second)
+			defer cancel()
+			if err := gateway.SyncCommandMenu(menuCtx, api, cfg.Secrets.BotName); err != nil && serviceCtx.Err() == nil {
+				logger.Warn("Telegram command menu update failed; retry with codex-gateway menu set")
+			}
+		})
 		services.Go(func() { hub.Run(serviceCtx) })
 		services.Go(func() { _ = sender.Run(serviceCtx) })
 		services.Go(func() { _ = dispatcher.Run(serviceCtx) })

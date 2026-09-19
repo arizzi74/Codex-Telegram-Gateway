@@ -36,6 +36,7 @@ type Session struct {
 	ActiveTurnID string        `json:"active_turn_id,omitempty"`
 	Loaded       bool          `json:"loaded"`
 	Archived     bool          `json:"archived"`
+	Deleted      bool          `json:"deleted,omitempty"`
 	UpdatedAt    time.Time     `json:"updated_at"`
 	Stats        *SessionStats `json:"stats,omitempty"`
 }
@@ -78,6 +79,8 @@ const (
 	InputResponse    Operation = "input_response"
 	CodexCommand     Operation = "codex_command"
 	ReadHistory      Operation = "read_history"
+	BrowseWorkspace  Operation = "browse_workspace"
+	DeleteSession    Operation = "delete_session"
 )
 
 // Command contains an immutable execution target. No dispatch path may consult a
@@ -97,6 +100,9 @@ type Command struct {
 }
 
 type Arguments struct {
+	Workspace         *WorkspaceRequest    `json:"workspace,omitempty"`
+	SessionName       string               `json:"session_name,omitempty"`
+	CreateDirectory   bool                 `json:"create_directory,omitempty"`
 	History           *HistoryRequest      `json:"history,omitempty"`
 	SelectionRevision *uint64              `json:"selection_revision,omitempty"`
 	Codex             *CodexCommandPayload `json:"codex,omitempty"`
@@ -128,11 +134,11 @@ func (c Command) Validate() error {
 		return errors.New("invalid command lifetime")
 	}
 	switch c.Operation {
-	case NewSession:
+	case NewSession, BrowseWorkspace:
 		if c.SessionID != "" || c.ThreadID != "" {
 			return errors.New("new session cannot target an existing thread")
 		}
-	case StartTurn, Steer, Interrupt, ApprovalResponse, InputResponse, CodexCommand, ReadHistory:
+	case StartTurn, Steer, Interrupt, ApprovalResponse, InputResponse, CodexCommand, ReadHistory, DeleteSession:
 		if _, err := uuid.Parse(c.SessionID); err != nil || c.ThreadID == "" {
 			return errors.New("missing session target")
 		}
@@ -167,6 +173,24 @@ func (c Command) Validate() error {
 	if c.Operation == ReadHistory {
 		if err := c.Arguments.History.Validate(); err != nil {
 			return err
+		}
+	}
+	if c.Operation == BrowseWorkspace {
+		if err := c.Arguments.Workspace.Validate(); err != nil {
+			return err
+		}
+	} else if c.Arguments.Workspace != nil {
+		return errors.New("workspace browser arguments require browse_workspace")
+	}
+	if c.Arguments.CreateDirectory || c.Arguments.SessionName != "" {
+		if c.Operation != NewSession {
+			return errors.New("session creation arguments require new_session")
+		}
+		if _, err := NormalizeSessionName(c.Arguments.SessionName); err != nil {
+			return err
+		}
+		if c.Arguments.CreateDirectory && strings.TrimSpace(c.Arguments.CWD) == "" {
+			return errors.New("directory creation requires a selected parent folder")
 		}
 	}
 	return nil
@@ -204,13 +228,14 @@ type EventAck struct {
 }
 
 type Result struct {
-	History   *HistoryPage `json:"history,omitempty"`
-	CommandID string       `json:"command_id,omitempty"`
-	TurnID    string       `json:"turn_id,omitempty"`
-	Text      string       `json:"text,omitempty"`
-	State     string       `json:"state,omitempty"`
-	Error     *Error       `json:"error,omitempty"`
-	Session   *Session     `json:"session,omitempty"`
+	Workspace *WorkspacePage `json:"workspace,omitempty"`
+	History   *HistoryPage   `json:"history,omitempty"`
+	CommandID string         `json:"command_id,omitempty"`
+	TurnID    string         `json:"turn_id,omitempty"`
+	Text      string         `json:"text,omitempty"`
+	State     string         `json:"state,omitempty"`
+	Error     *Error         `json:"error,omitempty"`
+	Session   *Session       `json:"session,omitempty"`
 }
 
 const DefaultHistoryLimit = 10

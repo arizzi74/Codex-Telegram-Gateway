@@ -368,6 +368,9 @@ func nullGeneration(event protocol.Event) any {
 }
 
 func (s *Store) applyEvent(ctx context.Context, tx *dbTx, workerID uuid.UUID, event protocol.Event, target eventTarget) (notify bool, commandID *uuid.UUID, err error) {
+	if handled, err := applySessionWizardEvent(ctx, tx, workerID, event, target); handled || err != nil {
+		return false, nil, err
+	}
 	if handled, notify, commandID, err := applyHistoryEvent(ctx, tx, workerID, event, target); handled || err != nil {
 		return notify, commandID, err
 	}
@@ -408,12 +411,21 @@ func (s *Store) applyEvent(ctx context.Context, tx *dbTx, workerID uuid.UUID, ev
 	}
 
 	if event.Kind == "session_discovered" || event.Kind == "session_state_changed" {
-		if !target.runtimeCurrent || target.runtimeID == nil {
+		if target.runtimeID == nil {
 			return false, nil, nil
 		}
 		var session protocol.Session
 		if err := json.Unmarshal(event.Data, &session); err != nil {
 			return false, nil, fmt.Errorf("registry: decode session snapshot: %w", err)
+		}
+		if session.Deleted {
+			if err := applyDeletedSession(ctx, tx, workerID, *target.runtimeID, target.sessionID, session); err != nil {
+				return false, nil, err
+			}
+			return false, nil, nil
+		}
+		if !target.runtimeCurrent {
+			return false, nil, nil
 		}
 		if err := upsertProtocolSession(ctx, tx, workerID, *target.runtimeID, target.sessionID, session); err != nil {
 			return false, nil, err

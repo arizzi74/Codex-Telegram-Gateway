@@ -7,6 +7,7 @@ go vet ./...
 # Python is only used to test the source-only PostgreSQL migration utilities.
 # Installation, updates and release packaging use native Go executables.
 PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts -p 'test_sqlite_*.py'
-go test -race ./... -timeout=90s
+# Allow the isolated SQLite integration suite to finish under race instrumentation.
+go test -race ./... -timeout=180s
 ./scripts/release.sh
 ./scripts/verify-release.sh

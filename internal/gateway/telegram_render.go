@@ -69,6 +69,13 @@ func (s *Sender) renderUIResponse(ctx context.Context, row registry.Delivery) (s
 	if err := json.Unmarshal(row.Payload, &response); err != nil {
 		return "", nil, fmt.Errorf("render Telegram UI response: %w", err)
 	}
+	if sessionWizardView(response.View) {
+		text, keyboard, err := s.renderSessionWizard(ctx, row, response)
+		if err == nil && response.ErrorCode != "" {
+			text = telegramErrorText(response.ErrorCode) + "\n\n" + text
+		}
+		return text, keyboard, err
+	}
 	if response.ErrorCode != "" || response.View == "error" {
 		return telegramErrorText(response.ErrorCode), nil, nil
 	}
@@ -84,6 +91,9 @@ func (s *Sender) renderUIResponse(ctx context.Context, row registry.Delivery) (s
 		}
 		return s.renderInstances(ctx, row, inventory)
 	case "runtime_picker":
+		if response.WizardID != "" {
+			return s.renderWizardRuntimePicker(ctx, row, response)
+		}
 		if response.Action != "sessions" && response.Action != "new" {
 			return "", nil, errors.New("render Telegram runtime picker: missing action")
 		}
@@ -192,6 +202,10 @@ func (s *Sender) renderRuntimePicker(ctx context.Context, row registry.Delivery,
 }
 
 func (s *Sender) renderSessions(ctx context.Context, row registry.Delivery, runtimeID uuid.UUID, inv renderInventory, page int) (string, *TelegramKeyboard, error) {
+	return s.renderSessionList(ctx, row, runtimeID, inv, page, nil)
+}
+
+func (s *Sender) renderSessionList(ctx context.Context, row registry.Delivery, runtimeID uuid.UUID, inv renderInventory, page int, wizard *registry.AcceptResult) (string, *TelegramKeyboard, error) {
 	if page < 0 {
 		return "", nil, errors.New("render sessions: invalid page")
 	}
@@ -215,7 +229,11 @@ func (s *Sender) renderSessions(ctx context.Context, row registry.Delivery, runt
 	start := page * sessionPageSize
 	end := min(start+sessionPageSize, len(sessions))
 	var text strings.Builder
-	text.WriteString("Sessions · " + s.sessionListField(workerLabel(worker), 64, 256) + " / " + s.sessionListField(runtimeLabel(runtime), 64, 256))
+	title := "Sessions · "
+	if wizard != nil {
+		title = "Delete a session · "
+	}
+	text.WriteString(title + s.sessionListField(workerLabel(worker), 64, 256) + " / " + s.sessionListField(runtimeLabel(runtime), 64, 256))
 	fmt.Fprintf(&text, "\nPage %d of %d · %d sessions", page+1, pages, len(sessions))
 	keyboard := &TelegramKeyboard{}
 	if len(sessions) == 0 {
@@ -228,6 +246,14 @@ func (s *Sender) renderSessions(ctx context.Context, row registry.Delivery, runt
 		sessionID, err := requiredUUID("session", session.ID)
 		if err != nil {
 			return "", nil, err
+		}
+		if wizard != nil {
+			token, err := s.sessionWizardCallback(ctx, row, *wizard, registry.Callback{Action: "delete_session_pick", SessionID: sessionID, RuntimeID: runtimeID, Generation: int64(runtime.Generation)})
+			if err != nil {
+				return "", nil, err
+			}
+			keyboard.Rows = append(keyboard.Rows, []TelegramButton{{Text: fmt.Sprintf("Delete %d", number), Data: token}})
+			continue
 		}
 		connect, err := s.callback(ctx, row, registry.Callback{Action: "select", SessionID: sessionID, RuntimeID: runtimeID, Generation: int64(runtime.Generation)})
 		if err != nil {
@@ -247,7 +273,15 @@ func (s *Sender) renderSessions(ctx context.Context, row registry.Delivery, runt
 		if target.page < 0 || target.page >= pages {
 			continue
 		}
-		token, err := s.callback(ctx, row, registry.Callback{Action: "sessions", RuntimeID: runtimeID, Generation: int64(runtime.Generation), SessionPage: target.page})
+		var token string
+		var err error
+		callback := registry.Callback{Action: "sessions", RuntimeID: runtimeID, Generation: int64(runtime.Generation), SessionPage: target.page}
+		if wizard != nil {
+			callback.Action = "delete_sessions"
+			token, err = s.sessionWizardCallback(ctx, row, *wizard, callback)
+		} else {
+			token, err = s.callback(ctx, row, callback)
+		}
 		if err != nil {
 			return "", nil, fmt.Errorf("render session page callback: %w", err)
 		}
@@ -255,6 +289,15 @@ func (s *Sender) renderSessions(ctx context.Context, row registry.Delivery, runt
 	}
 	if len(navigation) > 0 {
 		keyboard.Rows = append(keyboard.Rows, navigation)
+	}
+	if wizard != nil {
+		text.WriteString("\n\nSelect a session to delete its Codex conversation. Its working directory and files will be kept.")
+		token, err := s.sessionWizardCallback(ctx, row, *wizard, registry.Callback{Action: "wizard_cancel"})
+		if err != nil {
+			return "", nil, err
+		}
+		keyboard.Rows = append(keyboard.Rows, []TelegramButton{{Text: "Cancel", Data: token}})
+		return text.String(), keyboard, nil
 	}
 	create, err := s.callback(ctx, row, registry.Callback{Action: "new", RuntimeID: runtimeID, Generation: int64(runtime.Generation)})
 	if err != nil {
@@ -698,7 +741,7 @@ func findQuestion(questions []protocol.Question, id string) (protocol.Question, 
 }
 
 func helpText() string {
-	return "Gateway commands:\n/tgstart — getting started\n/tghelp — show this guide\n/tginstances — list workers and runtimes\n/tgsessions — list sessions\n/tgconnect <session> — select a session\n/tgstatus — show gateway session and queue state\n/tghistory [count] — show saved Codex prompts\n/tgdisconnect — clear the selection\n/tgnew — create a session\n/tgsteer <text> — guide the active turn\n/tginterrupt — stop the active turn\n/tginput <approval-id> <question-id> <answer> — answer a request (or reply to its message)\n\nCodex commands use their usual names: /status, /model, /compact, /review and more. Use /help for the full list or the bot menu."
+	return "Gateway commands:\n/tgstart — getting started\n/tghelp — show this guide\n/tginstances — list workers and runtimes\n/tgsessions — list sessions\n/tgconnect <session> — select a session\n/tgstatus — show gateway session and queue state\n/tghistory [count] — show saved Codex prompts\n/tgdisconnect — clear the selection\n/tgnew — name a session and choose its folder\n/tgdeletesession — delete a session and keep its folder\n/tgsteer <text> — guide the active turn\n/tginterrupt — stop the active turn\n/tginput <approval-id> <question-id> <answer> — answer a request (or reply to its message)\n\nCodex commands use their usual names: /status, /model, /compact, /review and more. Use /help for the full list or the bot menu."
 }
 
 func codexHelpText() string {
@@ -730,6 +773,22 @@ func telegramErrorText(code string) string {
 		return "Use /tginput <approval-id> <question-id> <answer>, or reply to the input request message."
 	case "history_usage":
 		return "Use /tghistory to show the latest 10 saved Codex prompts, or /tghistory <count> with a count from 1 to 50."
+	case "command_outcome_unknown":
+		return "Codex did not confirm the outcome. Check /tgsessions and the working directory before trying again."
+	case "session_name_invalid":
+		return "Choose a session name of up to 120 bytes without slashes, backslashes, or control characters."
+	case "wizard_pending":
+		return "Finish or cancel the current session action using its buttons before sending a prompt."
+	case "wizard_expired":
+		return "This session action expired. Start again with /tgnew or /tgdeletesession."
+	case "session_busy":
+		return "This session or one of its child sessions has an active turn or pending work. Wait for it to finish or interrupt it before deleting the session."
+	case "invalid_workspace":
+		return "The folder is unavailable, outside the allowed workspaces, or the new folder already exists. Choose another parent folder or session name."
+	case "internal_error":
+		return "The worker could not complete this session action. Ensure the worker is up to date, then start again with /tgnew or /tgdeletesession."
+	case "unsupported_operation":
+		return "The worker needs an update to support this session action. Update it and start again."
 	case "callback_invalid":
 		return "This button is expired, already used, or no longer valid."
 	case "stale_turn":

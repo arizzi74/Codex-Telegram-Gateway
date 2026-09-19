@@ -78,6 +78,8 @@ func TestCodexAndGatewayNamespaces(t *testing.T) {
 		{"/debug_config", "codex", "debug-config", ""},
 		{"/debug-config", "codex", "debug-config", ""},
 		{"/tgnew", "new", "", ""},
+		{"/tgdeletesession", "delete_session", "", ""},
+		{"/tgdeletesession@mybot runtime", "delete_session", "runtime", ""},
 		{"/new", "codex", "new", ""},
 		{"/connect old gateway name", "unknown_command", "connect", ""},
 		{"/unknown never becomes a model prompt", "unknown_command", "unknown", ""},

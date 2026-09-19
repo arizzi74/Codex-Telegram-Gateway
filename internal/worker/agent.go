@@ -155,6 +155,9 @@ func (a *Agent) dispatch(ctx context.Context, c protocol.Command) (protocol.Comm
 	if time.Now().After(c.ExpiresAt) {
 		return a.reject(c, protocol.CommandExpired, "Command has expired.")
 	}
+	if c.Operation == protocol.BrowseWorkspace {
+		return a.browseWorkspace(c)
+	}
 	if c.Operation == protocol.NewSession {
 		a.mu.Lock()
 		queue := a.creates[c.RuntimeID]
@@ -289,6 +292,9 @@ func (a *Agent) onEvent(runtime protocol.Runtime, event codexadapter.Event) {
 	}
 	actor := a.actorForThread(runtime.ID, event.ThreadID)
 	if actor == nil {
+		if event.Kind == "thread_deleted" {
+			a.observeDeletedThread(runtime, event.ThreadID)
+		}
 		return
 	}
 	// Generation travels with the event; delivery after restart is ignored.
@@ -342,10 +348,25 @@ func (a *Agent) createLoop(runtimeID string, queue <-chan protocol.Command) {
 				a.report(err)
 				continue
 			}
+			if c.Arguments.CreateDirectory {
+				cwd, err = createSessionWorkspace(cwd, c.Arguments.SessionName, a.cfg.AllowedWorkspaceRoots)
+				if err != nil {
+					a.report(a.executionError(c, err))
+					continue
+				}
+			}
 			thread, err := client.StartThread(a.ctx, codexadapter.ThreadOptions{CWD: cwd, ApprovalPolicy: "on-request", Sandbox: "workspace-write"})
 			if err != nil {
 				a.report(a.executionError(c, err))
 				continue
+			}
+			if c.Arguments.SessionName != "" {
+				name, _ := protocol.NormalizeSessionName(c.Arguments.SessionName)
+				if err := client.RenameThread(a.ctx, thread.ID, name); err != nil {
+					a.report(a.executionError(c, err))
+					continue
+				}
+				thread.Name = name
 			}
 			s, err := a.store.UpsertSession(protocol.Session{WorkerID: a.cfg.WorkerID, RuntimeID: runtimeID, ThreadID: thread.ID, Name: thread.Name, Preview: thread.Preview, CWD: cwd, State: "idle", Loaded: true})
 			if err != nil {
@@ -609,6 +630,10 @@ func (s *sessionActor) command(req actorCommand) {
 		reject(protocol.SessionBusy, "This thread has an active turn. Wait for it to finish before running a Codex command.")
 		return
 	}
+	if c.Operation == protocol.DeleteSession && (s.session.ActiveTurnID != "" || s.session.State == "running" || s.awaitingTurnStart || len(s.queue) != 0) {
+		reject(protocol.SessionBusy, "This session has an active or queued turn. Wait for it to finish before deleting the session.")
+		return
+	}
 	if (c.Operation == protocol.Steer || c.Operation == protocol.Interrupt) && (c.ExpectedTurnID == "" || c.ExpectedTurnID != s.session.ActiveTurnID) {
 		reject(protocol.StaleTurn, "The active turn has changed.")
 		return
@@ -631,6 +656,17 @@ func (s *sessionActor) command(req actorCommand) {
 		return
 	}
 	req.reply <- commandReply{ack: protocol.CommandAck{CommandID: c.ID, Status: "accepted"}}
+	if c.Operation == protocol.DeleteSession {
+		result, err := s.deleteSession(s.agent.ctx, client, c)
+		if err != nil {
+			s.agent.report(s.agent.executionError(c, err))
+			return
+		}
+		result.CommandID, result.State = c.ID, "completed"
+		_, err = s.agent.record(c, CommandCompleted, &result, "command_completed")
+		s.agent.report(err)
+		return
+	}
 	if c.Operation == protocol.ReadHistory {
 		page, err := s.readHistory(client, c.Arguments.History)
 		if err != nil {
@@ -834,6 +870,13 @@ func (s *sessionActor) resetMessages() {
 }
 
 func (s *sessionActor) event(event codexadapter.Event) {
+	if s.session.Deleted {
+		return
+	}
+	if event.Kind == "thread_deleted" {
+		s.deleted()
+		return
+	}
 	switch event.Kind {
 	case "turn_started":
 		if event.TurnID == "" {
@@ -957,6 +1000,9 @@ func (s *sessionActor) event(event codexadapter.Event) {
 }
 
 func (s *sessionActor) request(req codexadapter.Request) {
+	if s.session.Deleted {
+		return
+	}
 	client, runtime, ok := s.agent.manager.Client(s.runtime.ID)
 	if !ok || runtime.Generation != s.runtime.Generation || !client.RequestPending(req.RequestID) {
 		return

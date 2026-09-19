@@ -16,7 +16,8 @@ menu names, so `/debug_config` is the menu spelling of `/debug-config`; both wor
 | `/tgstatus [session]` | Show gateway connectivity, queued commands and approvals. |
 | `/tghistory [count]` | Show saved Codex prompts for the selected session; defaults to 10, maximum 50 per page. |
 | `/tgdisconnect` | Clear the selection. |
-| `/tgnew [runtime]` | Create a session in the runtime's configured workspace. |
+| `/tgnew [runtime]` | Name a session, browse parent folders, and create its working directory. |
+| `/tgdeletesession [runtime]` | Choose a Codex session to delete while keeping its working directory and files. |
 | `/tgsteer TEXT` | Guide the exact active turn. |
 | `/tginterrupt` | Interrupt the exact active turn. |
 | `/tginput APPROVAL_ID QUESTION_ID ANSWER` | Answer an input request; replying to its message is easier. |
@@ -35,6 +36,35 @@ helper-agent and ephemeral threads are excluded. Discovery also hides entries
 that no longer exist after a complete successful scan; saved history is retained,
 and this cleanup does not archive or delete threads in Codex. The CLI picker can
 show a different count because it has its own source and directory filters.
+
+## Create and delete sessions
+
+Use `/tgnew`, choose a runtime when prompted, and send the session name. The
+folder browser starts at the worker user's `~/CODEX` if it exists, otherwise at
+that user's home directory. Existing restricted workspace settings still apply.
+Use numbered **Open** buttons to enter a subfolder, **Parent folder** to move up,
+and Previous/More buttons to browse longer lists. Choose **Create here** to make
+a new child directory and use it as the session's working directory.
+
+The session keeps its display name; spaces become underscores in the directory
+name. For example, **My Project** under `~/CODEX` creates `~/CODEX/My_Project`.
+An existing file or directory with that name is preserved; choose another name
+or parent folder. **Change name** returns to the name prompt, and **Cancel** ends
+the setup. Name replies belong to the setup wizard and are not sent to Codex as
+prompts. New-session buttons and `/new` or `/clear` use the same guided flow.
+
+Use `/tgdeletesession` to browse the same session list as `/tgsessions`, with full
+names, workspace information, and numbered delete buttons. Select a session and
+confirm its name and working directory. This permanently deletes its Codex
+conversation and any child sessions it spawned; the working directory and every
+project file remain on disk. Sessions with an active turn or pending work, including in a child session,
+cannot be deleted until that work ends. Deleting the selected session clears its
+Telegram selection after Codex confirms deletion. Use `/tgsessions` to connect
+to another session. `/archive` remains available for reversible archival.
+
+The wizard and its buttons are scoped to the requesting user, chat, topic, and
+runtime. Older buttons cannot change a later setup or delete a different
+session. The worker needs an update before it can serve the folder browser.
 
 ## Codex controls
 
@@ -58,7 +88,7 @@ becoming model prompts.
 | `/init` | Ask Codex to prepare project instructions using its initialization prompt. |
 | `/rename NAME` | Rename the session. |
 | `/fork` | Branch the saved conversation into a new session. |
-| `/new`, `/clear` | Create a new session in the selected session's workspace. |
+| `/new`, `/clear` | Name a new session and browse for its parent folder on the selected runtime. |
 | `/resume [NAME_OR_ID]`, `/agent`, `/subagents` | Choose a saved session; execution resumes when its next turn is submitted. |
 | `/goal [OBJECTIVE\|pause\|resume\|clear\|complete\|blocked]` | Inspect or update the persistent goal. |
 | `/diff` | Show tracked changes and an untracked-file summary in the allowed workspace. |
@@ -69,6 +99,7 @@ becoming model prompts.
 | `/stop`, `/clean` | Stop its background terminals. |
 | `/copy` | Return the last assistant response as text. |
 | `/archive` | Archive the session. |
+| `/delete` | Open the same session-deletion picker as `/tgdeletesession`. |
 | `/debug_config` | Show selected configuration diagnostics without secrets. |
 | `/quit`, `/exit` | Leave the Telegram selection; the supervised runtime stays available. |
 | `/help` | List Codex commands and guidance. |
@@ -77,7 +108,7 @@ Commands that require a terminal picker, desktop integration, local credentials,
 or an interactive confirmation show instructions for the attached CLI. This
 includes `/keymap`, `/vim`, `/raw`, `/statusline`, `/title`, `/theme`, `/pets`,
 `/app`, `/ide`, `/import`, `/logout`, `/feedback`, `/experimental`, `/side`,
-`/btw`, `/mention`, `/approve`, `/delete`, `/rollout`, and Windows sandbox setup.
+`/btw`, `/mention`, `/approve`, `/rollout`, and Windows sandbox setup.
 They remain discoverable in the menu. Telegram does not emulate a terminal UI.
 
 The implementation uses typed app-server operations; Codex slash commands are
@@ -153,7 +184,8 @@ See the [Codex history API](https://learn.chatgpt.com/docs/app-server#read-a-sto
 
 ## Menu and typing indicator
 
-Publish or inspect the menu locally:
+The gateway refreshes the bot command menu at startup, including after automatic
+updates. Publish or inspect it manually when needed:
 
 ```sh
 sudo /usr/local/sbin/codex-gateway-admin menu set
