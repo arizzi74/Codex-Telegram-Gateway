@@ -12,6 +12,23 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+// Go's asynchronous preemption can interrupt poll with SIGURG. Retry without
+// resetting the deadline, just as the production terminal reader retries EINTR.
+func setupTestPoll(fds []unix.PollFd, timeout int) (int, error) {
+	deadline := time.Now().Add(time.Duration(timeout) * time.Millisecond)
+	for {
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return 0, nil
+		}
+		ready, err := unix.Poll(fds, int((remaining+time.Millisecond-1)/time.Millisecond))
+		if errors.Is(err, unix.EINTR) {
+			continue
+		}
+		return ready, err
+	}
+}
+
 func setupTestTerminal(t *testing.T) (*os.File, *workerSetupTerminal) {
 	t.Helper()
 	master, err := os.OpenFile("/dev/ptmx", os.O_RDWR|unix.O_NOCTTY|unix.O_NONBLOCK, 0)
@@ -63,7 +80,7 @@ func TestSetupTerminalHidesTokenAndRestoresEcho(t *testing.T) {
 				done <- result{answer, err}
 			}()
 			poll := []unix.PollFd{{Fd: int32(master.Fd()), Events: unix.POLLIN}}
-			if ready, err := unix.Poll(poll, 2000); err != nil || ready == 0 {
+			if ready, err := setupTestPoll(poll, 2000); err != nil || ready == 0 {
 				t.Fatal("secret prompt did not appear", err)
 			}
 			state, err := workerTerminalState(int(terminal.file.Fd()))
@@ -102,7 +119,7 @@ func TestSetupTerminalHidesTokenAndRestoresEcho(t *testing.T) {
 					t.Fatal(err)
 				}
 				input := []unix.PollFd{{Fd: int32(terminal.file.Fd()), Events: unix.POLLIN}}
-				if ready, err := unix.Poll(input, 1000); err != nil || ready == 0 {
+				if ready, err := setupTestPoll(input, 1000); err != nil || ready == 0 {
 					t.Fatal("terminal input unavailable after cancellation", err)
 				}
 				buffer := make([]byte, 128)
@@ -113,7 +130,7 @@ func TestSetupTerminalHidesTokenAndRestoresEcho(t *testing.T) {
 			}
 			var output strings.Builder
 			for {
-				ready, err := unix.Poll(poll, 20)
+				ready, err := setupTestPoll(poll, 20)
 				if err != nil {
 					t.Fatal(err)
 				}
