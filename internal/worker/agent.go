@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"reflect"
 	"strings"
 	"sync"
 	"time"
@@ -536,12 +537,22 @@ func (s *sessionActor) run() {
 					s.session.Archived = snapshot.session.Archived
 					s.session.Name, s.session.Preview = snapshot.session.Name, snapshot.session.Preview
 					s.session.CWD, s.session.GitBranch, s.session.GitRoot = snapshot.session.CWD, snapshot.session.GitBranch, snapshot.session.GitRoot
+					if snapshot.session.Stats != nil {
+						stats := *snapshot.session.Stats
+						if snapshot.session.ActiveTurnID != s.session.ActiveTurnID {
+							stats.ActiveSince = nil
+							if s.session.Stats != nil {
+								stats.ActiveSince = s.session.Stats.ActiveSince
+							}
+						}
+						s.session.Stats = &stats
+					}
 				}
 			}
 			s.save()
 			current := s.session
 			previous.UpdatedAt, current.UpdatedAt = time.Time{}, time.Time{}
-			if previous != current {
+			if !reflect.DeepEqual(previous, current) {
 				s.agent.report(s.agent.emit(s.runtime, s.session.ID, "session_state_changed", s.session))
 			}
 			if snapshot.processed != nil {
@@ -803,6 +814,11 @@ func (s *sessionActor) resumeForCommand(c protocol.Command, client *codexadapter
 }
 
 func (s *sessionActor) save() {
+	if s.session.ActiveTurnID == "" && s.session.Stats != nil && s.session.Stats.ActiveSince != nil {
+		stats := *s.session.Stats
+		stats.ActiveSince = nil
+		s.session.Stats = &stats
+	}
 	saved, err := s.agent.store.UpsertSession(s.session)
 	if err == nil {
 		s.session = saved
@@ -825,6 +841,13 @@ func (s *sessionActor) event(event codexadapter.Event) {
 		}
 		if s.session.ActiveTurnID != event.TurnID {
 			s.resetMessages()
+			stats := protocol.SessionStats{}
+			if s.session.Stats != nil {
+				stats = *s.session.Stats
+			}
+			now := time.Now().UTC()
+			stats.ActiveSince = &now
+			s.session.Stats = &stats
 		}
 		s.session.ActiveTurnID = event.TurnID
 		s.session.State = "running"

@@ -1,1 +1,71 @@
-<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Gateway admin</title><link rel="stylesheet" href="/admin/static/app.css"></head><body><main><header><div><p class="eyebrow">CODEX GATEWAY</p><h1>Operations console</h1></div><button id="logout" hidden>Sign out</button></header><section id="auth" class="card"><h2>Passkey access</h2><p>Use a personal passkey to administer this gateway.</p><button id="login">Continue with passkey</button><details><summary>First administrator?</summary><label>One-time bootstrap token <input id="bootstrap-token" autocomplete="off" spellcheck="false"></label><button id="enroll">Create first passkey</button></details><p id="message" role="status"></p></section><section id="console" hidden><div class="metrics"><article><span>Workers</span><strong id="workers">–</strong></article><article><span>Runtimes</span><strong id="runtimes">–</strong></article><article><span>Sessions</span><strong id="sessions">–</strong></article><article><span>Pending approvals</span><strong id="approvals">–</strong></article><article><span>Queued commands</span><strong id="commands">–</strong></article></div><section class="card"><div class="row"><div><h2>Passkeys</h2><p>Add a spare personal passkey before removing one.</p></div><button id="add-passkey">Add passkey</button></div><div id="keys"></div></section><section class="card"><div class="row"><div><h2>Workers</h2><p>Create an enrollment token, then copy it into the worker configuration.</p></div><button id="new-worker">Enroll worker</button></div><div id="worker-list"></div></section></section></main><script src="/admin/static/app.js"></script></body></html>
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Gateway admin</title>
+  <link rel="stylesheet" href="/admin/static/app.css">
+</head>
+<body>
+<main>
+  <header>
+    <div><p class="eyebrow">CODEX GATEWAY</p><h1>Operations console</h1></div>
+    <button id="logout" hidden>Sign out</button>
+  </header>
+  <section id="auth" class="card">
+    <h2>Passkey access</h2>
+    <p>Use a personal passkey to administer this gateway.</p>
+    <button id="login">Continue with passkey</button>
+    <details>
+      <summary>First administrator?</summary>
+      <label>One-time bootstrap token <input id="bootstrap-token" autocomplete="off" spellcheck="false"></label>
+      <button id="enroll">Create first passkey</button>
+    </details>
+    <p id="message" role="status"></p>
+  </section>
+  <section id="console" hidden>
+    <div class="refresh-bar">
+      <p id="last-refreshed" class="muted" role="status">Loading dashboard…</p>
+      <button id="refresh" class="secondary">Refresh</button>
+    </div>
+    <p id="dashboard-error" class="notice error" role="alert" hidden></p>
+    <div class="metrics">
+      <article><span>Workers</span><strong id="workers">—</strong></article>
+      <article><span>Runtimes</span><strong id="runtimes">—</strong></article>
+      <article><span>Sessions</span><strong id="sessions">—</strong></article>
+      <article><span>Pending approvals</span><strong id="approvals">—</strong></article>
+      <article><span>Queued commands</span><strong id="commands">—</strong></article>
+    </div>
+    <section class="card" aria-labelledby="bot-heading">
+      <h2 id="bot-heading">Telegram bot</h2>
+      <div id="bot-info"><p class="muted">Bot information is not available.</p></div>
+    </section>
+    <section class="card sessions-card" aria-labelledby="session-heading">
+      <div class="row section-heading">
+        <div><h2 id="session-heading">Sessions</h2><p class="muted">Your sessions across all workers. Internal subagent sessions are excluded.</p></div>
+      </div>
+      <div class="session-filters">
+        <label>Find a session<input id="session-search" type="search" placeholder="Name, directory, or worker" autocomplete="off"></label>
+        <label>State<select id="session-state"><option value="">All states</option></select></label>
+      </div>
+      <p id="session-count" class="muted" role="status"></p>
+      <div id="session-list"></div>
+      <nav id="session-pagination" class="pagination" aria-label="Session pages" hidden>
+        <button id="session-prev" class="secondary">Previous</button>
+        <span id="session-page" class="muted"></span>
+        <button id="session-next" class="secondary">Next</button>
+      </nav>
+    </section>
+    <section class="card" aria-labelledby="worker-heading">
+      <div class="row"><div><h2 id="worker-heading">Workers</h2><p>Create an enrollment token, then copy it into the worker configuration.</p></div><button id="new-worker">Enroll worker</button></div>
+      <div id="worker-list"></div>
+    </section>
+    <section class="card" aria-labelledby="passkey-heading">
+      <div class="row"><div><h2 id="passkey-heading">Passkeys</h2><p>Add a spare personal passkey before removing one.</p></div><button id="add-passkey">Add passkey</button></div>
+      <div id="keys"></div>
+    </section>
+  </section>
+</main>
+<script src="/admin/static/app.js"></script>
+</body>
+</html>

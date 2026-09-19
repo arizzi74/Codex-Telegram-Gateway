@@ -23,20 +23,21 @@ type Runtime struct {
 }
 
 type Session struct {
-	ID           string    `json:"session_id"`
-	WorkerID     string    `json:"worker_id"`
-	RuntimeID    string    `json:"runtime_id"`
-	ThreadID     string    `json:"codex_thread_id"`
-	Name         string    `json:"name"`
-	Preview      string    `json:"preview,omitempty"`
-	CWD          string    `json:"cwd"`
-	GitBranch    string    `json:"git_branch,omitempty"`
-	GitRoot      string    `json:"git_root,omitempty"`
-	State        string    `json:"state"`
-	ActiveTurnID string    `json:"active_turn_id,omitempty"`
-	Loaded       bool      `json:"loaded"`
-	Archived     bool      `json:"archived"`
-	UpdatedAt    time.Time `json:"updated_at"`
+	ID           string        `json:"session_id"`
+	WorkerID     string        `json:"worker_id"`
+	RuntimeID    string        `json:"runtime_id"`
+	ThreadID     string        `json:"codex_thread_id"`
+	Name         string        `json:"name"`
+	Preview      string        `json:"preview,omitempty"`
+	CWD          string        `json:"cwd"`
+	GitBranch    string        `json:"git_branch,omitempty"`
+	GitRoot      string        `json:"git_root,omitempty"`
+	State        string        `json:"state"`
+	ActiveTurnID string        `json:"active_turn_id,omitempty"`
+	Loaded       bool          `json:"loaded"`
+	Archived     bool          `json:"archived"`
+	UpdatedAt    time.Time     `json:"updated_at"`
+	Stats        *SessionStats `json:"stats,omitempty"`
 }
 
 type Hello struct {

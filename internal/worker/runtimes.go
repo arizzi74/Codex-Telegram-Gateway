@@ -36,12 +36,14 @@ type RuntimeHooks struct {
 
 // RuntimeManager supervises configured local Codex app-server profiles.
 type RuntimeManager struct {
-	lifecycle   sync.RWMutex
-	attachments map[string]*attachmentProxy
-	cfg         config.WorkerConfig
-	store       *Store
-	log         *slog.Logger
-	hooks       RuntimeHooks
+	lifecycle     sync.RWMutex
+	attachments   map[string]*attachmentProxy
+	cfg           config.WorkerConfig
+	store         *Store
+	log           *slog.Logger
+	hooks         RuntimeHooks
+	stats         rolloutStatsCache
+	statsRedactor *auth.Redactor
 
 	mu       sync.RWMutex
 	runtimes map[string]*managedRuntime
@@ -92,6 +94,11 @@ func NewRuntimeManager(cfg config.WorkerConfig, store *Store, logger *slog.Logge
 		}
 	}
 	m := &RuntimeManager{cfg: cfg, store: store, log: logger, hooks: hooks, runtimes: make(map[string]*managedRuntime), attachments: make(map[string]*attachmentProxy), ready: make(chan struct{})}
+	redactor, err := auth.NewRedactor(append([]string{`cwk_[a-fA-F0-9]{64}`, `sk-[A-Za-z0-9_-]{20,}`, `[0-9]{6,12}:[A-Za-z0-9_-]{30,}`}, cfg.RedactPatterns...), "")
+	if err != nil {
+		return nil, err
+	}
+	m.statsRedactor = redactor
 	m.start = func(ctx context.Context, options codexadapter.Config) (*codexadapter.Client, error) {
 		base := filepath.Join(filepath.Dir(cfg.StateFile), "runtimes")
 		if err := os.MkdirAll(base, 0o700); err != nil {
@@ -418,6 +425,7 @@ func (m *RuntimeManager) discover(ctx context.Context, runtime protocol.Runtime,
 			continue
 		}
 		visible[thread.ID] = true
+		candidate.Stats = m.sessionStats(client, thread)
 		if loaded[thread.ID] {
 			resumed, subscribed, resumeErr := m.subscribeLoadedThread(ctx, runtime, client, thread.ID, retryUnavailable)
 			if resumeErr != nil {

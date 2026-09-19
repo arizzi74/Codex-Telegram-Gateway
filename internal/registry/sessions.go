@@ -24,23 +24,34 @@ func upsertProtocolSession(ctx context.Context, tx *dbTx, workerID, runtimeID uu
 	if activity.IsZero() {
 		activity = time.Now().UTC()
 	}
+	metadata, err := json.Marshal(struct {
+		Stats *protocol.SessionStats `json:"stats,omitempty"`
+	}{Stats: session.Stats})
+	if err != nil {
+		return fmt.Errorf("registry: encode session statistics: %w", err)
+	}
 	ct, err := tx.Exec(ctx, `INSERT INTO sessions
         (session_id, worker_id, runtime_id, codex_thread_id, name, preview, cwd,
          git_branch, git_root, state, active_turn_id, loaded, archived,
          discovered_at, last_activity_at, last_reconciled_at, metadata)
         VALUES ($1,$2,$3,$4,NULLIF($5,''),NULLIF($6,''),NULLIF($7,''),NULLIF($8,''),
-            NULLIF($9,''),$10,NULLIF($11,''),$12,$13,(strftime('%Y-%m-%dT%H:%M:%f','now') || '000000Z'),$14,(strftime('%Y-%m-%dT%H:%M:%f','now') || '000000Z'),'{}')
+            NULLIF($9,''),$10,NULLIF($11,''),$12,$13,(strftime('%Y-%m-%dT%H:%M:%f','now') || '000000Z'),$14,(strftime('%Y-%m-%dT%H:%M:%f','now') || '000000Z'),$15)
         ON CONFLICT (session_id) DO UPDATE SET
             codex_thread_id = EXCLUDED.codex_thread_id, name = EXCLUDED.name,
             preview = EXCLUDED.preview, cwd = EXCLUDED.cwd, git_branch = EXCLUDED.git_branch,
             git_root = EXCLUDED.git_root, state = EXCLUDED.state,
             active_turn_id = EXCLUDED.active_turn_id, loaded = EXCLUDED.loaded,
             archived = EXCLUDED.archived, last_activity_at = EXCLUDED.last_activity_at,
+            metadata = CASE WHEN json_type(EXCLUDED.metadata, '$.stats')='object'
+                AND (json_type(sessions.metadata, '$.stats') IS NOT 'object'
+                    OR julianday(json_extract(sessions.metadata, '$.stats.observed_at')) IS NULL
+                    OR julianday(json_extract(EXCLUDED.metadata, '$.stats.observed_at')) >= julianday(json_extract(sessions.metadata, '$.stats.observed_at')))
+                THEN json_set(sessions.metadata, '$.stats', json_extract(EXCLUDED.metadata, '$.stats')) ELSE sessions.metadata END,
             last_reconciled_at = (strftime('%Y-%m-%dT%H:%M:%f','now') || '000000Z')
         WHERE sessions.worker_id = EXCLUDED.worker_id AND sessions.runtime_id = EXCLUDED.runtime_id`,
 		id, workerID, runtimeID, session.ThreadID, session.Name, session.Preview, session.CWD,
 		session.GitBranch, session.GitRoot, session.State, session.ActiveTurnID,
-		session.Loaded, session.Archived, activity)
+		session.Loaded, session.Archived, activity, json.RawMessage(metadata))
 	if err != nil {
 		return fmt.Errorf("registry: upsert session: %w", err)
 	}
@@ -201,7 +212,8 @@ func (s *Store) SessionSnapshot(ctx context.Context) ([]protocol.Session, error)
         COALESCE(name, ''), COALESCE(preview, ''), COALESCE(cwd, ''),
         COALESCE(git_branch, ''), COALESCE(git_root, ''), state,
         COALESCE(active_turn_id, ''), loaded, archived,
-        COALESCE(last_activity_at, last_reconciled_at, discovered_at)
+        COALESCE(last_activity_at, last_reconciled_at, discovered_at),
+        COALESCE(json_extract(metadata, '$.stats'), 'null')
         FROM sessions ORDER BY last_activity_at DESC NULLS LAST, session_id`)
 	if err != nil {
 		return nil, fmt.Errorf("registry: list session snapshot: %w", err)
@@ -211,18 +223,30 @@ func (s *Store) SessionSnapshot(ctx context.Context) ([]protocol.Session, error)
 	for rows.Next() {
 		var session protocol.Session
 		var id, workerID, runtimeID uuid.UUID
+		var stats []byte
 		if err := rows.Scan(&id, &workerID, &runtimeID, &session.ThreadID, &session.Name,
 			&session.Preview, &session.CWD, &session.GitBranch, &session.GitRoot, &session.State,
-			&session.ActiveTurnID, &session.Loaded, &session.Archived, &session.UpdatedAt); err != nil {
+			&session.ActiveTurnID, &session.Loaded, &session.Archived, &session.UpdatedAt, &stats); err != nil {
 			return nil, fmt.Errorf("registry: scan session snapshot: %w", err)
 		}
 		session.ID, session.WorkerID, session.RuntimeID = id.String(), workerID.String(), runtimeID.String()
+		session.Stats = decodeSessionStats(stats)
 		result = append(result, session)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("registry: list session snapshot: %w", err)
 	}
 	return result, nil
+}
+
+// Statistics are optional and read through a typed allowlist. Old workers have
+// no metrics, and malformed optional metadata must not hide their sessions.
+func decodeSessionStats(raw []byte) *protocol.SessionStats {
+	var stats *protocol.SessionStats
+	if err := json.Unmarshal(raw, &stats); err != nil {
+		return nil
+	}
+	return stats
 }
 
 // RuntimeSnapshot returns the normalized runtime registry state for worker

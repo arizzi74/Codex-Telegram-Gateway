@@ -167,16 +167,18 @@ func run(args []string, logger *slog.Logger) error {
 		mux := gateway.NewMux(store, hub)
 		api := gateway.NewTelegramClient(cfg.Secrets.BotToken)
 		mux.Handle("/api/v1/telegram/webhook", gateway.NewWebhook(store, cfg, secret, api, logger))
-		console, err := admin.New(store, admin.Config{Origin: cfg.PublicBaseURL})
+		redactor, err := auth.NewRedactor([]string{regexp.QuoteMeta(cfg.Secrets.BotToken), regexp.QuoteMeta(secret), `cwk_[a-f0-9]+`, `sk-[A-Za-z0-9_-]{16,}`}, "[REDACTED]")
+		if err != nil {
+			return err
+		}
+		console, err := admin.New(store, admin.Config{Origin: cfg.PublicBaseURL, BotAPI: api,
+			BotUsername: cfg.Secrets.BotName, AllowedUserCount: len(cfg.AllowedUserIDs),
+			AllowedChatCount: len(cfg.AllowedChatIDs), Redactor: redactor})
 		if err != nil {
 			return err
 		}
 		mux.Handle("/admin/", console)
 		mux.Handle("/api/v1/admin/", console)
-		redactor, err := auth.NewRedactor([]string{regexp.QuoteMeta(cfg.Secrets.BotToken), regexp.QuoteMeta(secret), `cwk_[a-f0-9]+`, `sk-[A-Za-z0-9_-]{16,}`}, "[REDACTED]")
-		if err != nil {
-			return err
-		}
 		sender := gateway.NewSender(store, api, logger, gateway.SenderOptions{BotID: cfg.Secrets.BotName, OwnerID: cfg.Secrets.WLID, Redactor: redactor})
 		dispatcher := gateway.NewDispatcher(store, hub, logger)
 		server := &http.Server{Addr: cfg.Listen, Handler: mux, ReadHeaderTimeout: cfg.ReadHeaderTimeout, ReadTimeout: 15 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 16 << 10}

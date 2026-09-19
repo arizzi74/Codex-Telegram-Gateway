@@ -9,6 +9,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"time"
 
@@ -474,7 +475,7 @@ func (s *Store) changeDiscoveredSessionVisibility(runtime protocol.Runtime, expe
 		saved = current
 		previous := expected
 		current.UpdatedAt, previous.UpdatedAt = time.Time{}, time.Time{}
-		if saved.Archived == candidate.Archived || current != previous || !saved.UpdatedAt.Equal(expected.UpdatedAt) {
+		if saved.Archived == candidate.Archived || !reflect.DeepEqual(current, previous) || !saved.UpdatedAt.Equal(expected.UpdatedAt) {
 			return nil
 		}
 		saved = candidate

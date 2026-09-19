@@ -527,6 +527,8 @@ func TestAgentDiscoveryPublishesMetadataWithoutReplacingActiveTurn(t *testing.T)
 	session := installSession(a, runtime, "thread-metadata", "turn-current")
 	session.Name, session.GitBranch = "Renamed session", "feature"
 	session.ActiveTurnID, session.State = "", "idle"
+	wrongTurnStart := time.Now().UTC().Add(-time.Hour)
+	session.Stats = &protocol.SessionStats{PromptCount: statsNumber(3), ActiveSince: &wrongTurnStart}
 	a.onSession(runtime, session)
 	events, err := a.store.OutboxAfter(0)
 	if err != nil {
@@ -542,6 +544,9 @@ func TestAgentDiscoveryPublishesMetadataWithoutReplacingActiveTurn(t *testing.T)
 			t.Fatal(err)
 		}
 		if current.Name == "Renamed session" && current.GitBranch == "feature" && current.ActiveTurnID == "turn-current" {
+			if current.Stats == nil || current.Stats.PromptCount == nil || *current.Stats.PromptCount != 3 || current.Stats.ActiveSince != nil {
+				t.Fatalf("metadata refresh lost statistics or attributed another turn's start: %+v", current.Stats)
+			}
 			found = true
 		}
 	}

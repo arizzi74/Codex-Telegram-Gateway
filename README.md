@@ -136,7 +136,9 @@ Open `/admin/` on your gateway's public HTTPS URL, such as
 `https://gateway.example.com/admin/`, and enter the one-time token under **First
 administrator?**. Register your passkey, sign in, and add a spare passkey.
 The token expires in 15 minutes. The console manages worker enrollment,
-credential rotation, revocation, and operational inventory.
+credential rotation, and revocation. It lists user sessions with prompt counts,
+token usage, activity and last messages, and shows the connected Telegram bot's
+identity and webhook status. Subagent sessions are excluded, as in `/tgsessions`.
 Passkeys use the hostname from the configured public HTTPS URL as their
 relying-party ID; browser requests must match the full configured origin.
 

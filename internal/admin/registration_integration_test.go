@@ -144,7 +144,15 @@ func testPasskeyRegistrationAndAuthenticationHTTP(t *testing.T, origin string) {
 	}
 
 	response = adminRequest(t, client, origin, http.MethodGet, "/api/v1/admin/dashboard", nil, "", "")
-	requireHTTPStatus(t, response, http.StatusOK)
+	var dashboard struct {
+		registry.AdminDashboard
+		Bot       BotInfo `json:"bot"`
+		UpdatedAt string  `json:"updated_at"`
+	}
+	decodeHTTPJSON(t, response, http.StatusOK, &dashboard)
+	if dashboard.Bot.Status != "not_configured" || dashboard.UpdatedAt == "" || dashboard.Sessions == nil || dashboard.Workers == nil {
+		t.Fatalf("incomplete dashboard response: %+v", dashboard)
+	}
 
 	setCookie(client, origin, ceremonyCookie, loginCeremony)
 	csrf = cookieValue(t, client, origin, csrfCookie)

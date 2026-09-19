@@ -582,8 +582,22 @@ func TestWorkerReadinessRequiresFreshVersionAndAllRuntimes(t *testing.T) {
 				status["gateway_connected"] = false
 			}
 			data, _ := json.Marshal(status)
-			m := &Manager{ReadyTimeout: 5 * time.Millisecond, PollInterval: time.Millisecond, Run: func(context.Context, ...string) (CommandResult, error) { return CommandResult{Output: data}, nil }}
-			err := m.WorkerReady(t.Context(), l, now, "v1.2.3")
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			probes := 0
+			m := &Manager{ReadyTimeout: 5 * time.Second, PollInterval: time.Millisecond, Run: func(context.Context, ...string) (CommandResult, error) {
+				probes++
+				if fault != "" {
+					// End the negative case after a status response is examined,
+					// rather than racing a tiny deadline under concurrent CI load.
+					cancel()
+				}
+				return CommandResult{Output: data}, nil
+			}}
+			err := m.WorkerReady(ctx, l, now, "v1.2.3")
+			if probes == 0 {
+				t.Fatal("readiness ended before checking worker status")
+			}
 			if (err != nil) != (fault != "") {
 				t.Fatalf("fault %q: %v", fault, err)
 			}
@@ -614,10 +628,23 @@ func TestGatewayReadinessRequiresManagedExecutable(t *testing.T) {
 				}
 				l.Binary = executable
 			}
-			m := &Manager{ReadyTimeout: 8 * time.Millisecond, PollInterval: time.Millisecond, Run: func(context.Context, ...string) (CommandResult, error) {
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			probes := 0
+			m := &Manager{ReadyTimeout: 5 * time.Second, PollInterval: time.Millisecond, Run: func(context.Context, ...string) (CommandResult, error) {
+				probes++
+				if !correct {
+					// The HTTP request succeeded; cancel only once the managed
+					// executable check has a process to inspect. Real HTTP and
+					// /proc lookups cannot reliably finish within 8ms under -race.
+					cancel()
+				}
 				return CommandResult{Output: []byte(fmt.Sprintf("MainPID=%d\nActiveState=active\n", os.Getpid()))}, nil
 			}}
-			err := m.GatewayReady(t.Context(), l)
+			err := m.GatewayReady(ctx, l)
+			if probes == 0 {
+				t.Fatal("readiness ended before checking the managed executable")
+			}
 			if (err == nil) != correct {
 				t.Fatalf("correct=%v error=%v", correct, err)
 			}

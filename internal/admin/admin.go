@@ -32,13 +32,22 @@ const (
 var assets embed.FS
 
 // Config defines the public origin used for browser and WebAuthn checks.
-type Config struct{ Origin string }
+type Config struct {
+	Origin           string
+	BotAPI           BotAPI
+	BotUsername      string
+	AllowedUserCount int
+	AllowedChatCount int
+	Redactor         *auth.Redactor
+}
 
 type Server struct {
 	store    *registry.Store
 	origin   string
 	webauthn *wa.WebAuthn
 	mux      *http.ServeMux
+	bot      *botMonitor
+	redactor *auth.Redactor
 }
 
 // New builds an isolated admin handler. Origin must be the configured public
@@ -57,6 +66,8 @@ func New(store *registry.Store, cfg Config) (*Server, error) {
 		return nil, fmt.Errorf("admin: configure webauthn: %w", err)
 	}
 	s := &Server{store: store, origin: origin, webauthn: w, mux: http.NewServeMux()}
+	s.bot = newBotMonitor(cfg)
+	s.redactor = cfg.Redactor
 	s.routes()
 	return s, nil
 }
@@ -378,7 +389,12 @@ func (s *Server) dashboard(w http.ResponseWriter, r *http.Request) {
 		fail(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, d)
+	s.redactDashboard(&d)
+	writeJSON(w, http.StatusOK, struct {
+		registry.AdminDashboard
+		Bot       BotInfo   `json:"bot"`
+		UpdatedAt time.Time `json:"updated_at"`
+	}{d, s.bot.snapshot(r.Context()), time.Now().UTC()})
 }
 func (s *Server) workers(w http.ResponseWriter, r *http.Request) {
 	if r.Method != "POST" {

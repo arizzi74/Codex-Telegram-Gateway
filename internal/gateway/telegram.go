@@ -15,8 +15,11 @@ import (
 )
 
 type TelegramUser struct {
-	ID       int64  `json:"id"`
-	Username string `json:"username"`
+	ID        int64  `json:"id"`
+	Username  string `json:"username"`
+	IsBot     bool   `json:"is_bot"`
+	FirstName string `json:"first_name"`
+	LastName  string `json:"last_name"`
 }
 type TelegramChat struct {
 	ID int64 `json:"id"`
@@ -229,6 +232,7 @@ type WebhookInfo struct {
 	URL            string `json:"url"`
 	PendingUpdates int    `json:"pending_update_count"`
 	LastError      string `json:"last_error_message"`
+	LastErrorDate  int64  `json:"last_error_date"`
 }
 
 func (t *TelegramClient) GetWebhook(ctx context.Context) (WebhookInfo, error) {

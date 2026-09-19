@@ -407,39 +407,6 @@ func (s *Store) RevokeAdminSession(ctx context.Context, token string) error {
 	return nil
 }
 
-// AdminDashboard is intentionally summary-only so the web console never
-// exposes worker enrollment secrets or command payloads.
-type AdminDashboard struct {
-	Workers          []Worker `json:"workers"`
-	Runtimes         any      `json:"runtimes"`
-	Sessions         any      `json:"sessions"`
-	PendingApprovals int      `json:"pending_approvals"`
-	QueuedCommands   int      `json:"queued_commands"`
-}
-
-func (s *Store) AdminDashboardSnapshot(ctx context.Context) (AdminDashboard, error) {
-	workers, err := s.ListWorkers(ctx)
-	if err != nil {
-		return AdminDashboard{}, err
-	}
-	runtimes, err := s.RuntimeSnapshot(ctx)
-	if err != nil {
-		return AdminDashboard{}, err
-	}
-	sessions, err := s.SessionSnapshot(ctx)
-	if err != nil {
-		return AdminDashboard{}, err
-	}
-	var approvals, commands int
-	if err = s.pool.QueryRow(ctx, `SELECT count(*) FROM approvals WHERE state='pending'`).Scan(&approvals); err != nil {
-		return AdminDashboard{}, err
-	}
-	if err = s.pool.QueryRow(ctx, `SELECT count(*) FROM commands WHERE status IN ('pending','dispatched','acknowledged')`).Scan(&commands); err != nil {
-		return AdminDashboard{}, err
-	}
-	return AdminDashboard{Workers: workers, Runtimes: runtimes, Sessions: sessions, PendingApprovals: approvals, QueuedCommands: commands}, nil
-}
-
 func randomSecret(n int) (string, error) {
 	b := make([]byte, n)
 	if _, err := rand.Read(b); err != nil {
