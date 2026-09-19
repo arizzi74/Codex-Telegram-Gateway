@@ -46,7 +46,7 @@ func (f *sessionMenuFixture) DeleteScopedCommands(_ context.Context, scope BotCo
 
 func TestSessionMenusRefreshOnlyChangedAuthorizedScopes(t *testing.T) {
 	f := &sessionMenuFixture{identity: "bot", aliases: []registry.TelegramSessionAlias{{Alias: "_project", Name: "Project"}}, contexts: []registry.TelegramMenuContext{
-		{UserID: 7, ChatID: 7, MultiSession: true},
+		{UserID: 7, ChatID: 7, MultiSession: false}, // Autocomplete also works before enabling multisession.
 		{UserID: 7, ChatID: -10, TopicID: 2, MultiSession: true},
 		{UserID: 7, ChatID: -10, TopicID: 3, MultiSession: true},
 		{UserID: 8, ChatID: 8, MultiSession: true},
@@ -76,8 +76,8 @@ func TestSessionMenusRefreshOnlyChangedAuthorizedScopes(t *testing.T) {
 	if err := m.flush(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if len(f.deletedScopes) != 3 {
-		t.Fatal("switching off did not remove personal shortcuts")
+	if len(f.deletedScopes) != 1 || f.deletedScopes[0] != (BotCommandScope{Type: "chat", ChatID: 8}) || len(f.setScopes) != 4 {
+		t.Fatal("switching delivery mode changed the authorized command menus")
 	}
 }
 

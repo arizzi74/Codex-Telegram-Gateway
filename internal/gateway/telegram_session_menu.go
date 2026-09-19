@@ -50,8 +50,8 @@ func NewSessionMenus(store SessionMenuStore, api SessionMenuAPI, logger *slog.Lo
 }
 
 // Session menus refresh after toggles, discovery, creation, renames and deletion.
-// Only changed scopes are written. Default Codex commands remain available,
-// and turning multisession off removes the personal override entirely.
+// Only changed scopes are written. Native session commands remain available
+// for autocomplete in both delivery modes; revoked destinations lose the menu.
 func (m *SessionMenus) Run(ctx context.Context) error {
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
@@ -119,12 +119,7 @@ func (m *SessionMenus) flush(ctx context.Context) error {
 scopes:
 	for _, key := range keys {
 		var aliases []registry.TelegramSessionAlias
-		on := false
 		for _, entry := range groups[key] {
-			if !entry.MultiSession {
-				continue
-			}
-			on = true
 			items, err := m.store.ListTelegramSessionAliases(ctx, m.options.BotID, entry.UserID, entry.ChatID, entry.TopicID)
 			if err != nil {
 				scopeErrors = append(scopeErrors, err)
@@ -136,7 +131,7 @@ scopes:
 		if key.chat == key.user {
 			scope.Type, scope.UserID = "chat", 0
 		}
-		if !on {
+		if len(groups[key]) == 0 {
 			if m.applied[key] != "off" {
 				if err := m.api.DeleteScopedCommands(ctx, scope); err != nil {
 					scopeErrors = append(scopeErrors, err)

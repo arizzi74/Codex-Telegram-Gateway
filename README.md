@@ -143,10 +143,10 @@ labelled with its name; answering them does not change your selection.
 
 Use `/tgmultisession` to toggle messages from all sessions. A colored square and
 the session name identify each message; Telegram does not support custom message
-background colors. Use `/-my_project` to select that session, or
-`/-my_project your message` to target it without changing your selection.
-Telegram's native menu uses `/_my_project` because menu commands cannot contain
-hyphens; both spellings work. Cleanup handles interruption, failure, and gateway restarts.
+background colors. Type `/_` for session command suggestions in either mode.
+Use `/_my_project` to select that session, or
+`/_my_project your message` to target it without changing your selection.
+Cleanup handles interruption, failure, and gateway restarts.
 Approval and input buttons refer to the exact pending request and expire.
 If a saved session is open in another independent Codex process, close it there
 before sending a turn, use `/fork` to branch its saved conversation, or choose
