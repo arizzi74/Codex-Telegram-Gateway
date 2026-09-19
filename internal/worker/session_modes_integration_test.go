@@ -237,7 +237,7 @@ func TestControlPlaneSessionFocusQuestionsAndMultisessionIntegration(t *testing.
 	if aliasA == "" {
 		t.Fatal("Alpha has no session command")
 	}
-	e.prompt(t, 113, "/"+aliasA+" Start the next Alpha turn")
+	e.prompt(t, 113, "/-"+strings.TrimPrefix(aliasA, "_")+" Start the next Alpha turn")
 	waitControl(t, func() bool { turnA = currentActive(t, e.local, e.runtime, a.ThreadID); return turnA != "" })
 	e.assertBinding(t, b.ThreadID)
 	var addressed bool
@@ -284,6 +284,10 @@ func TestControlPlaneSessionFocusQuestionsAndMultisessionIntegration(t *testing.
 		targets, err := e.registry.ListTelegramTypingTargets(e.ctx, 10)
 		return err == nil && len(targets) == 0 && !e.telegram.hasVisibleText("Beta multisession update")
 	})
+	connected := e.telegram.countText("Connected to")
+	e.prompt(t, 116, "/-"+strings.TrimPrefix(aliasA, "_"))
+	waitControl(t, func() bool { return e.telegram.countText("Connected to") > connected })
+	e.assertBinding(t, a.ThreadID)
 }
 
 func (t *telegramRecorder) hasVisibleText(parts ...string) bool {

@@ -147,8 +147,11 @@ func TestMultisessionStatusShowsSessionCommandsAndColorLimitation(t *testing.T) 
 	store := &sessionViewStore{renderStoreFake: renderFixture(), aliases: []registry.TelegramSessionAlias{{SessionID: testSessionID.String(), Name: "Auth Fix", Alias: "_auth_fix"}}}
 	sender := NewSender(store, nil, nil, SenderOptions{BotID: "bot", OwnerID: 42})
 	text, _, err := sender.render(context.Background(), uiRow(t, registry.AcceptResult{View: "multisession", MultiSession: true}))
-	if err != nil || !strings.Contains(text, "/_auth_fix — Auth Fix") || !strings.Contains(text, "does not support choosing") {
+	if err != nil || !strings.Contains(text, "/-auth_fix — Auth Fix") || !strings.Contains(text, "does not support choosing") || !strings.Contains(text, "menu commands cannot contain hyphens") {
 		t.Fatalf("mode status=%q err=%v", text, err)
+	}
+	if strings.Contains(text, "/_auth_fix —") || store.aliases[0].Alias != "_auth_fix" {
+		t.Fatal("shortcut display changed the stored menu alias or advertised the old typed spelling")
 	}
 	text, _, err = sender.render(context.Background(), uiRow(t, registry.AcceptResult{View: "multisession"}))
 	if err != nil || !strings.Contains(text, "mode is off") {

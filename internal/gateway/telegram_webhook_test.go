@@ -53,9 +53,11 @@ func TestParseTelegramCommands(t *testing.T) {
 	if action != "sessions" || target != "runtime name" || text != "" || ignore {
 		t.Fatal(action, target, text, ignore)
 	}
-	_, _, _, ignore = parseTelegramText("/_my_project@otherbot prompt", "mybot")
-	if !ignore {
-		t.Fatal("foreign bot mention processed")
+	for _, command := range []string{"/_my_project@otherbot prompt", "/-my_project@otherbot prompt"} {
+		_, _, _, ignore = parseTelegramText(command, "mybot")
+		if !ignore {
+			t.Fatal("foreign bot mention processed")
+		}
 	}
 	action, _, text, _ = parseTelegramText("/tgsteer keep the files", "bot")
 	if action != "steer" || text != "keep the files" {
@@ -85,6 +87,8 @@ func TestCodexAndGatewayNamespaces(t *testing.T) {
 		{"/tgmultisession off", "multisession", "", "off"},
 		{"/_My_Project@mybot please check /status", "session_alias", "_my_project", "please check /status"},
 		{"/_my_project", "session_alias", "_my_project", ""},
+		{"/-My_Project@mybot please check /status", "session_alias", "_my_project", "please check /status"},
+		{"/-my_project", "session_alias", "_my_project", ""},
 		{"/tgdeletesession", "delete_session", "", ""},
 		{"/tgdeletesession@mybot runtime", "delete_session", "runtime", ""},
 		{"/new", "codex", "new", ""},

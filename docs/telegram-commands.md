@@ -245,15 +245,17 @@ color cue. Extremely long imported names are shortened in message headers to
 leave room for the message; the session picker keeps the complete name. Internal
 helper sessions remain hidden. See [Telegram formatting](https://core.telegram.org/bots/api#formatting-options).
 
-The mode response lists session shortcuts such as `/_my_project`. Use a shortcut
-alone to select that session, or `/_my_project message` to send there without
+The mode response lists session shortcuts such as `/-my_project`. Use a shortcut
+alone to select that session, or `/-my_project message` to send there without
 changing the selection. If it has exactly one unanswered Codex question, the text
 answers that question; with several questions, reply to the specific question
 message. Ordinary text still goes to the selected session.
 
-Shortcuts use lowercase ASCII letters, digits and underscores, have unique
-suffixes when necessary, and remain stable across renames. They appear in the
-Telegram menu while multisession mode is enabled, refreshed within five seconds.
+After the `/-` prefix, shortcut names use lowercase ASCII letters, digits and
+underscores, have unique suffixes when necessary, and remain stable across
+renames. Telegram's native menu does not permit hyphens, so it uses the equivalent
+`/_my_project` spelling; both spellings work. These menu entries appear while
+multisession mode is enabled, refreshed within five seconds.
 Telegram permits 100 commands in a menu, so a large installation may have more
 shortcuts in the mode response than fit in the menu. All listed shortcuts work.
 Menus are scoped to a private chat or a group member; Telegram cannot vary a menu

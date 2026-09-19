@@ -190,6 +190,11 @@ func parseTelegramText(text, botName string) (action, target, prompt string, ign
 	case "tginput":
 		return "input_command", "", tail, false
 	}
+	// Telegram's native menu only accepts underscores. Typed shortcuts use
+	// /-; normalize just the prefix to the same stable stored menu alias.
+	if strings.HasPrefix(name, "-") {
+		name = "_" + strings.TrimPrefix(name, "-")
+	}
 	if strings.HasPrefix(name, "_") {
 		return "session_alias", name, tail, false
 	}

@@ -143,7 +143,7 @@ func (s *Sender) renderMultiSession(ctx context.Context, row registry.Delivery, 
 	if !response.MultiSession {
 		return "Multisession mode is off. Messages and typing now follow your selected session. Questions from other sessions can still be answered here without changing your selection.", nil, nil
 	}
-	text := "Multisession mode is on. Messages from all sessions begin with their session name and a stable colored marker. Telegram does not support choosing a different text background color for each session.\n\nUse /_<session_alias> <message> to send to that session without changing your selection. Send the command alone to select it. Ordinary messages use your selected session."
+	text := "Multisession mode is on. Messages from all sessions begin with their session name and a stable colored marker. Telegram does not support choosing a different text background color for each session.\n\nUse /-<session_alias> <message> to send to that session without changing your selection. Send the command alone to select it. Ordinary messages use your selected session. Telegram's native menu uses /_<session_alias> because menu commands cannot contain hyphens; both spellings work."
 	store, ok := s.store.(telegramSessionAliasesStore)
 	if !ok {
 		return text, nil, nil
@@ -161,7 +161,7 @@ func (s *Sender) renderMultiSession(ctx context.Context, row registry.Delivery, 
 		return "", nil, err
 	}
 	for _, alias := range aliases {
-		text += fmt.Sprintf("\n\n/%s — %s", alias.Alias, alias.Name)
+		text += fmt.Sprintf("\n\n/-%s — %s", strings.TrimPrefix(alias.Alias, "_"), alias.Name)
 	}
 	return text, nil, nil
 }
