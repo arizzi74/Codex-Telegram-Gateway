@@ -243,6 +243,9 @@ func TestRenderStatusSelectedDisconnectAndHelp(t *testing.T) {
 			t.Fatalf("help omits %s", command)
 		}
 	}
+	if !strings.Contains(help, "use /-<session_alias> <message>") || !strings.Contains(help, "menu commands use /_<session_alias>") {
+		t.Fatalf("help does not distinguish typed shortcuts from Telegram menu spellings: %q", help)
+	}
 }
 
 func TestRenderApprovalUsesOnlyOfferedDecisions(t *testing.T) {
