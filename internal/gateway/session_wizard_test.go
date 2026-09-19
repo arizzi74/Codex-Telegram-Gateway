@@ -133,3 +133,32 @@ func TestWizardRuntimePickerFreezesRuntimeAndUser(t *testing.T) {
 		t.Fatalf("runtime choices=%d", runtimes)
 	}
 }
+
+func TestPendingWizardMessagesOfferCurrentControlsWithoutClaimingCancellation(t *testing.T) {
+	for _, view := range []string{"session_deleting", "session_creating", "runtime_picker"} {
+		t.Run(view, func(t *testing.T) {
+			store := renderFixture()
+			response := wizardResponse(view)
+			response.Action = "delete_session"
+			response.ErrorCode = "wizard_pending"
+			text, keyboard, err := testSender(store, nil).render(context.Background(), uiRow(t, response))
+			if err != nil || keyboard == nil || len(keyboard.Rows) == 0 || !strings.Contains(text, "not sent as a prompt") {
+				t.Fatalf("pending wizard is a dead end: %q %+v %v", text, keyboard, err)
+			}
+			if view == "runtime_picker" {
+				return
+			}
+			if len(store.callbacks) != 1 || store.callbacks[0].Action != "wizard_dismiss" || store.callbacks[0].WizardID != response.WizardID || store.callbacks[0].WizardRevision != response.WizardRevision || store.callbacks[0].UserID != response.UserID {
+				t.Fatalf("mutation has no scoped Continue chat control: %+v", store.callbacks)
+			}
+			if !strings.Contains(text, "does not cancel this request") || keyboard.Rows[0][0].Text != "Continue chat" {
+				t.Fatalf("dismissal misrepresents accepted mutation: %q %+v", text, keyboard)
+			}
+		})
+	}
+	store := renderFixture()
+	text, keyboard, err := testSender(store, nil).render(context.Background(), uiRow(t, wizardResponse("wizard_dismissed")))
+	if err != nil || keyboard != nil || !strings.Contains(text, "has not been cancelled") || !strings.Contains(text, "may still complete") {
+		t.Fatalf("dismissal response=%q %+v %v", text, keyboard, err)
+	}
+}

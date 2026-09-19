@@ -64,7 +64,16 @@ to another session. `/archive` remains available for reversible archival.
 
 The wizard and its buttons are scoped to the requesting user, chat, topic, and
 runtime. Older buttons cannot change a later setup or delete a different
-session. The worker needs an update before it can serve the folder browser.
+session. Creation and deletion require a worker with support for these actions.
+During an upgrade, the gateway reports an update-required error and releases
+the chat if the connected worker is too old.
+
+After confirming creation or deletion, the bot waits for the worker's result.
+**Continue chat** releases the input step without cancelling the submitted
+request; its eventual result is still reported. If you send text while a step
+is waiting, the bot shows fresh controls instead of sending that text to Codex.
+Expired or rejected requests release the input step. Check `/tgsessions` before
+retrying a request whose result is unknown.
 
 ## Codex controls
 

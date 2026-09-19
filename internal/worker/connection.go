@@ -132,7 +132,7 @@ func (c *Connection) connect(ctx context.Context) error {
 		return fmt.Errorf("load local event watermark: %w", err)
 	}
 	hostname, _ := os.Hostname()
-	hello := protocol.Hello{WorkerID: c.cfg.WorkerID, WorkerName: c.cfg.Name, Hostname: hostname, OS: runtime.GOOS, Arch: runtime.GOARCH, WorkerVersion: buildinfo.Version, ProtocolMin: protocol.Version, ProtocolMax: protocol.Version, LastAckedEventSeq: lastAcked, SupportsImageInput: true, Runtimes: c.snapshot()}
+	hello := protocol.Hello{WorkerID: c.cfg.WorkerID, WorkerName: c.cfg.Name, Hostname: hostname, OS: runtime.GOOS, Arch: runtime.GOARCH, WorkerVersion: buildinfo.Version, ProtocolMin: protocol.Version, ProtocolMax: protocol.Version, LastAckedEventSeq: lastAcked, SupportsImageInput: true, SupportsSessionWorkspaces: true, SupportsSessionDeletion: true, Runtimes: c.snapshot()}
 	handshakeCtx, stopHandshake := context.WithTimeout(connectionCtx, 10*time.Second)
 	if err := sendEnvelope(handshakeCtx, writes, "hello", hello); err != nil {
 		stopHandshake()
@@ -179,7 +179,7 @@ func (c *Connection) connect(ctx context.Context) error {
 		case err := <-readErr:
 			return err
 		case <-heartbeat.C:
-			if err := sendEnvelope(connectionCtx, writes, "heartbeat", protocol.Heartbeat{WorkerID: c.cfg.WorkerID, UptimeSeconds: int64(time.Since(c.startedAt).Seconds()), SupportsImageInput: true, Runtimes: c.snapshot()}); err != nil {
+			if err := sendEnvelope(connectionCtx, writes, "heartbeat", protocol.Heartbeat{WorkerID: c.cfg.WorkerID, UptimeSeconds: int64(time.Since(c.startedAt).Seconds()), SupportsImageInput: true, SupportsSessionWorkspaces: true, SupportsSessionDeletion: true, Runtimes: c.snapshot()}); err != nil {
 				return err
 			}
 		case <-poll.C:
@@ -217,6 +217,17 @@ func (c *Connection) readLoop(ctx context.Context, conn *websocket.Conn, writes 
 				return errors.New("worker connection: command targets another worker")
 			}
 			if err := command.Validate(); err != nil {
+				var unsupported *protocol.Error
+				if errors.As(err, &unsupported) && unsupported.Code == protocol.UnsupportedOperation {
+					// A newer gateway can send an operation this binary does not
+					// implement. Reject that command without dropping the healthy
+					// connection and causing endless replay on every reconnect.
+					ack := protocol.CommandAck{CommandID: command.ID, Status: "rejected", Error: unsupported}
+					if err := sendEnvelope(ctx, writes, "command_ack", ack); err != nil {
+						return err
+					}
+					continue
+				}
 				return fmt.Errorf("worker connection: invalid command: %w", err)
 			}
 			c.handleCommand(ctx, writes, command)

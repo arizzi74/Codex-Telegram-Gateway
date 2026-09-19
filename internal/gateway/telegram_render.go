@@ -69,8 +69,15 @@ func (s *Sender) renderUIResponse(ctx context.Context, row registry.Delivery) (s
 	if err := json.Unmarshal(row.Payload, &response); err != nil {
 		return "", nil, fmt.Errorf("render Telegram UI response: %w", err)
 	}
-	if sessionWizardView(response.View) {
-		text, keyboard, err := s.renderSessionWizard(ctx, row, response)
+	if sessionWizardView(response.View) || (response.View == "runtime_picker" && response.WizardID != "") {
+		var text string
+		var keyboard *TelegramKeyboard
+		var err error
+		if response.View == "runtime_picker" {
+			text, keyboard, err = s.renderWizardRuntimePicker(ctx, row, response)
+		} else {
+			text, keyboard, err = s.renderSessionWizard(ctx, row, response)
+		}
 		if err == nil && response.ErrorCode != "" {
 			text = telegramErrorText(response.ErrorCode) + "\n\n" + text
 		}
@@ -778,7 +785,9 @@ func telegramErrorText(code string) string {
 	case "session_name_invalid":
 		return "Choose a session name of up to 120 bytes without slashes, backslashes, or control characters."
 	case "wizard_pending":
-		return "Finish or cancel the current session action using its buttons before sending a prompt."
+		return "Your message was not sent as a prompt. Use the current session action's buttons below to finish, cancel, or continue chatting."
+	case "session_action_expired":
+		return "The worker did not confirm this session action before it timed out. You can send prompts again. The request may still complete; check /tgsessions before trying it again."
 	case "wizard_expired":
 		return "This session action expired. Start again with /tgnew or /tgdeletesession."
 	case "session_busy":

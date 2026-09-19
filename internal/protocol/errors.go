@@ -11,6 +11,7 @@ func (e *Error) Error() string { return e.Code + ": " + e.Message }
 const (
 	Unauthorized           = "unauthorized"
 	UnsupportedProtocol    = "unsupported_protocol"
+	UnsupportedOperation   = "unsupported_operation"
 	UnknownWorker          = "unknown_worker"
 	WorkerDisabled         = "worker_disabled"
 	UnknownRuntime         = "unknown_runtime"

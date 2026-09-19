@@ -71,3 +71,62 @@ func TestReadThreadStateFailsClosedWithoutBoundedTurnMethod(t *testing.T) {
 		t.Fatalf("unavailable bounded state method = %v", err)
 	}
 }
+
+func TestReadThreadStateEmptyThreadRequiresSpecificErrorAndFreshMetadata(t *testing.T) {
+	const emptyMessage = "thread thread is not materialized yet; thread/turns/list is unavailable before first user message"
+	for _, tc := range []struct {
+		name       string
+		code       int
+		message    string
+		fallback   bool
+		freshID    string
+		freshState string
+		readError  bool
+		wantError  bool
+	}{
+		{name: "idle empty thread", code: -32600, message: emptyMessage, fallback: true, freshID: "thread", freshState: "idle"},
+		{name: "concurrent first turn", code: -32600, message: emptyMessage, fallback: true, freshID: "thread", freshState: "active"},
+		{name: "unknown state remains unknown", code: -32600, message: emptyMessage, fallback: true, freshID: "thread", freshState: "unknown"},
+		{name: "fresh metadata wrong identity", code: -32600, message: emptyMessage, fallback: true, freshID: "other", freshState: "idle", wantError: true},
+		{name: "fresh metadata unavailable", code: -32600, message: emptyMessage, fallback: true, readError: true, wantError: true},
+		{name: "different error code", code: -32000, message: emptyMessage, wantError: true},
+		{name: "different thread", code: -32600, message: "thread other is not materialized yet; thread/turns/list is unavailable before first user message", wantError: true},
+		{name: "different reason", code: -32600, message: "thread thread is not materialized yet; storage unavailable", wantError: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			client, fake := newFake(t)
+			initialize(t, client, fake)
+			type result struct {
+				thread Thread
+				err    error
+			}
+			done := make(chan result, 1)
+			go func() {
+				thread, err := client.ReadThreadState(context.Background(), "thread")
+				done <- result{thread, err}
+			}()
+			metadata := fake.next(t)
+			fake.respond(t, metadata, map[string]any{"thread": map[string]any{"id": "thread", "status": "idle"}})
+			latest := fake.next(t)
+			fake.write(t, map[string]any{"id": json.RawMessage(latest["id"]), "error": map[string]any{"code": tc.code, "message": tc.message}})
+			if tc.fallback {
+				fresh := fake.next(t)
+				if method(t, fresh) != "thread/read" || string(params(t, fresh)["includeTurns"]) != "false" {
+					t.Fatal("empty thread fallback did not re-read bounded metadata")
+				}
+				if tc.readError {
+					fake.write(t, map[string]any{"id": json.RawMessage(fresh["id"]), "error": map[string]any{"code": -32000, "message": "read failed"}})
+				} else {
+					fake.respond(t, fresh, map[string]any{"thread": map[string]any{"id": tc.freshID, "status": tc.freshState}})
+				}
+			}
+			got := <-done
+			if (got.err != nil) != tc.wantError {
+				t.Fatalf("state read = %#v, %v; want error %t", got.thread, got.err, tc.wantError)
+			}
+			if !tc.wantError && (got.thread.ID != tc.freshID || got.thread.Status != tc.freshState) {
+				t.Fatalf("fallback lost fresh identity or activity: %#v", got.thread)
+			}
+		})
+	}
+}

@@ -84,6 +84,10 @@ func TestNativeDeleteThreadPreservesWorkingDirectory(t *testing.T) {
 	if err != nil {
 		t.Fatalf("start empty offline thread: %v", err)
 	}
+	state, err := client.ReadThreadState(ctx, empty.ID)
+	if err != nil || state.ID != empty.ID || state.CWD != project || state.Status != "idle" || state.ActiveTurnID != "" {
+		t.Fatalf("inspect empty thread for inventory and update safety: %#v, %v", state, err)
+	}
 	if _, err := client.ReadThreadForDeletion(ctx, empty.ID); err != nil {
 		t.Fatalf("read empty offline thread before deletion: %v", err)
 	}

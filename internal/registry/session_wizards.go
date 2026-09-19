@@ -112,19 +112,33 @@ func (s *Store) acceptWizardText(ctx context.Context, tx *dbTx, in IncomingUpdat
 	if err != nil {
 		return true, AcceptResult{}, err
 	}
-	if w.Phase == "done" || w.Phase == "cancelled" {
+	if w.Phase == "done" || w.Phase == "cancelled" || w.Phase == "dismissed" {
 		return false, AcceptResult{}, nil
 	}
+	if handled, result, err := reconcileSessionWizardCommand(ctx, tx, in, &w); handled || err != nil {
+		return true, result, err
+	}
 	if !w.ExpiresAt.After(time.Now()) {
+		waitingMutation := w.Phase == "creating" || w.Phase == "deleting"
 		w.Phase = "cancelled"
+		code := "wizard_expired"
+		if waitingMutation {
+			w.Phase = "dismissed"
+			code = "session_action_expired"
+			if err := bumpSelectionRevision(ctx, tx, in); err != nil {
+				return true, AcceptResult{}, err
+			}
+		}
 		w.Revision++
 		if err := saveSessionWizard(ctx, tx, in, w); err != nil {
 			return true, AcceptResult{}, err
 		}
-		return true, AcceptResult{View: "error", ErrorCode: "wizard_expired"}, nil
+		return true, AcceptResult{View: "error", ErrorCode: code}, nil
 	}
 	if w.Kind != "new" || w.Phase != "name" {
-		result := w.result("error", in)
+		// Show the current step again with newly issued controls. A previous
+		// message's buttons may already be consumed or belong to an older step.
+		result := w.pendingResult(in)
 		result.ErrorCode = "wizard_pending"
 		return true, result, nil
 	}
@@ -154,7 +168,7 @@ func (s *Store) acceptWizardText(ctx context.Context, tx *dbTx, in IncomingUpdat
 
 func isWizardCallback(action string) bool {
 	switch action {
-	case "wizard_runtime", "wizard_browse", "wizard_create", "wizard_cancel", "wizard_rename", "delete_sessions", "delete_session_pick", "delete_session_confirm":
+	case "wizard_runtime", "wizard_browse", "wizard_create", "wizard_cancel", "wizard_dismiss", "wizard_rename", "delete_sessions", "delete_session_pick", "delete_session_confirm":
 		return true
 	}
 	return false
@@ -168,8 +182,24 @@ func (s *Store) consumeWizardCallback(ctx context.Context, tx *dbTx, in Incoming
 	if err != nil {
 		return AcceptResult{}, err
 	}
-	if w.ID != p.WizardID || w.Revision != p.WizardRevision || !w.ExpiresAt.After(time.Now()) || w.Phase == "done" || w.Phase == "cancelled" {
+	if w.ID != p.WizardID || w.Revision != p.WizardRevision || !w.ExpiresAt.After(time.Now()) || w.Phase == "done" || w.Phase == "cancelled" || w.Phase == "dismissed" {
 		return AcceptResult{}, ErrCallbackInvalid
+	}
+	if action == "wizard_dismiss" {
+		if w.Phase != "creating" && w.Phase != "deleting" {
+			return AcceptResult{}, ErrCallbackInvalid
+		}
+		// This releases Telegram input only. Keep the immutable command association
+		// so its eventual result can still be reported; no worker cancellation is sent.
+		w.Revision++
+		w.Phase = "dismissed"
+		if err := bumpSelectionRevision(ctx, tx, in); err != nil {
+			return AcceptResult{}, err
+		}
+		if err := saveSessionWizard(ctx, tx, in, w); err != nil {
+			return AcceptResult{}, err
+		}
+		return w.result("wizard_dismissed", in), nil
 	}
 	if action == "wizard_cancel" {
 		if w.Phase == "creating" || w.Phase == "deleting" {
@@ -274,9 +304,11 @@ func (s *Store) consumeWizardCallback(ctx context.Context, tx *dbTx, in Incoming
 		if target.runtimeID != runtime.runtimeID {
 			return AcceptResult{}, ErrCallbackInvalid
 		}
-		if err := tx.QueryRow(ctx, `SELECT COALESCE(NULLIF(name,''),NULLIF(preview,''),codex_thread_id),COALESCE(cwd,'') FROM sessions WHERE session_id=$1`, *sessionID).Scan(&w.Name, &w.CWD); err != nil {
+		var name, preview string
+		if err := tx.QueryRow(ctx, `SELECT COALESCE(name,''),COALESCE(preview,''),COALESCE(cwd,'') FROM sessions WHERE session_id=$1`, *sessionID).Scan(&name, &preview, &w.CWD); err != nil {
 			return AcceptResult{}, err
 		}
+		w.Name = wizardSessionLabel(name, preview, w.CWD)
 		w.SessionID = sessionID.String()
 		w.Phase = "confirm"
 		w.Revision++
@@ -315,6 +347,41 @@ func (s *Store) consumeWizardCallback(ctx context.Context, tx *dbTx, in Incoming
 		return result, nil
 	}
 	return AcceptResult{}, ErrCallbackInvalid
+}
+
+func (w sessionWizard) pendingResult(in IncomingUpdate) AcceptResult {
+	view := map[string]string{
+		"runtime": "runtime_picker", "name": "new_session_name", "browsing": "workspace_loading",
+		"browse": "workspace_browser", "creating": "session_creating", "sessions": "delete_sessions",
+		"confirm": "delete_session_confirm", "deleting": "session_deleting",
+	}[w.Phase]
+	if view == "" {
+		view = "error"
+	}
+	result := w.result(view, in)
+	if w.Phase == "runtime" {
+		result.Action = "new"
+		if w.Kind == "delete" {
+			result.Action = "delete_session"
+		}
+	}
+	return result
+}
+
+// Match the full labels used by /tgsessions, including untitled threads whose
+// visible label comes from their working directory instead of their thread ID.
+func wizardSessionLabel(name, preview, cwd string) string {
+	for _, value := range []string{name, preview} {
+		if value = strings.TrimSpace(value); value != "" {
+			return value
+		}
+	}
+	if cwd = strings.TrimSpace(cwd); cwd != "" {
+		if base := filepath.Base(cwd); base != "." && base != string(filepath.Separator) {
+			return base
+		}
+	}
+	return "Session"
 }
 
 func queueWorkspaceBrowse(ctx context.Context, tx *dbTx, in IncomingUpdate, w *sessionWizard, runtime routeTarget, path string, offset int) (AcceptResult, error) {

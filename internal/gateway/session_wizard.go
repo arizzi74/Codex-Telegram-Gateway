@@ -13,7 +13,7 @@ import (
 
 func sessionWizardView(view string) bool {
 	switch view {
-	case "new_session_name", "workspace_loading", "workspace_browser", "session_creating", "delete_sessions", "delete_session_confirm", "session_deleting", "session_deleted", "session_created", "wizard_cancelled":
+	case "new_session_name", "workspace_loading", "workspace_browser", "session_creating", "delete_sessions", "delete_session_confirm", "session_deleting", "session_deleted", "session_created", "wizard_cancelled", "wizard_dismissed":
 		return true
 	}
 	return false
@@ -65,21 +65,14 @@ func (s *Sender) renderSessionWizard(ctx context.Context, row registry.Delivery,
 	if response.View == "wizard_cancelled" {
 		return "Cancelled.", nil, nil
 	}
+	if response.View == "wizard_dismissed" {
+		return "You can send prompts again. The session request has not been cancelled and may still complete. Its result will be shown when the worker responds. Check /tgsessions before trying the action again.", nil, nil
+	}
 	if response.View == "session_created" {
 		return "✅ Created session: " + response.SessionName + "\n\nWorking directory:\n" + response.CWD + "\n\nYour current session selection was kept.", nil, nil
 	}
 	if response.View == "session_deleted" {
 		return "✅ Deleted Codex session: " + response.SessionName + "\n\nWorking directory and files kept:\n" + response.CWD, nil, nil
-	}
-	if response.View == "session_deleting" {
-		return "Deleting Codex session: " + response.SessionName + "\nThe working directory and files will be kept.", nil, nil
-	}
-	if response.View == "session_creating" {
-		folder, err := protocol.SessionDirectoryName(response.SessionName)
-		if err != nil {
-			return "", nil, err
-		}
-		return "Creating session: " + response.SessionName + "\n\nWorking directory:\n" + filepath.Join(response.CWD, folder), nil, nil
 	}
 	if response.View == "delete_sessions" {
 		runtimeID, err := requiredUUID("runtime", response.RuntimeID)
@@ -103,6 +96,21 @@ func (s *Sender) renderSessionWizard(ctx context.Context, row registry.Delivery,
 	}
 	var text string
 	switch response.View {
+	case "session_creating", "session_deleting":
+		if response.View == "session_deleting" {
+			text = "Deletion requested for Codex session: " + response.SessionName + "\nThe working directory and files will be kept."
+		} else {
+			folder, err := protocol.SessionDirectoryName(response.SessionName)
+			if err != nil {
+				return "", nil, err
+			}
+			text = "Creation requested for session: " + response.SessionName + "\n\nWorking directory:\n" + filepath.Join(response.CWD, folder)
+		}
+		text += "\n\nWaiting for the worker to confirm the result. Continue chat allows prompts again; it does not cancel this request."
+		if err := button("Continue chat", registry.Callback{Action: "wizard_dismiss"}); err != nil {
+			return "", nil, err
+		}
+		return text, keyboard, nil
 	case "new_session_name":
 		text = "What would you like to name the new session?\n\nSend the session name as your next message. Spaces become underscores in its folder name: My Project → My_Project."
 	case "workspace_loading":

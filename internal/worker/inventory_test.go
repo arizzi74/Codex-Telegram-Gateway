@@ -24,6 +24,25 @@ func inventoryByThread(t *testing.T, store *Store, runtime protocol.Runtime) map
 	return result
 }
 
+func TestDiscoveryIncludesLoadedThreadWithoutFirstUserMessage(t *testing.T) {
+	a, runtime, server, cleanup := testAgent(t)
+	defer cleanup()
+	server.SetThreads([]map[string]any{{"id": "empty-thread", "name": "New project", "cwd": runtime.DefaultCWD, "source": "appServer", "status": "idle"}}, []string{"empty-thread"})
+	server.SetRPCError("thread/turns/list", -32600, "thread empty-thread is not materialized yet; thread/turns/list is unavailable before first user message")
+	client := mustClient(t, a, runtime)
+	if err := a.manager.discover(context.Background(), runtime, client); err != nil {
+		t.Fatalf("empty thread prevented discovery: %v", err)
+	}
+	session, found := inventoryByThread(t, a.store, runtime)["empty-thread"]
+	if !found || session.Name != "New project" || session.State != "idle" || !session.Loaded || session.Archived || session.CWD != runtime.DefaultCWD {
+		t.Fatalf("empty thread missing from usable inventory: %#v", session)
+	}
+	if a.actorForThread(runtime.ID, "empty-thread") == nil {
+		t.Fatal("empty thread did not acquire a session actor")
+	}
+	assertResumeCalls(t, server.Calls(), 1)
+}
+
 func TestDiscoveryHidesHelpersAndObsoleteInventory(t *testing.T) {
 	a, runtime, server, cleanup := testAgent(t)
 	defer cleanup()

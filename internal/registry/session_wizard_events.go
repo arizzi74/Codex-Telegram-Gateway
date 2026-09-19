@@ -112,11 +112,20 @@ func applySessionWizardEvent(ctx context.Context, tx *dbTx, workerID uuid.UUID, 
 	if err != nil {
 		return true, err
 	}
-	if !target.runtimeCurrent || w.CommandID != id.String() || w.RuntimeID != target.runtimeID.String() || w.Generation != int64(event.RuntimeGeneration) || !w.ExpiresAt.After(time.Now()) {
+	if !target.runtimeCurrent || w.CommandID != id.String() || w.RuntimeID != target.runtimeID.String() || w.Generation != int64(event.RuntimeGeneration) {
 		return true, nil
 	}
-	if (operation == string(protocol.BrowseWorkspace) && w.Phase != "browsing") || (managedNew && w.Phase != "creating") || (operation == string(protocol.DeleteSession) && w.Phase != "deleting") {
+	dismissed := w.Phase == "dismissed"
+	if (operation == string(protocol.BrowseWorkspace) && (w.Phase != "browsing" || !w.ExpiresAt.After(time.Now()))) || (managedNew && w.Phase != "creating" && !dismissed) || (operation == string(protocol.DeleteSession) && w.Phase != "deleting" && !dismissed) {
 		return true, nil
+	}
+	if !dismissed && !w.ExpiresAt.After(time.Now()) {
+		// A slow accepted mutation can finish after the interactive workflow's
+		// deadline. Report its outcome without changing the user's selection.
+		dismissed = true
+		if err := bumpSelectionRevision(ctx, tx, in); err != nil {
+			return true, err
+		}
 	}
 	w.Revision++
 	w.CommandID = ""
@@ -148,7 +157,7 @@ func applySessionWizardEvent(ctx context.Context, tx *dbTx, workerID uuid.UUID, 
 			w.Phase = "done"
 			view = "session_deleted"
 		}
-	} else if event.Kind == "command_result_unknown" {
+	} else if event.Kind == "command_result_unknown" || dismissed || (result.Error != nil && result.Error.Code == protocol.UnsupportedOperation) {
 		w.Phase = "done"
 		view = "error"
 	} else {
@@ -185,9 +194,8 @@ func applySessionWizardEvent(ctx context.Context, tx *dbTx, workerID uuid.UUID, 
 	return true, nil
 }
 
-// Old workers can reject an unfamiliar operation in their acknowledgement
-// without producing an event. Recover the private wizard from that rejection
-// as well, once only, using the same immutable command/context association.
+// Rejection is terminal: the worker did not accept this request. Release the
+// chat instead of requiring another answer to a workflow which cannot proceed.
 func recoverSessionWizardAcknowledgement(ctx context.Context, tx *dbTx, commandID uuid.UUID, code string) error {
 	var in IncomingUpdate
 	err := tx.QueryRow(ctx, `SELECT bot_id,user_id,chat_id,message_thread_id FROM telegram_session_wizards WHERE command_id=$1`, commandID).Scan(&in.BotID, &in.UserID, &in.ChatID, &in.TopicID)
@@ -201,36 +209,91 @@ func recoverSessionWizardAcknowledgement(ctx context.Context, tx *dbTx, commandI
 	if err != nil {
 		return err
 	}
-	if !w.ExpiresAt.After(time.Now()) || (w.Phase != "browsing" && w.Phase != "creating" && w.Phase != "deleting") {
+	if w.Phase != "browsing" && w.Phase != "creating" && w.Phase != "deleting" && w.Phase != "dismissed" {
 		return nil
 	}
-	var generation int64
-	if err := tx.QueryRow(ctx, `SELECT generation FROM runtimes WHERE runtime_id=$1`, w.RuntimeID).Scan(&generation); err != nil {
-		return err
-	}
-	if generation != w.Generation {
-		return nil
-	}
-	view := ""
-	if w.Kind == "delete" {
-		w.Phase = "confirm"
-		view = "delete_session_confirm"
-	} else if w.Workspace == nil {
-		w.Phase = "name"
-		view = "new_session_name"
-	} else {
-		w.Phase = "browse"
-		view = "workspace_browser"
-	}
+	w.Phase = "done"
 	w.Revision++
 	w.CommandID = ""
 	if err := saveSessionWizard(ctx, tx, in, w); err != nil {
 		return err
 	}
-	result := w.result(view, in)
+	result := w.result("error", in)
 	result.ErrorCode = code
 	if result.ErrorCode == "" {
 		result.ErrorCode = "command_failed"
 	}
 	return queueUIResponse(ctx, tx, in, result)
+}
+
+// Command expiry also ends the input lock. A dispatched request may have been
+// executed before its acknowledgement was lost, so retain its result tracking
+// and never offer a one-click mutation retry or claim it was cancelled.
+func expireSessionWizardCommand(ctx context.Context, tx *dbTx, commandID uuid.UUID) (bool, error) {
+	var in IncomingUpdate
+	err := tx.QueryRow(ctx, `SELECT bot_id,user_id,chat_id,message_thread_id FROM telegram_session_wizards WHERE command_id=$1`, commandID).Scan(&in.BotID, &in.UserID, &in.ChatID, &in.TopicID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return true, err
+	}
+	w, err := readSessionWizard(ctx, tx, in)
+	if err != nil {
+		return true, err
+	}
+	if w.Phase != "browsing" && w.Phase != "creating" && w.Phase != "deleting" && w.Phase != "dismissed" {
+		return false, nil
+	}
+	w.Phase = "dismissed"
+	w.Revision++
+	if err := bumpSelectionRevision(ctx, tx, in); err != nil {
+		return true, err
+	}
+	if err := saveSessionWizard(ctx, tx, in, w); err != nil {
+		return true, err
+	}
+	response := w.result("error", in)
+	response.CommandID = commandID.String()
+	response.ErrorCode = "session_action_expired"
+	return true, queueUIResponse(ctx, tx, in, response)
+}
+
+// Recover workflow rows left behind by an older gateway which made the command
+// terminal without advancing its wizard. Consume this message as a status reply;
+// never silently reinterpret a previous wizard answer as a model prompt.
+func reconcileSessionWizardCommand(ctx context.Context, tx *dbTx, in IncomingUpdate, w *sessionWizard) (bool, AcceptResult, error) {
+	if w.CommandID == "" {
+		return false, AcceptResult{}, nil
+	}
+	var status, code string
+	if err := tx.QueryRow(ctx, `SELECT status,COALESCE(error_code,'') FROM commands WHERE command_id=$1`, w.CommandID).Scan(&status, &code); err != nil {
+		return true, AcceptResult{}, err
+	}
+	switch status {
+	case "failed":
+		w.Phase = "done"
+		w.CommandID = ""
+		if code == "" {
+			code = "command_failed"
+		}
+	case "expired", "outcome_unknown":
+		w.Phase = "dismissed"
+		code = "session_action_expired"
+		if status == "outcome_unknown" {
+			code = "command_outcome_unknown"
+		}
+		if err := bumpSelectionRevision(ctx, tx, in); err != nil {
+			return true, AcceptResult{}, err
+		}
+	default:
+		return false, AcceptResult{}, nil
+	}
+	w.Revision++
+	if err := saveSessionWizard(ctx, tx, in, *w); err != nil {
+		return true, AcceptResult{}, err
+	}
+	response := w.result("error", in)
+	response.ErrorCode = code
+	return true, response, nil
 }

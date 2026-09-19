@@ -345,7 +345,7 @@ func TestSessionWizardRejectedAcknowledgementRecoversOnceIntegration(t *testing.
 		t.Fatal(err)
 	}
 	response := wizardLastResponse(t, env)
-	if response.View != "new_session_name" || response.ErrorCode != protocol.InternalError || response.WizardRevision <= loading.WizardRevision {
+	if response.View != "error" || response.ErrorCode != protocol.InternalError || response.WizardRevision <= loading.WizardRevision {
 		t.Fatalf("ack rejection %#v", response)
 	}
 	var before, after int
@@ -357,6 +357,9 @@ func TestSessionWizardRejectedAcknowledgementRecoversOnceIntegration(t *testing.
 	}
 	if err := env.store.pool.QueryRow(ctx, `SELECT count(*) FROM telegram_deliveries`).Scan(&after); err != nil || after != before {
 		t.Fatalf("duplicateack deliveries %d -> %d %v", before, after, err)
+	}
+	if next := wizardNameTest(t, env, 3, "back to chat"); next.ErrorCode == "wizard_pending" || next.View == "new_session_name" {
+		t.Fatalf("rejected command still intercepts chat: %#v", next)
 	}
 }
 

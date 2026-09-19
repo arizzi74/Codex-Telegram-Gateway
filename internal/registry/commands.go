@@ -1023,6 +1023,11 @@ func (s *Store) expireCommands(ctx context.Context, limit int) (int, error) {
 	}
 	rows.Close()
 	for _, command := range expired {
+		if handled, err := expireSessionWizardCommand(ctx, tx, command.id); err != nil {
+			return 0, err
+		} else if handled {
+			continue
+		}
 		if command.botID == nil || command.chatID == nil {
 			continue
 		}

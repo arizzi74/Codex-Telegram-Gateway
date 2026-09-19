@@ -21,7 +21,7 @@ import (
 	"github.com/iaia/telegramgw/internal/protocol"
 )
 
-func TestConnectionAdvertisesImageInputThroughoutConnection(t *testing.T) {
+func TestConnectionAdvertisesCapabilitiesThroughoutConnection(t *testing.T) {
 	workerID := uuid.NewString()
 	store, cfg := testConnectionStore(t, workerID)
 	defer store.Close()
@@ -38,8 +38,8 @@ func TestConnectionAdvertisesImageInputThroughoutConnection(t *testing.T) {
 			return
 		}
 		hello, err := protocol.Payload[protocol.Hello](helloEnvelope)
-		if err != nil || helloEnvelope.Type != "hello" || !hello.SupportsImageInput {
-			t.Errorf("hello did not advertise image input: %#v, %v", hello, err)
+		if err != nil || helloEnvelope.Type != "hello" || !hello.SupportsImageInput || !hello.SupportsSessionWorkspaces || !hello.SupportsSessionDeletion {
+			t.Errorf("hello did not advertise capabilities: %#v, %v", hello, err)
 			return
 		}
 		if err := serverEnvelope(r.Context(), conn, "hello_ack", protocol.HelloAck{ConnectionID: uuid.NewString(), HeartbeatIntervalSeconds: 1}); err != nil {
@@ -52,8 +52,8 @@ func TestConnectionAdvertisesImageInputThroughoutConnection(t *testing.T) {
 			return
 		}
 		heartbeat, err := protocol.Payload[protocol.Heartbeat](heartbeatEnvelope)
-		if err != nil || heartbeatEnvelope.Type != "heartbeat" || !heartbeat.SupportsImageInput {
-			t.Errorf("heartbeat lost image input capability: %#v, %v", heartbeat, err)
+		if err != nil || heartbeatEnvelope.Type != "heartbeat" || !heartbeat.SupportsImageInput || !heartbeat.SupportsSessionWorkspaces || !heartbeat.SupportsSessionDeletion {
+			t.Errorf("heartbeat lost capabilities: %#v, %v", heartbeat, err)
 			return
 		}
 		observed <- struct{}{}
@@ -68,7 +68,78 @@ func TestConnectionAdvertisesImageInputThroughoutConnection(t *testing.T) {
 	select {
 	case <-observed:
 	default:
-		t.Fatal("connection did not advertise image support in hello and heartbeat")
+		t.Fatal("connection did not advertise capabilities in hello and heartbeat")
+	}
+}
+
+func TestConnectionRejectsUnknownOperationWithoutDisconnecting(t *testing.T) {
+	workerID := uuid.NewString()
+	store, cfg := testConnectionStore(t, workerID)
+	defer store.Close()
+	unknown := testCommand(workerID)
+	unknown.Operation = protocol.Operation("future_operation")
+	known := testCommand(workerID)
+	observed := make(chan struct{}, 1)
+	var handled atomic.Int32
+	server := newWorkerTLSServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.CloseNow()
+		ctx := r.Context()
+		if _, err := readWorkerEnvelope(ctx, conn); err != nil {
+			t.Error(err)
+			return
+		}
+		if err := serverEnvelope(ctx, conn, "hello_ack", protocol.HelloAck{ConnectionID: uuid.NewString(), HeartbeatIntervalSeconds: 60}); err != nil {
+			t.Error(err)
+			return
+		}
+		for i, command := range []protocol.Command{unknown, known} {
+			if err := serverEnvelope(ctx, conn, "command", command); err != nil {
+				t.Error(err)
+				return
+			}
+			frame, err := readWorkerEnvelope(ctx, conn)
+			if err != nil {
+				t.Error(err)
+				return
+			}
+			ack, err := protocol.Payload[protocol.CommandAck](frame)
+			if err != nil || frame.Type != "command_ack" || ack.CommandID != command.ID {
+				t.Errorf("command acknowledgement: %#v %v", ack, err)
+				return
+			}
+			if i == 0 && (ack.Status != "rejected" || ack.Error == nil || ack.Error.Code != protocol.UnsupportedOperation) {
+				t.Errorf("unknown operation acknowledgement: %#v", ack)
+				return
+			}
+			if i == 1 && (ack.Status != "accepted" || ack.Error != nil) {
+				t.Errorf("known operation acknowledgement: %#v", ack)
+				return
+			}
+		}
+		observed <- struct{}{}
+	}))
+	defer server.Close()
+	c := testConnection(t, cfg, store, server.URL, server.Client(), func(_ context.Context, command protocol.Command) (protocol.CommandAck, error) {
+		handled.Add(1)
+		if command.ID != known.ID {
+			t.Error("unknown operation reached command handler")
+		}
+		return protocol.CommandAck{CommandID: command.ID, Status: "accepted"}, nil
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_ = c.connect(ctx)
+	select {
+	case <-observed:
+	default:
+		t.Fatal("unknown operation broke the connection before subsequent valid command")
+	}
+	if handled.Load() != 1 {
+		t.Fatalf("handler calls = %d", handled.Load())
 	}
 }
 

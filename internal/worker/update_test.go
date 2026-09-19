@@ -155,6 +155,24 @@ func TestUpdateIdleCheckUsesBoundedTurnStateAndFailsClosed(t *testing.T) {
 	}
 }
 
+func TestUpdatePreparationWithThreadWithoutFirstUserMessage(t *testing.T) {
+	for _, state := range []string{"idle", "active", "unknown"} {
+		t.Run(state, func(t *testing.T) {
+			a, _, server, cleanup := testAgent(t)
+			defer cleanup()
+			server.SetThreads([]map[string]any{{"id": "empty-native", "status": state}}, []string{"empty-native"})
+			server.SetRPCError("thread/turns/list", -32600, "thread empty-native is not materialized yet; thread/turns/list is unavailable before first user message")
+			lease, err := a.prepareUpdate(context.Background(), time.Minute)
+			if err == nil {
+				defer a.abortUpdate(lease.Token)
+			}
+			if (err != nil) != (state != "idle") {
+				t.Fatalf("update preparation for empty %s thread = %v", state, err)
+			}
+		})
+	}
+}
+
 func TestUpdatePreparationRefusesInFlightTurnStart(t *testing.T) {
 	a, runtime, server, cleanup := testAgent(t)
 	defer cleanup()
