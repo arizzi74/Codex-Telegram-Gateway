@@ -29,7 +29,7 @@ var codex = []Command{
 	{"status", "Codex: session settings, context and usage"},
 	{"model", "Codex: list models or set model and effort"},
 	{"reasoning", "Codex: inspect or set reasoning effort"},
-	{"permissions", "Codex: inspect or change session permissions"},
+	{"permissions", "Codex: choose session permissions"},
 	{"approvals", "Codex: inspect or change approval policy"},
 	{"fast", "Codex: inspect or change service tier"},
 	{"plan", "Codex: change planning mode"},

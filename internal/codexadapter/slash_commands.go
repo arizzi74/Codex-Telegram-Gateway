@@ -20,6 +20,7 @@ type EffectiveConfig struct {
 	SandboxMode        string
 	ServiceTier        string
 	ModelContextWindow int64
+	Features           map[string]bool
 }
 
 func (c *Client) ReadEffectiveConfig(ctx context.Context, cwd string) (EffectiveConfig, error) {
@@ -33,6 +34,7 @@ func (c *Client) ReadEffectiveConfig(ctx context.Context, cwd string) (Effective
 			SandboxMode        string          `json:"sandbox_mode"`
 			ServiceTier        string          `json:"service_tier"`
 			ModelContextWindow int64           `json:"model_context_window"`
+			Features           map[string]bool `json:"features"`
 		} `json:"config"`
 	}
 	params := map[string]any{"includeLayers": false}
@@ -48,6 +50,7 @@ func (c *Client) ReadEffectiveConfig(ctx context.Context, cwd string) (Effective
 		ReasoningSummary: reply.Config.ReasoningSummary, ApprovalPolicy: approval,
 		ApprovalsReviewer: reply.Config.ApprovalsReviewer, SandboxMode: reply.Config.SandboxMode,
 		ServiceTier: reply.Config.ServiceTier, ModelContextWindow: reply.Config.ModelContextWindow,
+		Features: reply.Config.Features,
 	}, nil
 }
 
@@ -194,6 +197,7 @@ func (c *Client) ListModels(ctx context.Context) ([]ModelInfo, error) {
 
 type ThreadSettingsUpdate struct {
 	Model, Effort, Personality, ApprovalPolicy, PermissionProfile *string
+	ApprovalsReviewer                                             *string
 	ServiceTier                                                   *string // nil omits; pointer to empty string clears the tier.
 	SandboxMode                                                   string  // "read-only" or "workspace-write".
 	PlanMode                                                      *bool
@@ -202,6 +206,9 @@ type ThreadSettingsUpdate struct {
 func (c *Client) UpdateThreadSettings(ctx context.Context, threadID string, update ThreadSettingsUpdate) error {
 	if threadID == "" {
 		return errors.New("thread id is required")
+	}
+	if update.PermissionProfile != nil && update.SandboxMode != "" {
+		return errors.New("permissions and sandbox policy cannot be combined")
 	}
 	params := map[string]any{"threadId": threadID}
 	put := func(key string, value *string) {
@@ -213,6 +220,7 @@ func (c *Client) UpdateThreadSettings(ctx context.Context, threadID string, upda
 	put("effort", update.Effort)
 	put("personality", update.Personality)
 	put("approvalPolicy", update.ApprovalPolicy)
+	put("approvalsReviewer", update.ApprovalsReviewer)
 	put("permissions", update.PermissionProfile)
 	if update.ServiceTier != nil {
 		if *update.ServiceTier == "" {

@@ -87,7 +87,7 @@ becoming model prompts.
 | `/usage` | Account usage and rate limits reported by Codex. |
 | `/model [MODEL [EFFORT]]` | List available models or update the session model. |
 | `/reasoning [EFFORT]` | Inspect or change reasoning effort. |
-| `/permissions [read-only\|workspace-write]` | Inspect defaults or change session sandbox settings. |
+| `/permissions` | Open buttons for the session's Codex permission presets and allowed custom profiles. |
 | `/approvals [POLICY]` | Inspect or change session approval policy. |
 | `/fast [status\|on\|off]` | Inspect the configured tier or change the session tier when supported. |
 | `/plan on\|off` | Enable or disable planning mode for subsequent turns. |
@@ -112,6 +112,19 @@ becoming model prompts.
 | `/debug_config` | Show selected configuration diagnostics without secrets. |
 | `/quit`, `/exit` | Leave the Telegram selection; the supervised runtime stays available. |
 | `/help` | List Codex commands and guidance. |
+
+The `/permissions` menu offers **Ask for approval**, **Full Access**, and
+**Read Only**, subject to the runtime's managed requirements. **Approve for me**
+appears when Codex's automatic approval review is enabled. Configured permission
+profiles also appear when allowed. Full Access requires a second confirmation.
+Opening or cancelling the menu does not change permissions. Changes apply to
+future turns of that session; wait for a running turn to finish before applying
+a choice. A menu remains tied to its original session if you switch sessions.
+
+Text shortcuts `/permissions read-only` and `/permissions workspace-write`
+select the corresponding presets. `/permissions full-access` opens the same
+confirmation. These presets update the approval policy and reviewer together
+with filesystem/network permissions, matching Codex's menu.
 
 Commands that require a terminal picker, desktop integration, local credentials,
 or an interactive confirmation show instructions for the attached CLI. This

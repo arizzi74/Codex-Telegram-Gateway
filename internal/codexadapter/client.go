@@ -260,7 +260,8 @@ func defaultMethods() map[string]bool {
 		"mcpServerStatus/list": true, "app/installed": true, "skills/list": true,
 		"hooks/list": true, "plugin/list": true, "thread/backgroundTerminals/list": true,
 		"thread/backgroundTerminals/clean": true, "thread/archive": true, "thread/delete": true,
-		"thread/memoryMode/set": true,
+		"thread/memoryMode/set":  true,
+		"permissionProfile/list": true, "experimentalFeature/list": true, "configRequirements/read": true,
 	}
 }
 

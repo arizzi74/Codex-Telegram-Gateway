@@ -24,20 +24,21 @@ type Response struct {
 	Error  json.RawMessage
 }
 type Server struct {
-	in          *bufio.Scanner
-	out         *json.Encoder
-	raw         io.Writer
-	writeMu     sync.Mutex
-	close       func()
-	mu          sync.Mutex
-	calls       []Call
-	responses   []Response
-	next        int
-	threads     []map[string]any
-	loaded      []string
-	unavailable map[string]bool
-	rpcErrors   map[string]rpcError
-	delays      map[string]time.Duration
+	in            *bufio.Scanner
+	out           *json.Encoder
+	raw           io.Writer
+	writeMu       sync.Mutex
+	close         func()
+	mu            sync.Mutex
+	calls         []Call
+	responses     []Response
+	next          int
+	threads       []map[string]any
+	loaded        []string
+	unavailable   map[string]bool
+	rpcErrors     map[string]rpcError
+	methodResults map[string]json.RawMessage
+	delays        map[string]time.Duration
 }
 
 type rpcError struct {
@@ -89,6 +90,21 @@ func (s *Server) SetResponseDelay(method string, delay time.Duration) {
 		s.delays = map[string]time.Duration{}
 	}
 	s.delays[method] = delay
+}
+
+// SetMethodResult overrides a method's successful response for wire-level tests.
+func (s *Server) SetMethodResult(method string, result any) error {
+	encoded, err := json.Marshal(result)
+	if err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.methodResults == nil {
+		s.methodResults = map[string]json.RawMessage{}
+	}
+	s.methodResults[method] = encoded
+	return nil
 }
 
 func New(ctx context.Context) (*codexadapter.Client, *Server, error) {
@@ -168,6 +184,7 @@ func (s *Server) serve() {
 		n := s.next
 		unavailable := s.unavailable[request.Method]
 		rpcFailure, hasRPCFailure := s.rpcErrors[request.Method]
+		methodResult, hasMethodResult := s.methodResults[request.Method]
 		delay := s.delays[request.Method]
 		s.mu.Unlock()
 		// JSON-RPC notifications such as initialized have no response ID.
@@ -183,6 +200,10 @@ func (s *Server) serve() {
 		}
 		if hasRPCFailure {
 			_ = s.write(map[string]any{"id": json.RawMessage(request.ID), "error": map[string]any{"code": rpcFailure.code, "message": rpcFailure.message}})
+			continue
+		}
+		if hasMethodResult {
+			_ = s.write(map[string]any{"id": json.RawMessage(request.ID), "result": methodResult})
 			continue
 		}
 		var result any = map[string]any{}

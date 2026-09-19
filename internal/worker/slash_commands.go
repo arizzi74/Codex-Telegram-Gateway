@@ -73,8 +73,7 @@ func (s *sessionActor) executeCodexCommand(ctx context.Context, client *codexada
 		text, err := s.codexReasoning(ctx, client, args)
 		return protocol.Result{Text: text}, err
 	case "permissions":
-		text, err := s.codexPermissions(ctx, client, args)
-		return protocol.Result{Text: text}, err
+		return s.codexPermissions(ctx, client, args)
 	case "approvals":
 		text, err := s.codexApprovals(ctx, client, args)
 		return protocol.Result{Text: text}, err
@@ -335,12 +334,12 @@ func (s *sessionActor) codexStatus(ctx context.Context, client *codexadapter.Cli
 	if cfg.ApprovalPolicy != "" {
 		lines = append(lines, "Configured approval policy: "+cfg.ApprovalPolicy)
 	} else {
-		lines = append(lines, "Approval policy: unavailable in the read-only thread snapshot")
+		lines = append(lines, "Configured approval policy: default not reported by Codex")
 	}
 	if cfg.SandboxMode != "" {
 		lines = append(lines, "Configured sandbox: "+cfg.SandboxMode)
 	} else {
-		lines = append(lines, "Sandbox: unavailable in the read-only thread snapshot")
+		lines = append(lines, "Configured sandbox: default not reported by Codex")
 	}
 	if cfg.ServiceTier != "" {
 		lines = append(lines, "Service tier: "+cfg.ServiceTier)
@@ -456,33 +455,6 @@ func (s *sessionActor) codexReasoning(ctx context.Context, client *codexadapter.
 		return "", err
 	}
 	return "Reasoning effort set to " + args + ".", nil
-}
-
-func (s *sessionActor) codexPermissions(ctx context.Context, client *codexadapter.Client, args string) (string, error) {
-	if args == "" {
-		cfg, err := client.ReadEffectiveConfig(ctx, s.session.CWD)
-		if err != nil {
-			return "", err
-		}
-		return "Configured sandbox: " + valueOr(cfg.SandboxMode, "unavailable") + "\nConfigured approval policy: " + valueOr(cfg.ApprovalPolicy, "unavailable"), nil
-	}
-	mode := strings.ToLower(args)
-	if mode == "readonly" {
-		mode = "read-only"
-	}
-	if mode == "workspace" {
-		mode = "workspace-write"
-	}
-	if mode != "read-only" && mode != "workspace-write" {
-		return "", validationError("usage: /permissions [read-only|workspace-write]")
-	}
-	if err := s.ensureCodexThreadLoaded(ctx, client); err != nil {
-		return "", err
-	}
-	if err := client.UpdateThreadSettings(ctx, s.session.ThreadID, codexadapter.ThreadSettingsUpdate{SandboxMode: mode}); err != nil {
-		return "", err
-	}
-	return "Session sandbox set to " + mode + " (network access remains disabled).", nil
 }
 
 func (s *sessionActor) codexApprovals(ctx context.Context, client *codexadapter.Client, args string) (string, error) {

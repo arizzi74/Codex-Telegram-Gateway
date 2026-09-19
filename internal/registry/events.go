@@ -368,6 +368,9 @@ func nullGeneration(event protocol.Event) any {
 }
 
 func (s *Store) applyEvent(ctx context.Context, tx *dbTx, workerID uuid.UUID, event protocol.Event, target eventTarget) (notify bool, commandID *uuid.UUID, err error) {
+	if handled, notify, commandID, err := applyPermissionsEvent(ctx, tx, workerID, event, target); handled || err != nil {
+		return notify, commandID, err
+	}
 	if handled, err := applySessionWizardEvent(ctx, tx, workerID, event, target); handled || err != nil {
 		return false, nil, err
 	}
@@ -521,6 +524,48 @@ func (s *Store) applyEvent(ctx context.Context, tx *dbTx, workerID uuid.UUID, ev
 		}
 	}
 	return notify, commandID, nil
+}
+
+// Permission menus are private command results, not session snapshots or turn
+// transitions. Validate them first so a menu cannot smuggle another result type
+// through a handler that would update the session or broadcast its contents.
+func applyPermissionsEvent(ctx context.Context, tx *dbTx, workerID uuid.UUID, event protocol.Event, target eventTarget) (handled, notify bool, commandID *uuid.UUID, err error) {
+	var envelope struct {
+		Permissions json.RawMessage `json:"permissions"`
+	}
+	if err := json.Unmarshal(event.Data, &envelope); err != nil {
+		return false, false, nil, ErrEventTarget
+	}
+	if len(envelope.Permissions) == 0 || bytes.Equal(envelope.Permissions, []byte("null")) {
+		return false, false, nil, nil
+	}
+	var result protocol.Result
+	if json.Unmarshal(event.Data, &result) != nil || event.Kind != "command_completed" ||
+		target.runtimeID == nil || target.sessionID == nil || result.TurnID != "" ||
+		result.Session != nil || result.History != nil || result.Workspace != nil || result.Error != nil ||
+		(result.State != "" && result.State != "completed") || result.Permissions.Validate() != nil {
+		return true, false, nil, ErrEventTarget
+	}
+	id, parseErr := uuid.Parse(result.CommandID)
+	if parseErr != nil || id == uuid.Nil {
+		return true, false, nil, ErrEventTarget
+	}
+	var matching bool
+	err = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM commands
+        WHERE command_id=$1 AND worker_id=$2 AND runtime_id=$3
+          AND runtime_generation=$4 AND session_id=$5 AND operation='codex_command'
+          AND json_extract(payload, '$.arguments.codex.name')='permissions')`, id,
+		workerID, *target.runtimeID, int64(event.RuntimeGeneration), *target.sessionID).Scan(&matching)
+	if err != nil {
+		return true, false, nil, fmt.Errorf("registry: resolve permissions result command: %w", err)
+	}
+	if !matching {
+		return true, false, nil, ErrEventTarget
+	}
+	if err := updateCommandOutcome(ctx, tx, id, workerID, event, target, result); err != nil {
+		return true, false, nil, err
+	}
+	return true, target.runtimeCurrent, &id, nil
 }
 
 // History responses are private command results. Handle them before any

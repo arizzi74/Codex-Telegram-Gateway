@@ -113,6 +113,23 @@ func (s *Store) HistoryRequester(ctx context.Context, commandID uuid.UUID) (int6
 	return userID, nil
 }
 
+// PermissionsRequester scopes permission picker buttons to the user who opened
+// the menu, including a confirmation menu returned by a previous choice.
+func (s *Store) PermissionsRequester(ctx context.Context, commandID uuid.UUID) (int64, error) {
+	var userID int64
+	err := s.pool.QueryRow(ctx, `SELECT telegram_user_id FROM commands
+        WHERE command_id=$1 AND source='telegram' AND operation='codex_command'
+          AND json_extract(payload, '$.arguments.codex.name')='permissions'
+          AND telegram_user_id IS NOT NULL`, commandID).Scan(&userID)
+	if errors.Is(err, sql.ErrNoRows) || (err == nil && userID == 0) {
+		return 0, ErrTelegramTarget
+	}
+	if err != nil {
+		return 0, fmt.Errorf("registry: read permissions requester: %w", err)
+	}
+	return userID, nil
+}
+
 // PendingApproval returns the original, validated request for rendering the
 // next question. It is absent once a response command has been claimed.
 func (s *Store) PendingApproval(ctx context.Context, approvalID uuid.UUID) (protocol.Approval, error) {
@@ -385,7 +402,11 @@ func (s *Store) acceptCodexCommand(ctx context.Context, tx *dbTx, in IncomingUpd
 	if err != nil {
 		return AcceptResult{}, err
 	}
-	command, err := createTelegramCommand(ctx, tx, in, target, protocol.CodexCommand, target.sessionID.String(), "", protocol.Arguments{Codex: &protocol.CodexCommandPayload{Name: name, Args: in.Text}})
+	return acceptRoutedCodexCommand(ctx, tx, in, target, name, in.Text)
+}
+
+func acceptRoutedCodexCommand(ctx context.Context, tx *dbTx, in IncomingUpdate, target routeTarget, name, args string) (AcceptResult, error) {
+	command, err := createTelegramCommand(ctx, tx, in, target, protocol.CodexCommand, target.sessionID.String(), "", protocol.Arguments{Codex: &protocol.CodexCommandPayload{Name: name, Args: args}})
 	if err != nil {
 		return AcceptResult{}, err
 	}

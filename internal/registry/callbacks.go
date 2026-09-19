@@ -56,6 +56,14 @@ func (s *Store) CreateCallback(ctx context.Context, callback Callback) (string, 
 	if callback.Action == "history" && (callback.SessionID == uuid.Nil || callback.RuntimeID == uuid.Nil || callback.Generation <= 0 || callback.History.Validate() != nil) {
 		return "", errors.New("registry: invalid history callback")
 	}
+	if callback.Action == "permissions" {
+		if callback.SessionID == uuid.Nil || callback.RuntimeID == uuid.Nil || callback.Generation <= 0 || !validPermissionDecision(callback.Decision) {
+			return "", errors.New("registry: invalid permissions callback")
+		}
+		if err := validatePermissionCallbackOrigin(ctx, s.pool, callback.QuestionID, callback.SessionID, callback.RuntimeID.String(), callback.Generation, callback.BotID, callback.UserID, callback.ChatID, callback.TopicID); err != nil {
+			return "", err
+		}
+	}
 	if isWizardCallback(callback.Action) && (callback.WizardID == "" || callback.WizardRevision <= 0 || callback.Offset < 0 || callback.Offset > 1_000_000 || len(callback.Path) > 4096) {
 		return "", errors.New("registry: invalid wizard callback")
 	}
@@ -151,6 +159,8 @@ func (s *Store) consumeCallback(ctx context.Context, tx *dbTx, in IncomingUpdate
 		return result, nil
 	}
 	switch action {
+	case "permissions":
+		return consumePermissionsCallback(ctx, tx, in, context, sessionID)
 	case "history":
 		if sessionID == nil || context.RuntimeID == "" || context.Generation <= 0 || context.History.Validate() != nil {
 			return AcceptResult{}, ErrCallbackInvalid

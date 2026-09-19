@@ -761,7 +761,10 @@ func codexCommandNeedsIdle(name, args string) bool {
 		return true
 	case "init", "compact", "archive":
 		return args == ""
-	case "rename", "model", "reasoning", "permissions", "approvals", "plan", "personality", "memories", "goal":
+	case "permissions":
+		choice := strings.ToLower(args)
+		return choice != "" && choice != "cancel" && choice != "full-access" && choice != "danger-full-access"
+	case "rename", "model", "reasoning", "approvals", "plan", "personality", "memories", "goal":
 		return args != ""
 	case "fast":
 		return args != "" && args != "status"

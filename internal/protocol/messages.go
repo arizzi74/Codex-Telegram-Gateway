@@ -5,6 +5,8 @@ import (
 	"errors"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 )
@@ -234,14 +236,48 @@ type EventAck struct {
 }
 
 type Result struct {
-	Workspace *WorkspacePage `json:"workspace,omitempty"`
-	History   *HistoryPage   `json:"history,omitempty"`
-	CommandID string         `json:"command_id,omitempty"`
-	TurnID    string         `json:"turn_id,omitempty"`
-	Text      string         `json:"text,omitempty"`
-	State     string         `json:"state,omitempty"`
-	Error     *Error         `json:"error,omitempty"`
-	Session   *Session       `json:"session,omitempty"`
+	Permissions *PermissionMenu `json:"permissions,omitempty"`
+	Workspace   *WorkspacePage  `json:"workspace,omitempty"`
+	History     *HistoryPage    `json:"history,omitempty"`
+	CommandID   string          `json:"command_id,omitempty"`
+	TurnID      string          `json:"turn_id,omitempty"`
+	Text        string          `json:"text,omitempty"`
+	State       string          `json:"state,omitempty"`
+	Error       *Error          `json:"error,omitempty"`
+	Session     *Session        `json:"session,omitempty"`
+}
+
+// PermissionMenu contains choices resolved by the worker for this session.
+// IDs are arguments to the typed permissions command, never arbitrary RPCs.
+type PermissionMenu struct {
+	Options []PermissionOption `json:"options"`
+}
+
+type PermissionOption struct {
+	ID          string `json:"id"`
+	Label       string `json:"label"`
+	Description string `json:"description,omitempty"`
+}
+
+func (m *PermissionMenu) Validate() error {
+	if m == nil || len(m.Options) == 0 || len(m.Options) > 50 {
+		return errors.New("invalid permissions menu size")
+	}
+	seen := make(map[string]struct{}, len(m.Options))
+	for _, option := range m.Options {
+		if strings.TrimSpace(option.ID) == "" || len(option.ID) > 256 ||
+			!utf8.ValidString(option.ID) || strings.IndexFunc(option.ID, unicode.IsControl) >= 0 ||
+			strings.TrimSpace(option.Label) == "" || !utf8.ValidString(option.Label) ||
+			utf8.RuneCountInString(option.Label) > 120 || !utf8.ValidString(option.Description) ||
+			utf8.RuneCountInString(option.Description) > 500 {
+			return errors.New("invalid permissions menu option")
+		}
+		if _, duplicate := seen[option.ID]; duplicate {
+			return errors.New("duplicate permissions menu option")
+		}
+		seen[option.ID] = struct{}{}
+	}
+	return nil
 }
 
 const DefaultHistoryLimit = 10

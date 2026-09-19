@@ -32,6 +32,9 @@ func TestCodexStatusReadsSnapshotAndNeverStartsPrompt(t *testing.T) {
 	if !strings.Contains(result.Text, "Model: gpt-5.4") || !strings.Contains(result.Text, "Reasoning: high") || !strings.Contains(result.Text, "Token usage:") {
 		t.Fatalf("status output:\n%s", result.Text)
 	}
+	if strings.Contains(result.Text, "read-only thread") || !strings.Contains(result.Text, "default not reported by Codex") {
+		t.Fatalf("status confused metadata inspection with session permissions:\n%s", result.Text)
+	}
 	if hasCall(server.Calls(), "turn/start") {
 		t.Fatal("/status was forwarded as a model prompt")
 	}

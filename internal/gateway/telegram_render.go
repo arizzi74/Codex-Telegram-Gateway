@@ -565,6 +565,9 @@ func (s *Sender) renderEvent(ctx context.Context, row registry.Delivery) (string
 			parts, keyboard, err := s.renderHistory(ctx, row, event, result.History, result.CommandID)
 			return strings.Join(parts, "\n\n"), keyboard, err
 		}
+		if result.Permissions != nil {
+			return s.renderPermissions(ctx, row, identity, event, result)
+		}
 		if result.Session == nil || result.Session.ID == event.SessionID {
 			if strings.TrimSpace(result.Text) != "" {
 				return identity + "\n\n" + result.Text, nil, nil
