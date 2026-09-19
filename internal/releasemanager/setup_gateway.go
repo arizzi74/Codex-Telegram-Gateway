@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -91,7 +92,8 @@ func (m *Manager) setupGateway(ctx context.Context, l *Layout, cwd string, openP
 	fmt.Fprintln(m.Out, "Set up a gateway using your Telegram bot and public HTTPS address. Press Enter to accept each default. Daily automatic updates will be enabled.")
 	fmt.Fprintln(m.Out, "Have a domain pointing to this machine. In Telegram, use @BotFather /newbot to create a bot, or /token to retrieve an existing bot's token.")
 	fmt.Fprintln(m.Out, "The allowed Telegram account needs your numeric personal user ID, not your @username and not the bot's ID.")
-	origin, err := askSetupValue(ctx, prompt, m.Out, "Public gateway hostname or HTTPS address", "", false, setupGatewayOrigin)
+	nginxPaths, nginxHosts := m.inspectGatewayNginx(ctx)
+	plan, err := m.chooseGatewayExposure(ctx, prompt, nginxPaths, nginxHosts)
 	if err != nil {
 		return err
 	}
@@ -129,10 +131,14 @@ func (m *Manager) setupGateway(ctx context.Context, l *Layout, cwd string, openP
 	if err != nil {
 		return err
 	}
+	publicURL, _ := url.Parse(plan.Origin)
 	portValue, err := askSetupValue(ctx, prompt, m.Out, "Local listen port", "8080", false, func(value string) (string, error) {
 		port, err := strconv.Atoi(strings.TrimSpace(value))
 		if err != nil || port < 1024 || port > 65535 {
 			return "", errors.New("local listen port must be 1024..65535")
+		}
+		if strconv.Itoa(port) == publicURL.Port() {
+			return "", errors.New("local listen port must differ from the public HTTPS port")
 		}
 		return strconv.Itoa(port), nil
 	})
@@ -180,7 +186,7 @@ func (m *Manager) setupGateway(ctx context.Context, l *Layout, cwd string, openP
 	}
 	configuration := filepath.Join(stage, "gateway.json")
 	if err := WriteJSON(configuration, map[string]any{
-		"listen": "127.0.0.1:" + portValue, "public_base_url": origin,
+		"listen": "127.0.0.1:" + portValue, "public_base_url": plan.Origin,
 		"database_path": filepath.Join(root, "gateway.db"), "bot_secrets_file": botPath,
 		"webhook_secret_env": setupWebhookSecretEnv, "allowed_user_ids": []int64{ownerID},
 	}); err != nil {
@@ -192,7 +198,7 @@ func (m *Manager) setupGateway(ctx context.Context, l *Layout, cwd string, openP
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	return m.installGuidedGateway(ctx, l, options{Action: "install", Component: "gateway", Config: configuration, Environment: environment, Version: version, AutoUpdate: true}, prompt, execute)
+	return m.installGuidedGateway(ctx, l, options{Action: "install", Component: "gateway", Config: configuration, Environment: environment, Version: version, AutoUpdate: true}, prompt, execute, plan)
 }
 
 func setupGatewayOrigin(value string) (string, error) {
@@ -207,7 +213,7 @@ func setupGatewayOrigin(value string) (string, error) {
 	return publicURL.String(), nil
 }
 
-func (m *Manager) installGuidedGateway(ctx context.Context, l *Layout, opts options, prompt workerSetupPrompt, execute func(context.Context, options) error) error {
+func (m *Manager) installGuidedGateway(ctx context.Context, l *Layout, opts options, prompt workerSetupPrompt, execute func(context.Context, options) error, plans ...*gatewayExposurePlan) error {
 	cfg, err := config.LoadGateway(opts.Config)
 	if err != nil {
 		return errors.New("gateway setup configuration failed validation")
@@ -219,6 +225,18 @@ func (m *Manager) installGuidedGateway(ctx context.Context, l *Layout, opts opti
 		fmt.Fprintf(m.Out, "Gateway installed and listening at %s.\n", cfg.Listen)
 		m.gatewayFinishInstructions()
 		return nil
+	}
+	for _, plan := range plans {
+		if plan == nil || plan.Mode == "manual" {
+			continue
+		}
+		if err := m.applyGatewayExposure(ctx, cfg, plan); err != nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			fmt.Fprintf(m.Out, "HTTPS setup could not finish: %s\n", err)
+			m.gatewayFinishInstructions()
+		}
 	}
 	return m.guideGatewayCompletion(ctx, l, cfg, prompt)
 }

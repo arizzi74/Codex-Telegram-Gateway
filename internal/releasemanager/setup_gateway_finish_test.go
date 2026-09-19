@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -100,6 +101,9 @@ func TestFinishGatewayRegistersBotAsServiceAccountAndGuidesEnrollment(t *testing
 	m.HTTP.Transport = gatewaySetupRoundTrip(readyGatewayResponse)
 	var commands [][]string
 	m.Run = func(_ context.Context, args ...string) (CommandResult, error) {
+		if filepath.Base(args[0]) == "nginx" || (len(args) > 1 && args[0] == "systemctl" && args[1] == "show") {
+			return CommandResult{ExitCode: 1}, nil
+		}
 		if len(args) == 2 && args[1] == "--help" {
 			return CommandResult{Output: []byte("admin bootstrap-if-needed")}, nil
 		}
@@ -146,6 +150,9 @@ func TestFinishGatewayCanRetryHTTPSOrDeferWithoutTelegramChanges(t *testing.T) {
 				return readyGatewayResponse(r)
 			})
 			m.Run = func(_ context.Context, args ...string) (CommandResult, error) {
+				if filepath.Base(args[0]) == "nginx" || (len(args) > 1 && args[0] == "systemctl" && args[1] == "show") {
+					return CommandResult{ExitCode: 1}, nil
+				}
 				if len(args) == 2 && args[1] == "--help" {
 					return CommandResult{Output: []byte("admin bootstrap-if-needed")}, nil
 				}
@@ -198,6 +205,9 @@ func TestFinishGatewayOlderBinaryKeepsAdministratorSetupPending(t *testing.T) {
 	m.HTTP.Transport = gatewaySetupRoundTrip(readyGatewayResponse)
 	commands := 0
 	m.Run = func(_ context.Context, args ...string) (CommandResult, error) {
+		if filepath.Base(args[0]) == "nginx" || (len(args) > 1 && args[0] == "systemctl" && args[1] == "show") {
+			return CommandResult{ExitCode: 1}, nil
+		}
 		if len(args) == 2 && args[1] == "--help" {
 			return CommandResult{Output: []byte("serve|admin bootstrap|menu set|webhook set")}, nil
 		}

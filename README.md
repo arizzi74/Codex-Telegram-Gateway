@@ -17,12 +17,15 @@ is missing also needs the standard `tar` and `gzip` utilities.
 curl -fsSL https://raw.githubusercontent.com/arizzi74/Codex-Telegram-Gateway/main/scripts/install.sh | sudo sh
 ```
 
-Have a domain pointing to this machine, inbound ports 80/443 open, your Telegram
-bot username and token, and your numeric Telegram user ID ready. The wizard
+Have a domain pointing to this machine, your Telegram bot username and token,
+and your numeric Telegram user ID ready. The wizard
 creates the gateway, guides HTTPS setup, registers the bot menu and webhook, and
-prints the admin address and first passkey enrollment token. On a fresh Debian
-or Ubuntu host it can install Caddy and configure HTTPS automatically. Existing
-proxies can be checked or configured manually within the wizard.
+prints the admin address and first passkey enrollment token. If nginx is
+installed, it lists existing HTTPS virtual hosts and lets you select one for
+the gateway routes, preserving its existing website. You can instead install a
+standalone Caddy proxy on Debian or Ubuntu, using port 443 or an alternative
+such as 8443. The prompts explain which firewall ports and certificate settings
+are needed. See [HTTPS setup](docs/installation.md#finish-gateway-setup).
 
 **Worker (Linux with systemd or macOS):** enroll a worker in the gateway console,
 then run on its machine as the account that owns your projects, without sudo:

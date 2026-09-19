@@ -7,8 +7,11 @@ for custom deployments and recovery.
 Run the gateway behind TLS termination at its configured public HTTPS origin,
 such as `https://gateway.example.com`. The gateway
 listens only on loopback; public access goes through an HTTPS proxy. Guided setup
-can configure Caddy on a fresh Debian or Ubuntu host, using
-`codex-gateway-proxy.service` and `/etc/codex-gateway-proxy/Caddyfile`.
+can add the gateway routes to a selected nginx HTTPS virtual host or configure a
+standalone Caddy proxy on Debian or Ubuntu, using
+`codex-gateway-proxy.service` and `/etc/codex-gateway-proxy/Caddyfile`. The
+[HTTPS setup options](installation.md#finish-gateway-setup) explain alternative
+public ports and certificate requirements.
 Run `sudo codex-telegramgw finish gateway` to resume HTTPS, Telegram, and first
 administrator setup. For a manually managed nginx deployment, the sample
 [nginx configuration](../deploy/nginx/telegramgw.conf) proxies health checks,

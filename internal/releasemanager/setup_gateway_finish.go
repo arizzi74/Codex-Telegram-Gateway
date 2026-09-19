@@ -46,15 +46,27 @@ func (m *Manager) gatewayFinishInstructions() {
 
 func (m *Manager) guideGatewayCompletion(ctx context.Context, l *Layout, cfg config.GatewayConfig, prompt workerSetupPrompt) error {
 	fmt.Fprintf(m.Out, "\nFinish gateway setup for %s\n", cfg.PublicBaseURL)
-	fmt.Fprintln(m.Out, "The domain's DNS records must point to this machine, and inbound TCP ports 80 and 443 must be open in the host and cloud firewalls.")
-	fmt.Fprintln(m.Out, "Choose auto to install Caddy and obtain/renew HTTPS certificates on a fresh Debian or Ubuntu machine; choose check if your HTTPS proxy already works, manual for configuration instructions, or later to resume another time.")
+	fmt.Fprintln(m.Out, "The domain's DNS records must point to this machine. Open the configured HTTPS port in the host and cloud firewalls; automatic certificates also require access to their validation port.")
 	ready := m.gatewayPublicReady(ctx, cfg.PublicBaseURL) == nil
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	fallback := "auto"
+	var paths gatewayNginxPaths
+	var hosts []gatewayNginxHost
+	fallback := "standalone"
+	if !ready {
+		paths, hosts = m.inspectGatewayNginx(ctx)
+		for _, host := range hosts {
+			if gatewayNginxUsable(host, cfg.PublicBaseURL) {
+				fallback = "nginx"
+				break
+			}
+		}
+		fmt.Fprintln(m.Out, "Choose nginx to use an existing HTTPS site, standalone for a dedicated Caddy proxy, check to test your existing proxy, manual for instructions, or later to resume.")
+		fmt.Fprintln(m.Out, "Finishing setup preserves the gateway's configured public address and administrator passkeys.")
+	}
 	for !ready {
-		choice, err := prompt.Ask(ctx, "HTTPS setup (auto/check/manual/later)", fallback, false)
+		choice, err := prompt.Ask(ctx, "HTTPS setup (nginx/standalone/check/manual/later)", fallback, false)
 		if err != nil {
 			return err
 		}
@@ -62,32 +74,49 @@ func (m *Manager) guideGatewayCompletion(ctx context.Context, l *Layout, cfg con
 		case "later":
 			m.gatewayFinishInstructions()
 			return nil
-		case "auto":
+		case "nginx", "standalone", "auto":
+			var plan *gatewayExposurePlan
+			if strings.EqualFold(strings.TrimSpace(choice), "nginx") {
+				plan, err = m.chooseGatewayNginx(ctx, prompt, paths, hosts, cfg.PublicBaseURL)
+			} else {
+				plan = &gatewayExposurePlan{Mode: "standalone", Origin: cfg.PublicBaseURL}
+				plan.HTTPSOptions, err = m.chooseGatewayCertificates(ctx, prompt, cfg.PublicBaseURL)
+			}
+			if errors.Is(err, errGatewayExposureBack) {
+				continue
+			}
+			if err != nil {
+				return err
+			}
+			if plan == nil {
+				continue
+			}
 			fallback = "check"
-			fmt.Fprintln(m.Out, "Caddy will request certificates from a public certificate authority; proceeding accepts its subscriber agreement. Existing web servers and proxy configurations are preserved.")
-			if err := m.setupGatewayHTTPS(ctx, cfg, defaultGatewayHTTPSPaths()); err != nil {
+			if err := m.applyGatewayExposure(ctx, cfg, plan); err != nil {
 				if ctx.Err() != nil {
 					return ctx.Err()
 				}
-				fmt.Fprintf(m.Out, "Automatic HTTPS setup could not finish: %s\n", err)
+				fmt.Fprintf(m.Out, "HTTPS setup could not finish: %s\n", err)
 				m.printGatewayProxyInstructions(cfg)
+				// Reload the snapshot before another attempt after a failed change.
+				paths, hosts = m.inspectGatewayNginx(ctx)
 				continue
 			}
-			fmt.Fprintln(m.Out, "HTTPS proxy started. Certificate issuance can take a minute; checking the public gateway now.")
+			fmt.Fprintln(m.Out, "HTTPS proxy configured. Certificate issuance can take a minute; checking the public gateway now.")
 		case "manual":
 			fallback = "check"
 			m.printGatewayProxyInstructions(cfg)
 			continue
 		case "check":
 		default:
-			fmt.Fprintln(m.Out, "Enter auto, check, manual, or later.")
+			fmt.Fprintln(m.Out, "Enter nginx, standalone, check, manual, or later.")
 			continue
 		}
 		if err := m.gatewayPublicReady(ctx, cfg.PublicBaseURL); err != nil {
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}
-			fmt.Fprintln(m.Out, "Public HTTPS is not ready yet. Check DNS, inbound ports 80/443, and your proxy. For the managed proxy: sudo journalctl -u codex-gateway-proxy -n 30 --no-pager")
+			fmt.Fprintln(m.Out, "Public HTTPS is not ready yet. Check DNS, the configured HTTPS port, certificate validation ports, and your proxy. For the managed proxy: sudo journalctl -u codex-gateway-proxy -n 30 --no-pager")
 			fmt.Fprintln(m.Out, "Choose check to retry after making changes, or later to resume without changing this installation.")
 			continue
 		}

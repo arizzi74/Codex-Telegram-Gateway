@@ -18,8 +18,8 @@ func gatewayHTTPSFixture(t *testing.T) (*Manager, config.GatewayConfig, gatewayH
 	paths := gatewayHTTPSPaths{
 		OSRelease: filepath.Join(root, "os-release"), Config: filepath.Join(root, "etc/codex-gateway-proxy/Caddyfile"),
 		Unit: filepath.Join(root, "systemd/codex-gateway-proxy.service"), State: filepath.Join(root, "etc/codex-gateway-proxy/setup.json"),
-		ExistingProxyPaths: []string{filepath.Join(root, "etc/caddy"), filepath.Join(root, "etc/nginx")},
-		PortsAvailable:     func() bool { return true }, PackageManagerAvailable: func() bool { return true },
+		ExistingCaddyPaths: []string{filepath.Join(root, "etc/caddy"), filepath.Join(root, "systemd/caddy.service")},
+		PortAvailable:      func(int) bool { return true }, CaddyAvailable: func() bool { return false }, PackageManagerAvailable: func() bool { return true },
 	}
 	platformWrite(t, paths.OSRelease, "ID=ubuntu\n", 0644)
 	m := New(nil)
@@ -71,8 +71,8 @@ func TestGatewayAutomaticHTTPSInstallsDedicatedProxyAndResumes(t *testing.T) {
 	*commands = nil
 	// An installed proxy now occupies the ports and has a package config. A
 	// repeat invocation uses only its dedicated files/service.
-	paths.PortsAvailable = func() bool { return false }
-	platformWrite(t, filepath.Join(paths.ExistingProxyPaths[0], "Caddyfile"), "package original", 0644)
+	paths.PortAvailable = func(int) bool { return false }
+	platformWrite(t, filepath.Join(paths.ExistingCaddyPaths[0], "Caddyfile"), "package original", 0644)
 	if err := m.setupGatewayHTTPS(context.Background(), cfg, paths); err != nil {
 		t.Fatal(err)
 	}
@@ -84,16 +84,16 @@ func TestGatewayAutomaticHTTPSInstallsDedicatedProxyAndResumes(t *testing.T) {
 }
 
 func TestGatewayAutomaticHTTPSRefusesExistingServersAndUnsupportedHosts(t *testing.T) {
-	for _, name := range []string{"nginx", "active-service", "ports", "custom-unit", "existing-directory", "unsupported-os", "no-apt", "ip-origin", "custom-port"} {
+	for _, name := range []string{"caddy-config", "active-service", "ports", "custom-unit", "existing-directory", "unsupported-os", "no-apt", "ip-origin", "unsupported-port"} {
 		t.Run(name, func(t *testing.T) {
 			m, cfg, paths, commands := gatewayHTTPSFixture(t)
 			switch name {
-			case "nginx":
-				platformWrite(t, filepath.Join(paths.ExistingProxyPaths[1], "nginx.conf"), "preserve me", 0644)
+			case "caddy-config":
+				platformWrite(t, filepath.Join(paths.ExistingCaddyPaths[0], "Caddyfile"), "preserve me", 0644)
 			case "active-service":
 				m.Run = func(context.Context, ...string) (CommandResult, error) { return CommandResult{}, nil }
 			case "ports":
-				paths.PortsAvailable = func() bool { return false }
+				paths.PortAvailable = func(int) bool { return false }
 			case "custom-unit":
 				platformWrite(t, paths.Unit, "preserve me", 0644)
 			case "existing-directory":
@@ -106,8 +106,8 @@ func TestGatewayAutomaticHTTPSRefusesExistingServersAndUnsupportedHosts(t *testi
 				paths.PackageManagerAvailable = func() bool { return false }
 			case "ip-origin":
 				cfg.PublicBaseURL = "https://192.0.2.1"
-			case "custom-port":
-				cfg.PublicBaseURL = "https://gateway.example.com:8443"
+			case "unsupported-port":
+				cfg.PublicBaseURL = "https://gateway.example.com:9443"
 			}
 			if err := m.setupGatewayHTTPS(context.Background(), cfg, paths); err == nil {
 				t.Fatal("unsafe/unsupported automatic HTTPS was accepted")
@@ -131,7 +131,7 @@ func TestGatewayAutomaticHTTPSResumesInterruptedPackageInstallation(t *testing.T
 		*commands = append(*commands, args)
 		if first && args[1] == "install" {
 			first = false
-			platformWrite(t, filepath.Join(paths.ExistingProxyPaths[0], "Caddyfile"), "preserve package config", 0644)
+			platformWrite(t, filepath.Join(paths.ExistingCaddyPaths[0], "Caddyfile"), "preserve package config", 0644)
 			return CommandResult{}, errors.New("interrupted package installation")
 		}
 		return CommandResult{}, nil
@@ -145,7 +145,7 @@ func TestGatewayAutomaticHTTPSResumesInterruptedPackageInstallation(t *testing.T
 	if err := m.setupGatewayHTTPS(context.Background(), cfg, paths); err != nil {
 		t.Fatal("could not resume our own package installation", err)
 	}
-	data, _ := os.ReadFile(filepath.Join(paths.ExistingProxyPaths[0], "Caddyfile"))
+	data, _ := os.ReadFile(filepath.Join(paths.ExistingCaddyPaths[0], "Caddyfile"))
 	if string(data) != "preserve package config" {
 		t.Fatal("package configuration was overwritten")
 	}
@@ -169,7 +169,7 @@ func TestGatewayAutomaticHTTPSResumesAfterUncertainServiceStart(t *testing.T) {
 	if err != nil || state["phase"] != "configured" {
 		t.Fatal("service start boundary was not durably recorded", err)
 	}
-	paths.PortsAvailable = func() bool { return false }
+	paths.PortAvailable = func(int) bool { return false }
 	*commands = nil
 	if err := m.setupGatewayHTTPS(context.Background(), cfg, paths); err != nil {
 		t.Fatal("our own already-bound proxy prevented recovery", err)
@@ -224,5 +224,92 @@ func TestGatewayAutomaticHTTPSOriginValidation(t *testing.T) {
 		if gatewayAutomaticHTTPSOrigin(origin) {
 			t.Fatalf("accepted invalid origin %s", origin)
 		}
+	}
+}
+
+func TestGatewayStandaloneHTTPSCoexistsWithExistingWebServers(t *testing.T) {
+	for _, tc := range []struct {
+		name, origin string
+		busy         map[int]bool
+		want         string
+		wantError    bool
+	}{
+		{"alternative-port", "https://gateway.example.com:8443", map[int]bool{443: true}, "disable_tlsalpn_challenge", false},
+		{"port-88", "https://gateway.example.com:88", map[int]bool{443: true}, "disable_tlsalpn_challenge", false},
+		{"tls-alpn-only", "https://gateway.example.com", map[int]bool{80: true}, "disable_http_challenge", false},
+		{"challenge-port-busy", "https://gateway.example.com:8443", map[int]bool{80: true, 443: true}, "", true},
+		{"selected-port-busy", "https://gateway.example.com:8443", map[int]bool{8443: true}, "", true},
+		{"https80-needs-certificate", "https://gateway.example.com:80", nil, "", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m, cfg, paths, commands := gatewayHTTPSFixture(t)
+			cfg.PublicBaseURL = tc.origin
+			paths.PortAvailable = func(port int) bool { return !tc.busy[port] }
+			paths.CaddyAvailable = func() bool { return true }
+			// An existing Caddy installation and its service are reusable; neither
+			// its config nor any nginx/Apache service should be touched.
+			original := filepath.Join(paths.ExistingCaddyPaths[0], "Caddyfile")
+			platformWrite(t, original, "preserve existing sites", 0644)
+			err := m.setupGatewayHTTPS(context.Background(), cfg, paths)
+			if (err != nil) != tc.wantError {
+				t.Fatalf("setup error = %v, want error %v", err, tc.wantError)
+			}
+			data, _ := os.ReadFile(original)
+			if string(data) != "preserve existing sites" {
+				t.Fatal("changed an existing proxy config")
+			}
+			for _, command := range *commands {
+				if command[0] == "apt-get" || (command[0] == "systemctl" && strings.Contains(strings.Join(command, " "), "caddy.service")) {
+					t.Fatalf("changed existing Caddy service: %v", command)
+				}
+			}
+			if tc.wantError {
+				if FileExists(paths.State) {
+					t.Fatal("rejected setup created state")
+				}
+				return
+			}
+			data, _ = os.ReadFile(paths.Config)
+			if !strings.Contains(string(data), tc.want) || !strings.Contains(string(data), "auto_https disable_redirects") {
+				t.Fatalf("incorrect challenge configuration: %s", data)
+			}
+			paths.PortAvailable = func(int) bool { return false }
+			if err := m.setupGatewayHTTPS(context.Background(), cfg, paths); err != nil {
+				t.Fatalf("could not resume own running proxy: %v", err)
+			}
+		})
+	}
+}
+
+func TestGatewayCaddyPackageServiceMaskedOnlyDuringNewInstallation(t *testing.T) {
+	m, cfg, paths, commands := gatewayHTTPSFixture(t)
+	masked := false
+	m.SetupRun = func(_ context.Context, args ...string) (CommandResult, error) {
+		if !masked {
+			t.Fatal("package installation could start its default service")
+		}
+		*commands = append(*commands, args)
+		return CommandResult{}, nil
+	}
+	run := m.Run
+	m.Run = func(ctx context.Context, args ...string) (CommandResult, error) {
+		if len(args) > 1 && args[0] == "systemctl" {
+			if args[1] == "mask" {
+				masked = true
+			}
+			if args[1] == "unmask" {
+				masked = false
+			}
+			if strings.Contains(strings.Join(args, " "), "--now caddy.service") {
+				t.Fatal("installer stopped a default Caddy service")
+			}
+		}
+		return run(ctx, args...)
+	}
+	if err := m.setupGatewayHTTPS(context.Background(), cfg, paths); err != nil {
+		t.Fatal(err)
+	}
+	if masked {
+		t.Fatal("left default service masked")
 	}
 }

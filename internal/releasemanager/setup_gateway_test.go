@@ -31,6 +31,7 @@ func gatewaySetupFixture(t *testing.T) (*Manager, *Layout, string) {
 	}
 	t.Setenv("CODEX_TELEGRAMGW_BOOTSTRAP_RELEASE", "v0.5.2")
 	m := New(nil)
+	m.Run = func(context.Context, ...string) (CommandResult, error) { return CommandResult{ExitCode: 1}, nil }
 	m.HTTP = &http.Client{Transport: gatewaySetupRoundTrip(func(*http.Request) (*http.Response, error) {
 		return nil, errors.New("HTTPS not configured")
 	})}
@@ -152,7 +153,7 @@ func TestSetupGatewayGuidedConfigIsPrivateValidatedAndTemporary(t *testing.T) {
 			token := "123456789:private-bot-token_aZ-123"
 			label := `Owner "quoted" $(not-evaluated) &=:`
 			prompt := &scriptedWorkerSetup{t: t, answers: []string{
-				"https://gateway.example.com:8443/", "@example_bot", "12345", label, "8090", token, "later",
+				"manual", "https://gateway.example.com:8443/", "@example_bot", "12345", label, "8090", token, "later",
 			}}
 			var stage string
 			installErr := errors.New("test install failure")
@@ -195,7 +196,7 @@ func TestSetupGatewayGuidedConfigIsPrivateValidatedAndTemporary(t *testing.T) {
 			if (installFails && !errors.Is(err, installErr)) || (!installFails && err != nil) {
 				t.Fatal(err)
 			}
-			wantSecrets := []bool{false, false, false, false, false, true}
+			wantSecrets := []bool{false, false, false, false, false, false, true}
 			if !installFails {
 				wantSecrets = append(wantSecrets, false)
 			}
@@ -222,7 +223,7 @@ func TestSetupGatewayGuidedConfigIsPrivateValidatedAndTemporary(t *testing.T) {
 
 func TestSetupGatewayDefaults(t *testing.T) {
 	m, l, cwd := gatewaySetupFixture(t)
-	prompt := &scriptedWorkerSetup{t: t, answers: []string{"gateway.example.com", "example_bot", "12345", "", "", "12345:token", "later"}}
+	prompt := &scriptedWorkerSetup{t: t, answers: []string{"manual", "gateway.example.com", "example_bot", "12345", "", "", "12345:token", "later"}}
 	err := m.setupGateway(context.Background(), l, cwd, func() (workerSetupPrompt, error) { return prompt, nil }, func(_ context.Context, opts options) error {
 		cfg, err := config.LoadGateway(opts.Config)
 		if err != nil || cfg.Listen != "127.0.0.1:8080" || cfg.Secrets.WLName != "owner" || cfg.PublicBaseURL != "https://gateway.example.com" {
@@ -240,7 +241,7 @@ func TestSetupGatewayCorrectsFieldsWithoutRestarting(t *testing.T) {
 	var output bytes.Buffer
 	m.Out = &output
 	prompt := &scriptedWorkerSetup{t: t, answers: []string{
-		"https://private-token@gateway.example.com", "gateway.example.com",
+		"manual", "https://private-token@gateway.example.com", "gateway.example.com",
 		"private-token\nWLID=2", "@example_bot",
 		"-1", "12345",
 		"private-token\nBOTTOKEN=bad", "Owner",
@@ -266,7 +267,7 @@ func TestSetupGatewayCorrectsFieldsWithoutRestarting(t *testing.T) {
 	if strings.Contains(output.String(), "private-token") || strings.Contains(output.String(), "valid-bot-token") {
 		t.Fatal("correction printed private input")
 	}
-	if !prompt.secrets[10] || !prompt.secrets[11] {
+	if !prompt.secrets[11] || !prompt.secrets[12] {
 		t.Fatal("token retry did not retain hidden input")
 	}
 }
@@ -316,6 +317,7 @@ func TestSetupGatewayRepromptsInvalidInputBeforeInstallation(t *testing.T) {
 		{"label-injection", []string{"https://gateway.example.com", "example_bot", "12345", "private-token\nBOTTOKEN=bad"}},
 		{"privileged-port", []string{"https://gateway.example.com", "example_bot", "12345", "", "443"}},
 		{"large-port", []string{"https://gateway.example.com", "example_bot", "12345", "", "65536"}},
+		{"public-local-port", []string{"https://gateway.example.com:8443", "example_bot", "12345", "", "8443"}},
 		{"token", []string{"https://gateway.example.com", "example_bot", "12345", "", "", "private-token"}},
 		{"token-injection", []string{"https://gateway.example.com", "example_bot", "12345", "", "", "12345:private-token\nWLID=2"}},
 		{"token-control", []string{"https://gateway.example.com", "example_bot", "12345", "", "", "12345:private-token\x00"}},
@@ -327,7 +329,7 @@ func TestSetupGatewayRepromptsInvalidInputBeforeInstallation(t *testing.T) {
 			m.Out = &output
 			temp := t.TempDir()
 			t.Setenv("TMPDIR", temp)
-			prompt := &endedGatewaySetup{&scriptedWorkerSetup{t: t, answers: tc.answers}}
+			prompt := &endedGatewaySetup{&scriptedWorkerSetup{t: t, answers: append([]string{"manual"}, tc.answers...)}}
 			err := m.setupGateway(context.Background(), l, cwd, func() (workerSetupPrompt, error) { return prompt, nil }, func(context.Context, options) error {
 				t.Fatal("invalid setup attempted an installation")
 				return nil
@@ -438,7 +440,7 @@ func TestSetupGatewayCancellationStopsBeforeWritingSecrets(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	prompt := &cancellingGatewaySetup{
-		scriptedWorkerSetup: &scriptedWorkerSetup{t: t, answers: []string{"https://gateway.example.com", "example_bot", "12345", "", "", "12345:token"}},
+		scriptedWorkerSetup: &scriptedWorkerSetup{t: t, answers: []string{"manual", "https://gateway.example.com", "example_bot", "12345", "", "", "12345:token"}},
 		cancel:              cancel,
 	}
 	err := m.setupGateway(ctx, l, cwd, func() (workerSetupPrompt, error) { return prompt, nil }, func(context.Context, options) error {

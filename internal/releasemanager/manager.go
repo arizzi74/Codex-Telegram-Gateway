@@ -71,6 +71,7 @@ const usage = `Install and update Codex Telegram Gateway from verified GitHub Re
 Usage:
   codex-telegramgw setup [gateway|worker]
   codex-telegramgw finish gateway
+  codex-telegramgw https refresh
   codex-telegramgw install gateway --config PATH --secrets-env PATH [--auto-update]
   codex-telegramgw install worker --config PATH [--auto-update]
   codex-telegramgw adopt gateway|worker [--auto-update]
@@ -193,6 +194,12 @@ func Execute(ctx context.Context, args []string, out, errOut io.Writer) int {
 			} else {
 				err = New(out).SetupWorker(ctx)
 			}
+		}
+	} else if args[0] == "https" {
+		if len(args) != 2 || args[1] != "refresh" {
+			err = errors.New("usage: codex-telegramgw https refresh")
+		} else {
+			err = New(out).refreshGatewayHTTPSCommand(ctx)
 		}
 	} else if args[0] == "finish" {
 		if len(args) != 2 || args[1] != "gateway" {
@@ -326,6 +333,18 @@ func (m *Manager) execute(ctx context.Context, opts options) (retErr error) {
 		if err != nil {
 			return err
 		}
+		if l.Component == "gateway" && !opts.Check {
+			// Renewed source certificates must be picked up even when release
+			// discovery fails. This shares the gateway update lock.
+			defer func() {
+				if ctx.Err() != nil {
+					return
+				}
+				if refreshErr := m.RefreshGatewayHTTPS(ctx); refreshErr != nil {
+					retErr = errors.Join(retErr, refreshErr)
+				}
+			}()
+		}
 		if l.Component == "worker" {
 			// A failed or busy gateway-project update must not starve the daily
 			// Codex check. Both maintenance paths remain under the worker lock.
@@ -440,4 +459,20 @@ func (m *Manager) execute(ctx context.Context, opts options) (retErr error) {
 		return nil
 	}
 	return m.ApplyUpdate(ctx, l, packages, release, false)
+}
+
+func (m *Manager) refreshGatewayHTTPSCommand(ctx context.Context) error {
+	l, err := NewLayout("gateway")
+	if err != nil {
+		return err
+	}
+	if err := l.RequireUser(); err != nil {
+		return err
+	}
+	unlock, err := Lock(l.Lock)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	return m.RefreshGatewayHTTPS(ctx)
 }

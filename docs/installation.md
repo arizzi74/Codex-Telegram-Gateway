@@ -28,10 +28,12 @@ The allowed user ID belongs to your personal account; it is a number, not your
 username or the bot's ID. Guided setup creates the JSON
 configuration and private secret files for you, including a random webhook
 secret and a SQLite database at `/var/lib/codex-gateway/gateway.db`. Point your
-domain's DNS records to the gateway and open inbound TCP ports 80 and 443 in
-both its host and cloud firewalls. The wizard can install Caddy and configure
-HTTPS on a fresh Debian or Ubuntu host, check an existing proxy, or guide manual
-setup using the [proxy template](../deploy/nginx/telegramgw.conf).
+domain's DNS records to the gateway and allow its chosen public HTTPS port in
+both its host and cloud firewalls. The wizard can add the gateway to an existing
+nginx HTTPS virtual host, install a standalone Caddy proxy on Debian or Ubuntu,
+check an existing proxy, or guide manual setup using the
+[proxy template](../deploy/nginx/telegramgw.conf). Automatic certificates also
+require an accessible certificate challenge port; see the HTTPS options below.
 For custom settings, prepare the [JSON configuration](../examples/gateway.json)
 and a private environment file instead. The managed gateway database must be
 under `/var/lib/codex-gateway`.
@@ -75,9 +77,12 @@ setup. No installer arguments are needed. Daily automatic updates are enabled.
 - Otherwise, a prepared `gateway.json` and private `secrets.env` in the current
   directory are reused. The bot secrets file referenced by the JSON must also
   exist with private permissions.
-- If no configuration exists, the wizard asks for your HTTPS address, bot
-  username, allowed Telegram user ID and display label, local port, and bot
-  token. Token entry is hidden; the webhook secret is generated automatically.
+- If no configuration exists, the wizard detects nginx and lists its configured
+  HTTPS virtual hosts. Choose an existing host for the gateway routes, or choose
+  a standalone proxy and its public HTTPS address and port. It also asks for the
+  bot username, allowed Telegram user ID and display label, local gateway port,
+  and bot token. Token entry is hidden; the webhook secret is generated
+  automatically.
 - After installation, the wizard guides HTTPS setup, checks the public routes,
   registers the Telegram menu and webhook, and prints the admin console address
   and a one-time token for the first passkey. Enroll your worker in that console
@@ -110,17 +115,59 @@ finish an installation made from prepared configuration files, run:
 sudo codex-telegramgw finish gateway
 ```
 
-Choose **auto** for automatic HTTPS on a fresh Debian or Ubuntu host, **check**
-if your existing proxy is ready, **manual** for configuration instructions, or
-**later** to leave setup and resume with the same command. Automatic setup uses
-Caddy to obtain and renew certificates and preserves existing web servers and
-proxy configurations. Certificate issuance requires the public DNS and ports
-described above and a hostname using the standard HTTPS port 443. Automatic
-setup installs the distribution's `caddy` package and creates its own
-`codex-gateway-proxy.service` with configuration in
-`/etc/codex-gateway-proxy/Caddyfile`. It refuses to replace an existing proxy or
-take over occupied ports; choose **check** or **manual** for those hosts. The
-system package manager maintains Caddy, separately from gateway binary updates.
+The wizard offers these HTTPS options:
+
+- **Existing nginx virtual host:** setup checks whether nginx is installed and
+  reads its active configuration to list HTTPS hostnames and ports. Select the
+  host that should serve the gateway. Setup inserts a dedicated include in that
+  TLS server block, checks the configuration with `nginx -t`, and reloads nginx.
+  Existing certificate settings, other virtual hosts, and website paths are
+  preserved. Automatic integration uses the standard nginx systemd service;
+  custom nginx service commands or incompatible configurations can be completed
+  manually.
+- **Standalone HTTPS proxy:** setup uses Caddy in a separate
+  `codex-gateway-proxy.service`, with configuration in
+  `/etc/codex-gateway-proxy/Caddyfile`. Choose a public hostname and HTTPS port;
+  443 is the normal default, while setup suggests 8443 when nginx is installed.
+  An alternative port is useful when another server already uses 443.
+  Setup can install Caddy from Debian or Ubuntu packages, or reuse an installed
+  binary without replacing its existing service or configuration. The selected
+  ports must be free. The system package manager maintains Caddy separately from
+  gateway binary updates.
+- **Check, manual, or later:** check a proxy you have already configured, display
+  configuration instructions, or resume setup another time with the same
+  command.
+
+For the standalone proxy, automatic certificate issuance and renewal require
+public DNS pointing to this machine and a certificate validation port reachable
+by the certificate authority. On HTTPS port 443, Caddy can validate certificates
+through that port even if another server uses port 80. On HTTPS ports 88 or
+8443, Caddy also needs public TCP port 80 free and accessible. Choosing an
+alternative HTTPS port does not move the certificate authority's validation
+ports. If another server owns ports 80 and 443, select an existing nginx HTTPS
+host or provide a valid certificate chain and matching private key for the
+standalone proxy. HTTPS on port 80 requires supplied certificates. Setup checks
+the supplied certificate against the public hostname.
+See [Caddy's automatic HTTPS documentation](https://caddyserver.com/docs/automatic-https).
+
+Keep renewing supplied certificates with your existing certificate provider.
+The wizard copies the chain and key into its private proxy directory. After
+renewal, refresh those copies and restart only the dedicated proxy with:
+
+```sh
+sudo codex-telegramgw https refresh
+```
+
+This command rechecks the original certificate and key files, copies them only
+when changed, and restarts `codex-gateway-proxy.service`. Add it to your
+certificate provider's renewal hook when using supplied certificates. Gateway
+update checks also refresh these copies when a renewed certificate is found.
+
+Telegram accepts webhook HTTPS ports **443, 80, 88, and 8443**; it does not accept
+arbitrary alternative ports. All four require TLS, including port 80. A public
+address using a nondefault port includes it, for example
+`https://gateway.example.com:8443`; workers and the Telegram webhook use that
+same address. See the [Telegram webhook requirements](https://core.telegram.org/bots/api#setwebhook).
 
 If you manage the proxy yourself, forward it to the selected local port
 (`127.0.0.1:8080` by default), including WebSocket upgrades. The
