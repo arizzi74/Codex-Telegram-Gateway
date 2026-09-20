@@ -137,8 +137,7 @@ func (s *Store) PendingApproval(ctx context.Context, approvalID uuid.UUID) (prot
 		return protocol.Approval{}, ErrTelegramTarget
 	}
 	var raw []byte
-	err := s.pool.QueryRow(ctx, `SELECT request_payload FROM approvals
-        WHERE approval_id=$1 AND state='pending' AND response_command_id IS NULL`, approvalID).Scan(&raw)
+	err := s.pool.QueryRow(ctx, `SELECT approval.request_payload`+pendingRequestFrom+` AND approval.approval_id=$1`, approvalID).Scan(&raw)
 	if errors.Is(err, sql.ErrNoRows) {
 		return protocol.Approval{}, ErrTelegramTarget
 	}
@@ -263,6 +262,8 @@ func (s *Store) acceptAction(ctx context.Context, tx *dbTx, in IncomingUpdate) (
 		return s.acceptMultiSession(ctx, tx, in)
 	case "session_alias":
 		return s.acceptSessionAlias(ctx, tx, in)
+	case "questions":
+		return AcceptResult{View: "questions", UserID: in.UserID}, nil
 	case "unknown_command":
 		return AcceptResult{View: "error", ErrorCode: "unknown_command", Action: in.Target}, nil
 	case "codex":
@@ -290,6 +291,9 @@ func (s *Store) acceptAction(ctx context.Context, tx *dbTx, in IncomingUpdate) (
 		}
 		return acceptHistoryCommand(ctx, tx, in, target, &protocol.HistoryRequest{Limit: limit, Messages: action == "last_messages"})
 	case "input_command":
+		if strings.TrimSpace(in.Text) == "" {
+			return AcceptResult{View: "questions", UserID: in.UserID}, nil
+		}
 		parts := strings.Fields(in.Text)
 		if len(parts) < 3 {
 			return AcceptResult{View: "error", ErrorCode: "input_usage"}, nil
@@ -514,12 +518,15 @@ func acceptInputApproval(ctx context.Context, tx *dbTx, in IncomingUpdate, id uu
 			return AcceptResult{}, ErrTelegramTarget
 		}
 	}
-	if err := inputApprovalCurrent(ctx, tx, target, turnID); err != nil {
-		return AcceptResult{}, err
-	}
 	var approval protocol.Approval
 	if err := json.Unmarshal(requestPayload, &approval); err != nil || len(approval.Questions) == 0 || strings.TrimSpace(approval.Questions[0].ID) == "" {
 		return AcceptResult{}, ErrTelegramTarget
+	}
+	if approval.Async {
+		turnID = ""
+	}
+	if err := inputApprovalCurrent(ctx, tx, target, turnID); err != nil {
+		return AcceptResult{}, err
 	}
 	answers, complete, err := mergeInputAnswer(approval, persistedAnswers, questionID, in.Text)
 	if err != nil {
@@ -534,7 +541,7 @@ func acceptInputApproval(ctx context.Context, tx *dbTx, in IncomingUpdate, id uu
 		if _, err := tx.Exec(ctx, "UPDATE approvals SET input_answers=$2 WHERE approval_id=$1", id, string(answersJSON)); err != nil {
 			return AcceptResult{}, fmt.Errorf("registry: persist partial input answers: %w", err)
 		}
-		return AcceptResult{View: "input_pending", SessionID: target.sessionID.String(), RuntimeID: target.runtimeID.String(), ApprovalID: id.String(), QuestionID: nextUnansweredQuestion(approval, answers)}, nil
+		return AcceptResult{View: "input_pending", UserID: in.UserID, SessionID: target.sessionID.String(), RuntimeID: target.runtimeID.String(), ApprovalID: id.String(), QuestionID: nextUnansweredQuestion(approval, answers)}, nil
 	}
 	command, err := createTelegramCommand(ctx, tx, in, target, protocol.InputResponse, target.sessionID.String(), turnID, protocol.Arguments{ApprovalID: id.String(), RequestID: requestID, Answers: answers})
 	if err != nil {
@@ -563,18 +570,15 @@ func inputApprovalCurrent(ctx context.Context, tx *dbTx, target routeTarget, tur
 	if generation != target.generation {
 		return ErrTelegramTarget
 	}
-	if turnID == "" {
-		return nil
-	}
 	var activeTurn string
-	err = tx.QueryRow(ctx, "SELECT COALESCE(active_turn_id,'') FROM sessions WHERE session_id=$1 AND runtime_id=$2", target.sessionID, target.runtimeID).Scan(&activeTurn)
+	err = tx.QueryRow(ctx, `SELECT COALESCE(active_turn_id,'') FROM sessions WHERE session_id=$1 AND runtime_id=$2 AND worker_id=$3 AND archived=FALSE`, target.sessionID, target.runtimeID, target.workerID).Scan(&activeTurn)
 	if errors.Is(err, sql.ErrNoRows) {
 		return ErrTelegramTarget
 	}
 	if err != nil {
 		return fmt.Errorf("registry: resolve input session: %w", err)
 	}
-	if activeTurn != turnID {
+	if turnID != "" && activeTurn != turnID {
 		return ErrStaleTurn
 	}
 	return nil
@@ -967,6 +971,9 @@ func (s *Store) AcknowledgeCommand(ctx context.Context, workerID, connectionID u
 		return fmt.Errorf("registry: acknowledge command: %w", err)
 	}
 	if ct.RowsAffected() > 0 && status == "failed" {
+		if err := recoverAsyncQuestionResponse(ctx, tx, commandID); err != nil {
+			return err
+		}
 		if err := recoverSessionWizardAcknowledgement(ctx, tx, commandID, code); err != nil {
 			return err
 		}
@@ -1069,6 +1076,9 @@ func (s *Store) expireCommands(ctx context.Context, limit int) (int, error) {
 	}
 	rows.Close()
 	for _, command := range expired {
+		if err := recoverAsyncQuestionResponse(ctx, tx, command.id); err != nil {
+			return 0, err
+		}
 		if handled, err := expireSessionWizardCommand(ctx, tx, command.id); err != nil {
 			return 0, err
 		} else if handled {

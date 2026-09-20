@@ -97,7 +97,7 @@ func (s *Store) CreateCallback(ctx context.Context, callback Callback) (string, 
 }
 
 func validSessionPage(action string, page int) bool {
-	return page >= 0 && page <= 1_000_000 && (page == 0 || action == "sessions" || action == "delete_sessions")
+	return page >= 0 && page <= 1_000_000 && (page == 0 || action == "sessions" || action == "delete_sessions" || action == "questions")
 }
 
 func callbackToken() (string, error) {
@@ -159,6 +159,20 @@ func (s *Store) consumeCallback(ctx context.Context, tx *dbTx, in IncomingUpdate
 		return result, nil
 	}
 	switch action {
+	case "questions":
+		if err := markUsed(); err != nil {
+			return AcceptResult{}, err
+		}
+		return AcceptResult{View: "questions", UserID: in.UserID, SessionPage: context.SessionPage}, nil
+	case "question_open":
+		result, err := consumePendingQuestion(ctx, tx, in, context, sessionID, approvalID)
+		if err != nil {
+			return AcceptResult{}, err
+		}
+		if err := markUsed(); err != nil {
+			return AcceptResult{}, err
+		}
+		return result, nil
 	case "permissions":
 		return consumePermissionsCallback(ctx, tx, in, context, sessionID)
 	case "history":
@@ -259,7 +273,7 @@ func (s *Store) consumeCallback(ctx context.Context, tx *dbTx, in IncomingUpdate
 			return AcceptResult{}, err
 		}
 		return result, nil
-	case "approval", "input", "input_prompt":
+	case "approval", "input", "input_prompt", "dismiss_input":
 	default:
 		return AcceptResult{}, ErrCallbackInvalid
 	}
@@ -298,18 +312,18 @@ func (s *Store) consumeCallback(ctx context.Context, tx *dbTx, in IncomingUpdate
 		return AcceptResult{}, ErrCallbackInvalid
 	}
 	var activeTurn string
-	err = tx.QueryRow(ctx, `SELECT COALESCE(active_turn_id,'') FROM sessions WHERE session_id=$1 AND runtime_id=$2`, target.sessionID, target.runtimeID).Scan(&activeTurn)
+	err = tx.QueryRow(ctx, `SELECT COALESCE(active_turn_id,'') FROM sessions WHERE session_id=$1 AND runtime_id=$2 AND worker_id=$3 AND archived=FALSE`, target.sessionID, target.runtimeID, target.workerID).Scan(&activeTurn)
 	if errors.Is(err, sql.ErrNoRows) {
 		return AcceptResult{}, ErrCallbackInvalid
 	}
 	if err != nil {
 		return AcceptResult{}, fmt.Errorf("registry: resolve callback session: %w", err)
 	}
-	if turnID != "" && activeTurn != turnID {
-		return AcceptResult{}, ErrCallbackInvalid
-	}
 	var approval protocol.Approval
 	if err := json.Unmarshal(requestPayload, &approval); err != nil {
+		return AcceptResult{}, ErrCallbackInvalid
+	}
+	if !approval.Async && turnID != "" && activeTurn != turnID {
 		return AcceptResult{}, ErrCallbackInvalid
 	}
 	if action == "input_prompt" {
@@ -323,7 +337,7 @@ func (s *Store) consumeCallback(ctx context.Context, tx *dbTx, in IncomingUpdate
 		if err := markUsed(); err != nil {
 			return AcceptResult{}, err
 		}
-		return AcceptResult{View: "input_prompt", SessionID: target.sessionID.String(), RuntimeID: target.runtimeID.String(), ApprovalID: approvalID.String(), QuestionID: questionID}, nil
+		return AcceptResult{View: "input_prompt", UserID: in.UserID, SessionID: target.sessionID.String(), RuntimeID: target.runtimeID.String(), ApprovalID: approvalID.String(), QuestionID: questionID}, nil
 	}
 	if action == "input" {
 		questionID := context.QuestionID
@@ -346,7 +360,12 @@ func (s *Store) consumeCallback(ctx context.Context, tx *dbTx, in IncomingUpdate
 	target.threadID = threadID
 	op := protocol.ApprovalResponse
 	args := protocol.Arguments{ApprovalID: approvalID.String(), RequestID: requestID, Decision: context.Decision}
-	if !approvalDecisionAllowed(approval, context.Decision) {
+	if action == "dismiss_input" {
+		if !approval.Async || len(approval.Questions) == 0 {
+			return AcceptResult{}, ErrCallbackInvalid
+		}
+		op, turnID, args.Decision = protocol.InputResponse, "", "dismiss"
+	} else if !approvalDecisionAllowed(approval, context.Decision) {
 		return AcceptResult{}, ErrCallbackInvalid
 	}
 	command, err := createTelegramCommand(ctx, tx, in, target, op, target.sessionID.String(), turnID, args)

@@ -19,6 +19,7 @@ func TestUpdatePreparationFencesCommandsWithoutReceivingOrFailingThem(t *testing
 	a, runtime, server, cleanup := testAgent(t)
 	defer cleanup()
 	session := installSession(a, runtime, "thread-idle", "")
+	waitUpdateSessionReady(t, a, runtime, session)
 	lease, err := a.prepareUpdate(context.Background(), time.Minute)
 	if err != nil {
 		t.Fatal(err)
@@ -56,6 +57,7 @@ func TestUpdatePreparationExpiresAndReopensAdmission(t *testing.T) {
 	a, runtime, _, cleanup := testAgent(t)
 	defer cleanup()
 	session := installSession(a, runtime, "thread-idle", "")
+	waitUpdateSessionReady(t, a, runtime, session)
 	lease, err := a.prepareUpdate(context.Background(), 20*time.Millisecond)
 	if err != nil {
 		t.Fatal(err)
@@ -217,6 +219,7 @@ func TestUpdatePreparationAndCommandAcceptanceHaveOneWinner(t *testing.T) {
 	for range 10 {
 		a, runtime, _, cleanup := testAgent(t)
 		session := installSession(a, runtime, "thread-race", "")
+		waitUpdateSessionReady(t, a, runtime, session)
 		start := make(chan struct{})
 		var lease UpdateLease
 		var prepareErr, commandErr error
@@ -238,6 +241,33 @@ func TestUpdatePreparationAndCommandAcceptanceHaveOneWinner(t *testing.T) {
 			t.Errorf("neither racing operation admitted: update=%v command=%+v,%v", prepareErr, ack, commandErr)
 		}
 		cleanup()
+	}
+}
+
+// Installing an actor is asynchronous. Let its initial question-history read
+// finish before a test starts from an idle worker; the production updater must
+// still refuse an RPC that races its idle check.
+func waitUpdateSessionReady(t *testing.T, a *Agent, runtime protocol.Runtime, session protocol.Session) {
+	t.Helper()
+	actor := a.actorForThread(runtime.ID, session.ThreadID)
+	if actor == nil {
+		t.Fatal("session actor is missing")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	reply := make(chan bool, 1)
+	select {
+	case actor.updateChecks <- reply:
+	case <-ctx.Done():
+		t.Fatal("session initialization did not finish")
+	}
+	select {
+	case idle := <-reply:
+		if !idle {
+			t.Fatal("session fixture is not idle")
+		}
+	case <-ctx.Done():
+		t.Fatal("session initialization was not acknowledged")
 	}
 }
 

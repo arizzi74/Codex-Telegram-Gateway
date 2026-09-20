@@ -276,7 +276,10 @@ func (s *Store) SuppressTelegramDelivery(ctx context.Context, id string) (bool, 
 // A session-addressed answer can satisfy exactly one current question. Ambiguous
 // requests keep their original buttons/reply routes instead of starting a turn.
 func acceptAliasQuestion(ctx context.Context, tx *dbTx, in IncomingUpdate, target routeTarget) (bool, AcceptResult, error) {
-	rows, err := tx.Query(ctx, `SELECT approval_id,request_payload,input_answers FROM approvals WHERE session_id=$1 AND runtime_id=$2 AND runtime_generation=$3 AND state='pending' AND response_command_id IS NULL AND COALESCE(codex_turn_id,'')=$4 AND json_array_length(request_payload,'$.questions')>0`, target.sessionID, target.runtimeID, target.generation, target.activeTurnID)
+	rows, err := tx.Query(ctx, `SELECT approval_id,request_payload,input_answers FROM approvals
+        WHERE session_id=$1 AND runtime_id=$2 AND runtime_generation=$3 AND state='pending' AND response_command_id IS NULL
+          AND (json_extract(request_payload,'$.async')=1 OR COALESCE(codex_turn_id,'')=$4)
+          AND json_array_length(request_payload,'$.questions')>0`, target.sessionID, target.runtimeID, target.generation, target.activeTurnID)
 	if err != nil {
 		return true, AcceptResult{}, err
 	}

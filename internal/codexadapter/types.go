@@ -28,7 +28,11 @@ type Event struct {
 	ItemType string
 	// Phase distinguishes user-visible commentary from the terminal answer.
 	// An empty phase remains valid for older servers and model providers.
-	Phase     string
+	Phase string
+	// Async questions are durable user prompts delivered as agent messages,
+	// not blocking JSON-RPC requests. They may outlive their originating turn.
+	Async     bool
+	Questions []Question
 	State     string
 	Text      string
 	Thread    *Thread
@@ -87,11 +91,13 @@ func newEvent(method string, params json.RawMessage) Event {
 			Status string `json:"status"`
 		} `json:"turn"`
 		Item struct {
-			Status  string          `json:"status"`
-			Text    string          `json:"text"`
-			Type    string          `json:"type"`
-			Phase   string          `json:"phase"`
-			Content json.RawMessage `json:"content"`
+			Status    string                   `json:"status"`
+			Text      string                   `json:"text"`
+			Type      string                   `json:"type"`
+			Phase     string                   `json:"phase"`
+			Delivery  string                   `json:"delivery"`
+			Questions []asyncUserInputQuestion `json:"questions"`
+			Content   json.RawMessage          `json:"content"`
 		} `json:"item"`
 		RequestID json.RawMessage `json:"requestId"`
 	}
@@ -111,6 +117,11 @@ func newEvent(method string, params json.RawMessage) Event {
 			// Only this user-visible item's text is projected. Top-level payload
 			// additions must not override it with unrelated internal content.
 			event.Text = value.Item.Text
+			if value.Item.Delivery == "async" && len(value.Item.Questions) > 0 {
+				event.Kind = "input_requested_async"
+				event.Async = true
+				event.Questions = normalizeAsyncQuestions(value.Item.Questions)
+			}
 		}
 		if method == "item/completed" && value.Item.Type == "userMessage" {
 			if text, err := historyUserText(value.Item.Content); err == nil {

@@ -516,12 +516,15 @@ type sessionActor struct {
 	toolItems                       map[string]struct{}
 	userItems                       map[string]struct{}
 	userPrompts                     []codexadapter.UserPrompt
+	asyncQuestions                  map[string]protocol.Approval
+	asyncRecoveredGeneration        uint64
 }
 
 func (s *sessionActor) runtimeEvents() chan actorEvent     { return s.eventQueue }
 func (s *sessionActor) runtimeRequests() chan actorRequest { return s.requestQueue }
 
 func (s *sessionActor) run() {
+	s.recoverAsyncQuestions()
 	for {
 		if s.session.ActiveTurnID == "" && s.activeCommand == nil && (s.session.State == "idle" || s.session.State == "not_loaded" || s.session.State == "failed") && s.runtime.State == "running" && len(s.queue) > 0 {
 			c := s.queue[0]
@@ -544,6 +547,8 @@ func (s *sessionActor) run() {
 				s.runtime = snapshot.runtime
 				s.session = snapshot.session
 				s.pending = map[string]pendingRequest{}
+				s.asyncQuestions = nil
+				s.asyncRecoveredGeneration = 0
 				s.activeCommand = nil
 				s.awaitingTurnStart = false
 				s.resetMessages()
@@ -573,6 +578,7 @@ func (s *sessionActor) run() {
 				}
 			}
 			s.save()
+			s.recoverAsyncQuestions()
 			current := s.session
 			previous.UpdatedAt, current.UpdatedAt = time.Time{}, time.Time{}
 			if !reflect.DeepEqual(previous, current) {
@@ -646,6 +652,20 @@ func (s *sessionActor) command(req actorCommand) {
 		return
 	}
 	if c.Operation == protocol.ApprovalResponse || c.Operation == protocol.InputResponse {
+		if c.Operation == protocol.InputResponse && strings.HasPrefix(c.Arguments.RequestID, "async:") {
+			approval, ok := s.asyncQuestions[c.Arguments.RequestID]
+			if !ok || approval.ID != c.Arguments.ApprovalID || approval.ThreadID != c.ThreadID {
+				reject(protocol.ApprovalNotPending, "This question is no longer pending.")
+				return
+			}
+			if err := s.agent.store.SetCommandState(c.ID, CommandExecuting, nil); err != nil {
+				req.reply <- commandReply{err: err}
+				return
+			}
+			req.reply <- commandReply{ack: protocol.CommandAck{CommandID: c.ID, Status: "accepted"}}
+			s.answerAsyncQuestion(c, client, approval)
+			return
+		}
 		p, ok := s.pending[c.Arguments.RequestID]
 		if !ok || p.approval.ID != c.Arguments.ApprovalID || p.approval.ThreadID != c.ThreadID || (p.approval.TurnID != "" && p.approval.TurnID != s.session.ActiveTurnID) || (c.ExpectedTurnID != "" && c.ExpectedTurnID != p.approval.TurnID) {
 			reject(protocol.ApprovalNotPending, "This request is no longer pending.")
@@ -885,6 +905,8 @@ func (s *sessionActor) event(event codexadapter.Event) {
 		return
 	}
 	switch event.Kind {
+	case "input_requested_async":
+		s.observeAsyncQuestion(event)
 	case "turn_started":
 		if event.TurnID == "" {
 			return
@@ -915,6 +937,7 @@ func (s *sessionActor) event(event codexadapter.Event) {
 			s.agent.report(s.agent.emit(s.runtime, s.session.ID, "turn_started", result))
 		}
 	case "user_message_completed":
+		s.observeAsyncAnswer(event.Text)
 		s.observeUserMessage(event)
 	case "tool_call_started":
 		if event.TurnID == "" || event.TurnID != s.session.ActiveTurnID || event.ItemID == "" {

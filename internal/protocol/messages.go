@@ -333,6 +333,9 @@ type HistoryMessage struct {
 }
 
 type Approval struct {
+	// Async questions are delivered as agent messages and answered as user
+	// input. They remain answerable after the originating turn finishes.
+	Async     bool       `json:"async,omitempty"`
 	ID        string     `json:"approval_id"`
 	RequestID string     `json:"request_id"`
 	ThreadID  string     `json:"thread_id"`

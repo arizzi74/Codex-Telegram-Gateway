@@ -109,7 +109,7 @@ Changing a Telegram username does not grant access. To use the bot, send
 Use `/tgsessions` to select a session or create one with **New session**.
 Gateway commands begin with `/tg`: `/tgstatus`, `/tgdeletesession`,
 `/tglastmessages`, `/tghistory`, `/tgmultisession`, `/tgdisconnect`, `/tgsteer`,
-`/tginterrupt`, and `/tginput`. Telegram's initial
+`/tginterrupt`, `/tgquestions`, and `/tginput`. Telegram's initial
 `/start` button remains an alias for `/tgstart`.
 
 Unprefixed commands control Codex: `/status` shows the selected session's model,
@@ -140,6 +140,9 @@ sessions removes the previous session's progress and shows the selected session'
 latest progress if it is running. Only the selected session's turn responses and
 typing appear by default. Questions and approvals from any session still arrive,
 labelled with its name; answering them does not change your selection.
+Use `/tgquestions` (or `/tginput` without arguments) to reopen pending questions
+and approvals from any session, including questions missed while disconnected.
+Choose **Open** and then select an option or reply to the question with text.
 
 Use `/tgmultisession` to toggle messages from all sessions. A colored square and
 the session name identify each message; Telegram does not support custom message

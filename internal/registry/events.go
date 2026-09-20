@@ -452,7 +452,7 @@ func (s *Store) applyEvent(ctx context.Context, tx *dbTx, workerID uuid.UUID, ev
 				return false, nil, err
 			}
 		}
-		if event.Kind == "user_input_requested" {
+		if event.Kind == "user_input_requested" && !approval.Async {
 			if err := setSessionWaiting(ctx, tx, *target.sessionID, "waiting_input"); err != nil {
 				return false, nil, err
 			}
@@ -757,6 +757,9 @@ func updateCommandOutcome(ctx context.Context, tx *dbTx, commandID, workerID uui
 	}
 	if ct.RowsAffected() == 0 {
 		return ErrEventTarget
+	}
+	if status == "failed" {
+		return recoverAsyncQuestionResponse(ctx, tx, commandID)
 	}
 	return nil
 }

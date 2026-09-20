@@ -183,6 +183,8 @@ func parseTelegramText(text, botName string) (action, target, prompt string, ign
 		return "last_messages", "", tail, false
 	case "tgmultisession":
 		return "multisession", "", tail, false
+	case "tgquestions":
+		return "questions", "", "", false
 	case "tgsteer":
 		return "steer", "", tail, false
 	case "tginterrupt":

@@ -20,6 +20,7 @@ menu names, so `/debug_config` is the menu spelling of `/debug-config`; both wor
 | `/tgdeletesession [runtime]` | Choose a Codex session to delete while keeping its working directory and files. |
 | `/tgsteer TEXT` | Guide the exact active turn. |
 | `/tginterrupt` | Interrupt the exact active turn. |
+| `/tgquestions`, `/tginput` | List pending questions and approvals across all sessions; open one to answer without changing the selected session. |
 | `/tginput APPROVAL_ID QUESTION_ID ANSWER` | Answer an input request; replying to its message is easier. |
 
 Session lists are ordered by name. Each numbered entry shows the full session
@@ -212,6 +213,27 @@ This is an on-demand view of the selected session's stored user prompts, not a
 capture of every terminal action. CLI-only slash commands may not be stored as
 prompts, and ephemeral or unavailable Codex history cannot be reconstructed.
 See the [Codex history API](https://learn.chatgpt.com/docs/app-server#read-a-stored-thread-without-resuming).
+
+## Pending questions and approvals
+
+Use `/tgquestions` even when no session is selected. The list shows each session's
+full name and whether the request is a question or an approval. Choose **Open**
+to show fresh answer buttons or reply to that message with text. For requests
+with several questions, it resumes at the first unanswered question and keeps
+answers already submitted. **Refresh**, **Previous**, and **Next** update the list.
+Opening or answering a request does not change the current session selection.
+
+Answered requests and requests for archived sessions or superseded runtimes are
+excluded. Ordinary blocking questions expire when their turn ends. Asynchronous
+questions remain answerable while Codex continues working, including across
+turns; answering one sends the response to its originating session. Old buttons
+are checked again before any response is sent.
+
+Asynchronous questions also have a **Dismiss question** button. This clears the
+gateway's pending request without sending an answer or changing your selection.
+Questions recovered from saved history can include requests already dismissed
+in the CLI, because Codex does not record those dismissals in its saved thread.
+Use **Dismiss question** to remove such a request from Telegram.
 
 ## Menu and typing indicator
 

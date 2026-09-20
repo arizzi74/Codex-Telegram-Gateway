@@ -336,6 +336,75 @@ func TestTelegramAliasAnswersOnlyUnambiguousQuestionsIntegration(t *testing.T) {
 	}
 }
 
+func TestTelegramAliasAnswersCompletedTurnAsyncQuestionsWithoutGuessing(t *testing.T) {
+	for _, questionCount := range []int{1, 2} {
+		name := "one pending request"
+		if questionCount > 1 {
+			name = "ambiguous pending requests"
+		}
+		t.Run(name, func(t *testing.T) {
+			env := newEventTestEnv(t)
+			ctx := context.Background()
+			if err := env.store.IngestEvent(ctx, env.worker, env.connection, env.discovery(t)); err != nil {
+				t.Fatal(err)
+			}
+			other := uuid.New()
+			insertRouteSession(t, env, other, "selected-thread", "")
+			acceptModeUpdate(t, env, 1, "select", other.String(), "")
+			progressEvent(t, env, 2, "turn_started", "completed-turn", "")
+			// A blocking request from the completed turn must remain ineligible;
+			// only async questions can be answered after their turn ends.
+			stale := protocol.Approval{ID: uuid.NewString(), RequestID: "old-blocking", ThreadID: "thread-1", TurnID: "completed-turn", Type: "input",
+				Questions: []protocol.Question{{ID: "choice", Prompt: "Old blocking question?"}}}
+			asyncQuestionEvent(t, env, 3, 1, "user_input_requested", stale)
+			var firstID string
+			for i := 0; i < questionCount; i++ {
+				id := uuid.NewString()
+				if firstID == "" {
+					firstID = id
+				}
+				approval := protocol.Approval{ID: id, RequestID: "async:" + id, ThreadID: "thread-1", TurnID: "completed-turn", Type: "input", Async: true,
+					Questions: []protocol.Question{{ID: "choice", Prompt: "Your preference?"}}}
+				asyncQuestionEvent(t, env, uint64(4+i), 1, "user_input_requested", approval)
+			}
+			progressEvent(t, env, uint64(4+questionCount), "turn_completed", "completed-turn", "")
+			aliases, err := env.store.ListTelegramSessionAliases(ctx, "bot", 10, 20, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var alias string
+			for _, item := range aliases {
+				if item.SessionID == env.session.String() {
+					alias = item.Alias
+				}
+			}
+			in := telegramUpdate(env, 2)
+			in.Action, in.Target, in.Text = "session_alias", alias, "my answer"
+			accepted, err := env.store.AcceptTelegram(ctx, in)
+			if err != nil {
+				t.Fatal(err)
+			}
+			commands, err := env.store.PendingCommands(ctx, 100)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if questionCount == 1 {
+				if accepted.ErrorCode != "" || len(commands) != 1 || commands[0].Operation != protocol.InputResponse ||
+					commands[0].SessionID != env.session.String() || commands[0].ExpectedTurnID != "" ||
+					commands[0].Arguments.ApprovalID != firstID || commands[0].Arguments.Answers["choice"][0] != "my answer" {
+					t.Fatalf("completed-turn async alias answer failed: %#v %#v", accepted, commands)
+				}
+			} else if accepted.ErrorCode != "session_answer_ambiguous" || len(commands) != 0 {
+				t.Fatalf("ambiguous async answer was guessed: %#v %#v", accepted, commands)
+			}
+			var selected string
+			if err := env.store.pool.QueryRow(ctx, `SELECT session_id FROM telegram_bindings WHERE bot_id='bot' AND user_id=10 AND chat_id=20 AND message_thread_id=0`).Scan(&selected); err != nil || selected != other.String() {
+				t.Fatalf("async answer changed selected session: %q %v", selected, err)
+			}
+		})
+	}
+}
+
 func TestTelegramSessionLabelsMatchSessionPickerFallbackIntegration(t *testing.T) {
 	cases := []struct{ name, preview, cwd, want string }{
 		{" Named session ", "preview", "/work/project", "Named session"},

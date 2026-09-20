@@ -72,6 +72,8 @@ func TestParseTelegramCommands(t *testing.T) {
 func TestCodexAndGatewayNamespaces(t *testing.T) {
 	for _, tc := range []struct{ input, action, target, text string }{
 		{"/tgstatus", "status", "", ""},
+		{"/tgquestions@mybot", "questions", "", ""},
+		{"/tginput", "input_command", "", ""},
 		{"/tghistory", "history", "", ""},
 		{"/tghistory@mybot 25", "history", "", "25"},
 		{"/history", "unknown_command", "history", ""},

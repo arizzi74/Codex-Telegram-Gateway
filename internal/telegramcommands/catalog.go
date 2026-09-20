@@ -22,6 +22,7 @@ var gateway = []Command{
 	{"tgdeletesession", "Gateway: delete a session, keep its folder"},
 	{"tgsteer", "Gateway: send guidance to the current turn"},
 	{"tginterrupt", "Gateway: interrupt the current turn"},
+	{"tgquestions", "Gateway: show pending questions and approvals"},
 	{"tginput", "Gateway: answer a pending input request"},
 }
 
