@@ -43,25 +43,26 @@ type IncomingUpdate struct {
 // AcceptResult is a durable UI response descriptor. The Telegram renderer owns
 // presentation; the registry only records a bounded view/result code.
 type AcceptResult struct {
-	WorkerUpdates  []WorkerUpdateStatus    `json:"worker_updates,omitempty"`
-	MultiSession   bool                    `json:"multi_session,omitempty"`
-	WizardID       string                  `json:"wizard_id,omitempty"`
-	WizardRevision int64                   `json:"wizard_revision,omitempty"`
-	SessionName    string                  `json:"session_name,omitempty"`
-	CWD            string                  `json:"cwd,omitempty"`
-	Workspace      *protocol.WorkspacePage `json:"workspace,omitempty"`
-	UserID         int64                   `json:"user_id,omitempty"`
-	Duplicate      bool                    `json:"duplicate,omitempty"`
-	View           string                  `json:"view,omitempty"`
-	Action         string                  `json:"action,omitempty"`
-	SessionID      string                  `json:"session_id,omitempty"`
-	RuntimeID      string                  `json:"runtime_id,omitempty"`
-	SessionPage    int                     `json:"session_page,omitempty"`
-	CommandID      string                  `json:"command_id,omitempty"`
-	ApprovalID     string                  `json:"approval_id,omitempty"`
-	QuestionID     string                  `json:"question_id,omitempty"`
-	TextReply      bool                    `json:"text_reply,omitempty"`
-	ErrorCode      string                  `json:"error_code,omitempty"`
+	WorkerUpdates      []WorkerUpdateStatus    `json:"worker_updates,omitempty"`
+	MultiSession       bool                    `json:"multi_session,omitempty"`
+	WizardID           string                  `json:"wizard_id,omitempty"`
+	WizardRevision     int64                   `json:"wizard_revision,omitempty"`
+	SessionName        string                  `json:"session_name,omitempty"`
+	CWD                string                  `json:"cwd,omitempty"`
+	Workspace          *protocol.WorkspacePage `json:"workspace,omitempty"`
+	UserID             int64                   `json:"user_id,omitempty"`
+	Duplicate          bool                    `json:"duplicate,omitempty"`
+	View               string                  `json:"view,omitempty"`
+	Action             string                  `json:"action,omitempty"`
+	SessionID          string                  `json:"session_id,omitempty"`
+	RuntimeID          string                  `json:"runtime_id,omitempty"`
+	SessionPage        int                     `json:"session_page,omitempty"`
+	CommandID          string                  `json:"command_id,omitempty"`
+	ApprovalID         string                  `json:"approval_id,omitempty"`
+	QuestionID         string                  `json:"question_id,omitempty"`
+	TextReply          bool                    `json:"text_reply,omitempty"`
+	ProgressReposition bool                    `json:"progress_reposition,omitempty"`
+	ErrorCode          string                  `json:"error_code,omitempty"`
 }
 
 // SessionStatus is the compact, current read model used by Telegram status
@@ -209,6 +210,11 @@ func (s *Store) AcceptTelegram(ctx context.Context, in IncomingUpdate) (AcceptRe
 	}
 	if err := queueUIResponse(ctx, tx, in, result); err != nil {
 		return AcceptResult{}, err
+	}
+	if result.ProgressReposition {
+		if err := repositionTelegramProgress(ctx, tx, in); err != nil {
+			return AcceptResult{}, err
+		}
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return AcceptResult{}, fmt.Errorf("registry: commit Telegram accept: %w", err)
@@ -548,7 +554,7 @@ func acceptInputApproval(ctx context.Context, tx *dbTx, in IncomingUpdate, id uu
 		if _, err := tx.Exec(ctx, "UPDATE approvals SET input_answers=$2 WHERE approval_id=$1", id, string(answersJSON)); err != nil {
 			return AcceptResult{}, fmt.Errorf("registry: persist partial input answers: %w", err)
 		}
-		return AcceptResult{View: "input_pending", UserID: in.UserID, SessionID: target.sessionID.String(), RuntimeID: target.runtimeID.String(), ApprovalID: id.String(), QuestionID: nextUnansweredQuestion(approval, answers)}, nil
+		return AcceptResult{View: "input_pending", UserID: in.UserID, SessionID: target.sessionID.String(), RuntimeID: target.runtimeID.String(), ApprovalID: id.String(), QuestionID: nextUnansweredQuestion(approval, answers), ProgressReposition: true}, nil
 	}
 	command, err := createTelegramCommand(ctx, tx, in, target, protocol.InputResponse, target.sessionID.String(), turnID, protocol.Arguments{ApprovalID: id.String(), RequestID: requestID, Answers: answers})
 	if err != nil {
@@ -562,7 +568,7 @@ func acceptInputApproval(ctx context.Context, tx *dbTx, in IncomingUpdate, id uu
 	if ct.RowsAffected() != 1 {
 		return AcceptResult{}, ErrTelegramTarget
 	}
-	return AcceptResult{View: "queued", SessionID: target.sessionID.String(), RuntimeID: target.runtimeID.String(), CommandID: command.ID, ApprovalID: id.String()}, nil
+	return AcceptResult{View: "queued", SessionID: target.sessionID.String(), RuntimeID: target.runtimeID.String(), CommandID: command.ID, ApprovalID: id.String(), ProgressReposition: true}, nil
 }
 
 func inputApprovalCurrent(ctx context.Context, tx *dbTx, target routeTarget, turnID string) error {
