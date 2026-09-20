@@ -21,6 +21,9 @@ func (s *sessionActor) observeUserMessage(event codexadapter.Event) {
 		s.userItems = map[string]struct{}{}
 	}
 	s.userItems[event.ItemID] = struct{}{}
+	// A replayed or late input must not clear questions asked after that input.
+	// Reconcile only once the same event has passed the feed identity guards.
+	s.observeAsyncAnswer(event.Text)
 	s.userPrompts = append(s.userPrompts, codexadapter.UserPrompt{TurnID: event.TurnID, ItemID: event.ItemID, Text: event.Text})
 	external, err := s.agent.store.externalHistoryPrompts(s.runtime.ID, s.session.ThreadID, s.userPrompts)
 	if err != nil {

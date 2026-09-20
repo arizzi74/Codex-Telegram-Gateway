@@ -141,8 +141,13 @@ latest progress if it is running. Only the selected session's turn responses and
 typing appear by default. Questions and approvals from any session still arrive,
 labelled with its name; answering them does not change your selection.
 Use `/tgquestions` (or `/tginput` without arguments) to reopen pending questions
-and approvals from any session, including questions missed while disconnected.
+and approvals from any session that the worker received while running.
 Choose **Open** and then select an option or reply to the question with text.
+Old conversations are not imported as new pending questions. An ordinary new
+prompt clears earlier pending questions in that session; a reply to a specific
+question preserves the others. Official Codex 0.155.1 keeps a separate TUI
+question list, so Telegram answers can leave stale entries there. Reopen the TUI
+to clear those entries without sending the answers again.
 
 Use `/tgmultisession` to toggle messages from all sessions. A colored square and
 the session name identify each message; Telegram does not support custom message

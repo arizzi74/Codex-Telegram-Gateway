@@ -38,11 +38,28 @@ func (s *sessionActor) rememberAsyncQuestion(approval protocol.Approval) {
 	}
 }
 
-// Restore durable prompts, including questions missed by an older worker.
-// Only exact native answer markers resolve saved questions; ordinary prompts
-// are never guessed to be an answer. Reading history does not resume a thread.
+// History only reconciles requests this worker already observed and saved.
+// Codex 0.155 does not persist TUI-local dismissal, so importing unknown old
+// requests would turn historical questions into new pending notifications.
+// Reading history does not resume or otherwise change a thread.
 func (s *sessionActor) recoverAsyncQuestions() {
 	if s.session.Deleted || s.session.Archived || s.runtime.State != "running" || s.asyncRecoveredGeneration == s.runtime.Generation {
+		return
+	}
+	records, err := s.agent.store.asyncQuestionRecords(s.session.ID)
+	if err != nil {
+		s.agent.report(err)
+		return
+	}
+	pending := make(map[string]asyncQuestionRecord)
+	for _, record := range records {
+		if record.State == "pending" {
+			pending[record.Approval.RequestID] = record
+		}
+	}
+	if len(pending) == 0 {
+		s.asyncQuestions = make(map[string]protocol.Approval)
+		s.asyncRecoveredGeneration = s.runtime.Generation
 		return
 	}
 	client, runtime, ok := s.agent.manager.Client(s.runtime.ID)
@@ -53,53 +70,58 @@ func (s *sessionActor) recoverAsyncQuestions() {
 	defer cancel()
 	history, historyErr := client.AsyncQuestions(ctx, s.session.ThreadID)
 	if historyErr == nil {
-		s.asyncRecoveredGeneration = s.runtime.Generation
-	}
-	records, err := s.agent.store.asyncQuestionRecords(s.session.ID)
-	if err != nil {
-		s.agent.report(err)
-		return
+		for _, item := range history {
+			requestID := "async:" + item.ItemID
+			record, exists := pending[requestID]
+			if !exists {
+				continue
+			}
+			// Intersect history with the saved remaining fields. History must
+			// never restore a field answered or dismissed through Telegram.
+			remaining := make([]protocol.Question, 0, len(record.Approval.Questions))
+			state := "resolved"
+			for _, question := range record.Approval.Questions {
+				if containsString(item.SupersededIDs, question.ID) {
+					state = "superseded"
+					continue
+				}
+				if !containsString(item.AnsweredIDs, question.ID) {
+					remaining = append(remaining, question)
+				}
+			}
+			if len(remaining) == 0 {
+				// The old runtime's gateway requests are already cleared on a
+				// generation change; otherwise clear the existing notification.
+				if err := s.agent.store.setAsyncQuestionState(s.runtime, s.session.ID, requestID, state, record.Generation == s.runtime.Generation); err != nil {
+					s.agent.report(err)
+					return
+				}
+				delete(pending, requestID)
+				continue
+			}
+			record.Approval.Questions = remaining
+			pending[requestID] = record
+		}
 	}
 	s.asyncQuestions = make(map[string]protocol.Approval)
-	generationByRequest := make(map[string]uint64)
-	for _, record := range records {
-		if record.State == "pending" {
-			s.asyncQuestions[record.Approval.RequestID] = record.Approval
-			generationByRequest[record.Approval.RequestID] = record.Generation
-		}
-	}
-	for _, item := range history {
-		var unanswered []codexadapter.Question
-		for _, question := range item.Questions {
-			if !containsString(item.AnsweredIDs, question.ID) {
-				unanswered = append(unanswered, question)
-			}
-		}
-		requestID := "async:" + item.ItemID
-		if len(unanswered) == 0 {
-			if _, exists := s.asyncQuestions[requestID]; exists {
-				// Use the current generation/identity before resolving a prompt
-				// restored from an older runtime.
-				delete(s.asyncQuestions, requestID)
-				s.agent.report(s.agent.store.setAsyncQuestionState(s.runtime, s.session.ID, requestID, "resolved", generationByRequest[requestID] == s.runtime.Generation))
-			}
-			continue
-		}
-		s.observeAsyncQuestion(codexadapter.Event{ItemID: item.ItemID, TurnID: item.TurnID, Text: item.Text, Questions: unanswered})
-	}
-	for _, approval := range s.asyncQuestions {
-		s.rememberAsyncQuestion(approval)
+	for _, record := range pending {
+		s.rememberAsyncQuestion(record.Approval)
 	}
 	if historyErr != nil {
+		// A failed or incomplete history read cannot prove that a durable
+		// prompt was answered. Preserve it and retry the read next snapshot.
 		s.agent.log.Debug("async question history unavailable", "session_id", s.session.ID, "error", historyErr)
+		return
 	}
+	s.asyncRecoveredGeneration = s.runtime.Generation
 }
 
 func (s *sessionActor) observeAsyncAnswer(text string) {
+	supersedes := codexadapter.AsyncQuestionInputSupersedes(text)
 	for requestID, approval := range s.asyncQuestions {
 		remaining := make([]protocol.Question, 0, len(approval.Questions))
 		for _, question := range approval.Questions {
-			if !codexadapter.AsyncQuestionAnswerMatches(question.Prompt, text) {
+			if !supersedes && !codexadapter.AsyncQuestionAnswerMatches(question.Prompt, text) {
 				remaining = append(remaining, question)
 			}
 		}
@@ -107,7 +129,11 @@ func (s *sessionActor) observeAsyncAnswer(text string) {
 			continue
 		}
 		if len(remaining) == 0 {
-			if err := s.agent.store.setAsyncQuestionState(s.runtime, s.session.ID, requestID, "resolved", true); err != nil {
+			state := "resolved"
+			if supersedes {
+				state = "superseded"
+			}
+			if err := s.agent.store.setAsyncQuestionState(s.runtime, s.session.ID, requestID, state, true); err != nil {
 				s.agent.report(err)
 				return
 			}

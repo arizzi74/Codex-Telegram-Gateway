@@ -68,7 +68,7 @@ func TestAsyncQuestionStoreSurvivesReopenAndDeduplicatesGeneration(t *testing.T)
 }
 
 func TestAsyncQuestionStoreTombstonesDoNotReopenOnHistoryReplay(t *testing.T) {
-	for _, state := range []string{"submitting", "submitted", "outcome_unknown", "resolved"} {
+	for _, state := range []string{"submitting", "submitted", "outcome_unknown", "resolved", "superseded"} {
 		t.Run(state, func(t *testing.T) {
 			workerID := uuid.NewString()
 			store, err := OpenStore(filepath.Join(t.TempDir(), "state.db"), workerID)

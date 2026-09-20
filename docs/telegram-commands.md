@@ -229,11 +229,27 @@ questions remain answerable while Codex continues working, including across
 turns; answering one sends the response to its originating session. Old buttons
 are checked again before any response is sent.
 
+Only questions received by the running worker enter its pending list. After a
+restart, saved history reconciles existing records; it does not import old
+questions as new requests. Replies to specific questions clear those questions
+and preserve the others. An ordinary new user prompt supersedes earlier pending
+questions in that session, including plain replies such as "Proceed". This does
+not send inferred answers. Environment and instruction metadata do not clear
+questions. Records imported by v0.5.25 are reconciled against later replies on
+the next worker restart.
+
 Asynchronous questions also have a **Dismiss question** button. This clears the
 gateway's pending request without sending an answer or changing your selection.
-Questions recovered from saved history can include requests already dismissed
-in the CLI, because Codex does not record those dismissals in its saved thread.
-Use **Dismiss question** to remove such a request from Telegram.
+
+Official Codex 0.155.1 maintains a separate question list inside each TUI client.
+An answer sent from Telegram reaches the model and clears the gateway request,
+but it does not clear an already-open TUI's question badge. Conversely, skipping
+a question locally in the TUI does not notify the gateway. Use **Dismiss
+question** in Telegram for such a request. Close and reopen the TUI to discard
+its stale local entries without answering again. The gateway keeps the official
+Codex distribution and its normal runtime updates; it does not install a custom
+TUI build. `/tgquestions` is the gateway's pending list, not a mirror of the
+TUI's local list.
 
 ## Menu and typing indicator
 

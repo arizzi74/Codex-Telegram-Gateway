@@ -131,6 +131,7 @@ func TestAsyncQuestionDismissAndNativeAnswerNeedNoModelTurn(t *testing.T) {
 				command.Arguments.Answers, command.Arguments.Decision = nil, "dismiss"
 				waitAsyncCommand(t, a, command, CommandCompleted)
 			} else {
+				a.onEvent(runtime, codexadapter.Event{Kind: "turn_started", ThreadID: session.ThreadID, TurnID: "later"})
 				a.onEvent(runtime, codexadapter.Event{Kind: "user_message_completed", ThreadID: session.ThreadID, TurnID: "later", ItemID: "native-answer", Text: "> Which hardware?\n\nMac"})
 			}
 			waitFor(t, func() bool {

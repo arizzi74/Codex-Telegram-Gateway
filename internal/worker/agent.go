@@ -937,7 +937,6 @@ func (s *sessionActor) event(event codexadapter.Event) {
 			s.agent.report(s.agent.emit(s.runtime, s.session.ID, "turn_started", result))
 		}
 	case "user_message_completed":
-		s.observeAsyncAnswer(event.Text)
 		s.observeUserMessage(event)
 	case "tool_call_started":
 		if event.TurnID == "" || event.TurnID != s.session.ActiveTurnID || event.ItemID == "" {

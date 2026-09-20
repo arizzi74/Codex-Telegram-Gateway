@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
+	"unicode"
 	"unicode/utf8"
 )
 
@@ -20,6 +22,9 @@ type AsyncQuestion struct {
 	// AnsweredIDs records matching later native answer markers without
 	// removing questions, so a caller can reconcile persisted pending state.
 	AnsweredIDs []string
+	// SupersededIDs records fields cleared by a later ordinary user prompt.
+	// This follows the native input lifecycle without claiming they were answered.
+	SupersededIDs []string
 }
 
 type asyncUserInputQuestion struct {
@@ -66,6 +71,7 @@ func asyncQuestionAnswerPrefix(title string) string {
 // An unrelated prompt or an answer that predates a question does not resolve
 // it. Multiple quoted answers may be sent together in a Telegram response.
 func AsyncQuestionAnswerMatches(title, text string) bool {
+	text = asyncQuestionPromptText(text)
 	prefix := asyncQuestionAnswerPrefix(title)
 	for offset := 0; offset < len(text); {
 		index := strings.Index(text[offset:], prefix)
@@ -87,12 +93,97 @@ func AsyncQuestionAnswerMatches(title, text string) bool {
 	return false
 }
 
+// AsyncQuestionInputSupersedes follows the native TUI's ordinary-prompt
+// lifecycle: submitting a new prompt clears its queued async questions. A
+// native quoted-title answer only resolves matching fields instead. Context
+// fragments injected into user-message history are not user submissions.
+func AsyncQuestionInputSupersedes(text string) bool {
+	text = asyncQuestionPromptText(text)
+	if text == "" {
+		return false
+	}
+	// Preserve other questions even when an explicit answer's title does not
+	// match any locally known request, or its answer is empty. Neither is an
+	// ordinary prompt from which we can infer that all questions were cleared.
+	if strings.HasPrefix(text, "> ") && strings.Contains(text, "\n\n") {
+		return false
+	}
+	return true
+}
+
+var asyncExternalContext = regexp.MustCompile(`^<external_([A-Za-z0-9_]+)>`)
+var asyncInternalContext = regexp.MustCompile(`^<codex_internal_context source="[a-z][a-z0-9_]*">`)
+
+// asyncQuestionPromptText removes only complete, recognized context wrappers
+// at the start of input. History may concatenate several text parts, so keep
+// walking those wrappers and retain any actual prompt that follows them.
+func asyncQuestionPromptText(text string) string {
+	for {
+		// Keep trailing newlines: even an unanswered native quote remains an
+		// explicit answer-shaped input, never a request to clear every question.
+		text = strings.TrimLeftFunc(text, unicode.IsSpace)
+		lower := strings.ToLower(text)
+		closing := ""
+		for _, pair := range [][2]string{
+			{"# agents.md instructions", "</instructions>"},
+			{"<user_instructions>", "</user_instructions>"},
+			{"<environment_context>", "</environment_context>"},
+			{"<skill>", "</skill>"},
+			{"<user_shell_command>", "</user_shell_command>"},
+			{"<turn_aborted>", "</turn_aborted>"},
+			{"<subagent_notification>", "</subagent_notification>"},
+			{"<recommended_plugins>", "</recommended_plugins>"},
+			{"<goal_context>", "</goal_context>"},
+		} {
+			if strings.HasPrefix(lower, pair[0]) {
+				closing = pair[1]
+				break
+			}
+		}
+		if match := asyncExternalContext.FindStringSubmatch(lower); match != nil {
+			closing = "</external_" + match[1] + ">"
+		} else if asyncInternalContext.MatchString(lower) {
+			closing = "</codex_internal_context>"
+		} else if strings.HasPrefix(lower, "<hook_prompt ") && strings.Contains(strings.SplitN(lower, ">", 2)[0], `hook_run_id="`) {
+			closing = "</hook_prompt>"
+		}
+		if closing != "" {
+			if index := asyncContextClosingIndex(text, closing); index >= 0 {
+				text = text[index+len(closing):]
+				continue
+			}
+		}
+		if strings.HasPrefix(text, "Warning: The maximum number of unified exec processes you can keep open is") ||
+			strings.HasPrefix(text, "Warning: Your account was flagged for potentially high-risk cyber activity") ||
+			(strings.HasPrefix(text, "Warning: apply_patch was requested via ") && strings.HasSuffix(strings.TrimSpace(text), "Use the apply_patch tool instead of exec_command.")) {
+			return ""
+		}
+		return text
+	}
+}
+
+func asyncContextClosingIndex(text, closing string) int {
+	for offset := 0; offset < len(text); {
+		index := strings.IndexByte(text[offset:], '<')
+		if index < 0 {
+			break
+		}
+		index += offset
+		if len(text)-index >= len(closing) && strings.EqualFold(text[index:index+len(closing)], closing) {
+			return index
+		}
+		offset = index + 1
+	}
+	return -1
+}
+
 // AsyncQuestions reads structured asynchronous questions in chronological
 // order without resuming or changing a thread. AnsweredIDs identifies fields
 // followed by native quoted-title answers, including responses entered through
-// a CLI. The protocol has no authoritative answered flag; callers must also
-// apply their own durable response records. An unrelated user prompt is not
-// treated as an answer. Tools, reasoning and attachment bytes are not returned.
+// a CLI. SupersededIDs identifies fields cleared by a later ordinary prompt,
+// matching the native TUI lifecycle. The protocol has no authoritative pending
+// flag; callers must also apply their own durable response records. Tools,
+// reasoning and attachment bytes are not returned.
 func (c *Client) AsyncQuestions(ctx context.Context, threadID string) ([]AsyncQuestion, error) {
 	return c.asyncQuestions(ctx, threadID, maxHistoryTurnPages)
 }
@@ -151,8 +242,8 @@ func (c *Client) asyncQuestions(ctx context.Context, threadID string, maxPages i
 	return nil, fmt.Errorf("async question page limit exceeded: %w", ErrHistoryUnavailable)
 }
 
-// resolveAsyncQuestionHistory applies answers only to questions preceding
-// them. Earlier-turn questions precede every item in the current turn; a
+// resolveAsyncQuestionHistory applies user input only to questions preceding
+// it. Earlier-turn questions precede every item in the current turn; a
 // current-turn question becomes eligible only after its item is encountered.
 func resolveAsyncQuestionHistory(questions []AsyncQuestion, raw json.RawMessage) ([]AsyncQuestion, error) {
 	var turn struct {
@@ -180,17 +271,26 @@ func resolveAsyncQuestionHistory(questions []AsyncQuestion, raw json.RawMessage)
 		if err != nil {
 			return nil, err
 		}
+		supersedes := AsyncQuestionInputSupersedes(text)
 		for index := range questions {
 			question := &questions[index]
 			if question.TurnID == turn.ID && !seen[question.ItemID] {
 				continue
 			}
-			answered := make(map[string]bool, len(question.AnsweredIDs))
+			resolved := make(map[string]bool, len(question.AnsweredIDs)+len(question.SupersededIDs))
 			for _, id := range question.AnsweredIDs {
-				answered[id] = true
+				resolved[id] = true
+			}
+			for _, id := range question.SupersededIDs {
+				resolved[id] = true
 			}
 			for _, field := range question.Questions {
-				if !answered[field.ID] && AsyncQuestionAnswerMatches(field.Prompt, text) {
+				if resolved[field.ID] {
+					continue
+				}
+				if supersedes {
+					question.SupersededIDs = append(question.SupersededIDs, field.ID)
+				} else if AsyncQuestionAnswerMatches(field.Prompt, text) {
 					question.AnsweredIDs = append(question.AnsweredIDs, field.ID)
 				}
 			}

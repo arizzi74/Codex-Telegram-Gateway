@@ -120,3 +120,75 @@ func TestControlPlaneAsyncQuestionsAcrossSessions(t *testing.T) {
 		})
 	}
 }
+
+func TestControlPlaneAsyncQuestionSupersession(t *testing.T) {
+	e := newSessionModeControl(t)
+	a, b := e.sessions["thread-alpha"], e.sessions["thread-beta"]
+	selectControlSession(t, e.gw, e.telegram, 200, e.runtime, 2)
+	e.prompt(t, 202, "Start Beta work")
+	var turn string
+	waitControl(t, func() bool {
+		turn = currentActive(t, e.local, e.runtime, b.ThreadID)
+		return turn != ""
+	})
+	selectControlSession(t, e.gw, e.telegram, 203, e.runtime, 1)
+	emit := func(thread, id, kind string, fields map[string]any) {
+		t.Helper()
+		fields["id"], fields["type"] = id, kind
+		if err := e.codex.Emit("item/completed", map[string]any{"threadId": thread, "turnId": turn, "item": fields}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	const first = "Which platform should Beta use?"
+	const second = "Which display should Beta use?"
+	emit(b.ThreadID, "beta-two-questions", "agentMessage", map[string]any{
+		"delivery": "async", "text": "Beta setup", "questions": []map[string]any{
+			{"title": first, "options": []string{"Mac", "Linux"}},
+			{"title": second, "options": []string{"External display", "Built-in display"}},
+		},
+	})
+	emit(a.ThreadID, "alpha-question", "agentMessage", map[string]any{
+		"delivery": "async", "text": "Alpha setup", "questions": []map[string]any{{"title": "Which browser should Alpha use?"}},
+	})
+	waitControl(t, func() bool { return e.telegram.hasText(first) && e.telegram.hasText("Which browser should Alpha use?") })
+	userMessage := func(id, text string) {
+		t.Helper()
+		emit(b.ThreadID, id, "userMessage", map[string]any{"content": []map[string]any{{"type": "text", "text": text}}})
+	}
+	// Injected context is not a new user decision. The explicit answer that
+	// follows it must remove only its own field and leave the second available.
+	userMessage("environment", "<environment_context>\n<cwd>/workspace</cwd>\n</environment_context>")
+	userMessage("specific-answer", "> "+first+"\n\nMac")
+	waitControl(t, func() bool {
+		var raw []byte
+		if err := e.probe.QueryRowContext(e.ctx, `SELECT request_payload FROM approvals WHERE session_id=? AND state='pending'`, b.ID).Scan(&raw); err != nil {
+			return false
+		}
+		var approval protocol.Approval
+		return json.Unmarshal(raw, &approval) == nil && len(approval.Questions) == 1 && approval.Questions[0].ID == "q2"
+	})
+	var staleButton string
+	waitControl(t, func() bool {
+		staleButton = wizardButton(e.telegram, second, "External display")
+		return staleButton != ""
+	})
+	userMessage("ordinary-reply", "Proceed")
+	waitControl(t, func() bool {
+		var count int
+		err := e.probe.QueryRowContext(e.ctx, `SELECT count(*) FROM approvals WHERE session_id=? AND state='pending'`, b.ID).Scan(&count)
+		return err == nil && count == 0
+	})
+	var alphaPending int
+	if err := e.probe.QueryRowContext(e.ctx, `SELECT count(*) FROM approvals WHERE session_id=? AND state='pending'`, a.ID).Scan(&alphaPending); err != nil || alphaPending != 1 {
+		t.Fatalf("another session's question changed: count=%d error=%v", alphaPending, err)
+	}
+	postCallback(t, e.gw.server.Client(), e.gw.server.URL, "secret", 205, staleButton)
+	waitControl(t, func() bool { return e.telegram.hasText("expired, already used") })
+	var responses int
+	if err := e.probe.QueryRowContext(e.ctx, `SELECT count(*) FROM commands WHERE operation='input_response'`).Scan(&responses); err != nil || responses != 0 {
+		t.Fatalf("supersession submitted an inferred answer: count=%d error=%v", responses, err)
+	}
+	e.prompt(t, 206, "/tgquestions")
+	waitControl(t, func() bool { return e.telegram.hasText("Pending questions and approvals", a.Name) })
+	e.assertBinding(t, a.ThreadID)
+}

@@ -56,7 +56,7 @@ func TestAsyncQuestionHistoryRecordsOnlySubsequentMatchingAnswers(t *testing.T) 
 		{TurnID: "current", ItemID: "later", Questions: []Question{{ID: "q1", Prompt: "Hardware?"}}},
 	}
 	raw := json.RawMessage(`{"id":"current","items":[
-		{"type":"userMessage","id":"unrelated","content":[{"type":"text","text":"Continue working"}]},
+		{"type":"userMessage","id":"unrelated","content":[{"type":"text","text":"> Another question?\n\nContinue working"}]},
 		{"type":"userMessage","id":"answer","content":[{"type":"text","text":"> Hardware?\n\nMac"}]},
 		{"type":"agentMessage","id":"later","delivery":"async","questions":[{"title":"Hardware?"}]}
 	]}`)
@@ -68,6 +68,82 @@ func TestAsyncQuestionHistoryRecordsOnlySubsequentMatchingAnswers(t *testing.T) 
 	got, err = resolveAsyncQuestionHistory(got, raw)
 	if err != nil || !reflect.DeepEqual(got[0].AnsweredIDs, []string{"q1", "q2"}) || !reflect.DeepEqual(got[1].AnsweredIDs, []string{"q1"}) {
 		t.Fatalf("later bundled answers were lost or duplicated: %#v, %v", got, err)
+	}
+}
+
+func TestAsyncQuestionOrdinaryInputSupersedesWithoutInventingAnswers(t *testing.T) {
+	questions := []AsyncQuestion{
+		{TurnID: "earlier", ItemID: "old", Questions: []Question{{ID: "q1", Prompt: "Hardware?"}, {ID: "q2", Prompt: "Details?"}}},
+		{TurnID: "current", ItemID: "later", Questions: []Question{{ID: "q1", Prompt: "Hardware?"}}},
+	}
+	raw := json.RawMessage(`{"id":"current","items":[
+		{"type":"userMessage","id":"answer","content":[{"type":"text","text":"> Hardware?\n\nMac"}]},
+		{"type":"userMessage","id":"prompt","content":[{"type":"text","text":"Proceed"}]},
+		{"type":"agentMessage","id":"later","delivery":"async","questions":[{"title":"Hardware?"}]}
+	]}`)
+	got, err := resolveAsyncQuestionHistory(questions, raw)
+	if err != nil || len(got) != 2 || !reflect.DeepEqual(got[0].AnsweredIDs, []string{"q1"}) || !reflect.DeepEqual(got[0].SupersededIDs, []string{"q2"}) || len(got[1].AnsweredIDs) != 0 || len(got[1].SupersededIDs) != 0 {
+		t.Fatalf("ordinary prompt did not supersede only earlier pending fields: %#v, %v", got, err)
+	}
+	// A repeated title's later answer belongs to the new request; it cannot
+	// change an earlier superseded field into an answered field.
+	raw = json.RawMessage(`{"id":"next","items":[{"type":"userMessage","id":"answer","content":[{"type":"text","text":"> Hardware?\n\nWindows\n\n> Details?\n\nSecond display"}]}]}`)
+	got, err = resolveAsyncQuestionHistory(got, raw)
+	if err != nil || !reflect.DeepEqual(got[0].AnsweredIDs, []string{"q1"}) || !reflect.DeepEqual(got[0].SupersededIDs, []string{"q2"}) || !reflect.DeepEqual(got[1].AnsweredIDs, []string{"q1"}) {
+		t.Fatalf("later answer changed an already cleared question: %#v, %v", got, err)
+	}
+}
+
+func TestAsyncQuestionInputSupersedesOnlyOrdinaryUserSubmissions(t *testing.T) {
+	for _, text := range []string{
+		"Proceed", "Authenticated", "Mac", "[Image]", "[Attachment]",
+		"<project_context>User request</project_context>", "Explain <environment_context> tags",
+		"<environment_context>unterminated example", "# AGENTS.md instructions: explain these",
+		"<environment_context>İ hidden</environment_context>Proceed",
+		"<ENVIRONMENT_CONTEXT>İ hidden</ENVIRONMENT_CONTEXT>\n<goal_context>hidden</goal_context>\nAuthenticated",
+	} {
+		if !AsyncQuestionInputSupersedes(text) {
+			t.Errorf("ordinary prompt did not supersede pending questions: %q", text)
+		}
+	}
+	for _, text := range []string{
+		"", " \n ", "> Hardware?\n\nMac", "> Hardware?\n\n  ",
+		"> Hardware?\n\nMac\n\n> Details?\n\nSecond display",
+		"  <ENVIRONMENT_CONTEXT>İ hidden</ENVIRONMENT_CONTEXT>  ",
+		"# AGENTS.md instructions for /work\n<INSTRUCTIONS>hidden</INSTRUCTIONS>",
+		"<user_instructions>hidden</user_instructions>", "<skill>hidden</skill>",
+		"<turn_aborted>hidden</turn_aborted>", "<subagent_notification>hidden</subagent_notification>",
+		"<user_shell_command>hidden</user_shell_command>", "<recommended_plugins>hidden</recommended_plugins>",
+		"<goal_context>hidden</goal_context>", "<external_context>hidden</external_context>",
+		`<codex_internal_context source="limit_warning">hidden</codex_internal_context>`,
+		`<hook_prompt hook_run_id="run-a">hidden</hook_prompt>`,
+		"<environment_context>hidden</environment_context><goal_context>hidden</goal_context>",
+		"<environment_context>hidden</environment_context>\n> Hardware?\n\nMac",
+		"Warning: The maximum number of unified exec processes you can keep open is 64.",
+		"Warning: Your account was flagged for potentially high-risk cyber activity",
+		"Warning: apply_patch was requested via exec_command. Use the apply_patch tool instead of exec_command.",
+	} {
+		if AsyncQuestionInputSupersedes(text) {
+			t.Errorf("answer or contextual fragment superseded pending questions: %q", text)
+		}
+	}
+}
+
+func TestAsyncQuestionHistoryIgnoresInjectedContext(t *testing.T) {
+	questions := []AsyncQuestion{{TurnID: "earlier", ItemID: "old", Questions: []Question{{ID: "q1", Prompt: "Hardware?"}}}}
+	raw := json.RawMessage(`{"id":"current","items":[
+		{"type":"userMessage","id":"context","content":[{"type":"text","text":"<environment_context>İ hidden</environment_context>"},{"type":"text","text":"<goal_context>\n\n> Hardware?\n\nMac\n</goal_context>"}]}
+	]}`)
+	got, err := resolveAsyncQuestionHistory(questions, raw)
+	if err != nil || len(got) != 1 || len(got[0].AnsweredIDs) != 0 || len(got[0].SupersededIDs) != 0 {
+		t.Fatalf("context metadata resolved a question: %#v, %v", got, err)
+	}
+	raw = json.RawMessage(`{"id":"next","items":[
+		{"type":"userMessage","id":"answer","content":[{"type":"text","text":"<environment_context>hidden</environment_context>"},{"type":"text","text":"> Hardware?\n\nMac"}]}
+	]}`)
+	got, err = resolveAsyncQuestionHistory(got, raw)
+	if err != nil || !reflect.DeepEqual(got[0].AnsweredIDs, []string{"q1"}) || len(got[0].SupersededIDs) != 0 {
+		t.Fatalf("actual answer following context was lost: %#v, %v", got, err)
 	}
 }
 
