@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/iaia/telegramgw/internal/telegramcommands"
 )
@@ -67,7 +68,9 @@ type TelegramButton struct {
 	Data string `json:"callback_data"`
 }
 type TelegramKeyboard struct {
-	Rows [][]TelegramButton `json:"inline_keyboard"`
+	Rows                  [][]TelegramButton `json:"inline_keyboard,omitempty"`
+	ForceReply            bool               `json:"force_reply,omitempty"`
+	InputFieldPlaceholder string             `json:"input_field_placeholder,omitempty"`
 }
 type SendMessage struct {
 	ChatID              int64             `json:"chat_id"`
@@ -155,6 +158,9 @@ func (t *TelegramClient) call(ctx context.Context, method string, payload any, r
 	return nil
 }
 func (t *TelegramClient) Send(ctx context.Context, message SendMessage) (int64, error) {
+	if err := validateTelegramKeyboard(message.Keyboard, true); err != nil {
+		return 0, err
+	}
 	var reply struct {
 		ID int64 `json:"message_id"`
 	}
@@ -162,6 +168,9 @@ func (t *TelegramClient) Send(ctx context.Context, message SendMessage) (int64, 
 	return reply.ID, err
 }
 func (t *TelegramClient) Edit(ctx context.Context, chatID, messageID int64, text string, keyboard *TelegramKeyboard) error {
+	if err := validateTelegramKeyboard(keyboard, false); err != nil {
+		return err
+	}
 	payload := map[string]any{"chat_id": chatID, "message_id": messageID, "text": text}
 	if keyboard != nil {
 		payload["reply_markup"] = keyboard
@@ -170,6 +179,9 @@ func (t *TelegramClient) Edit(ctx context.Context, chatID, messageID int64, text
 }
 
 func (t *TelegramClient) EditFormatted(ctx context.Context, messageID int64, message SendMessage) error {
+	if err := validateTelegramKeyboard(message.Keyboard, false); err != nil {
+		return err
+	}
 	return t.call(ctx, "editMessageText", struct {
 		ChatID    int64             `json:"chat_id"`
 		MessageID int64             `json:"message_id"`
@@ -177,6 +189,31 @@ func (t *TelegramClient) EditFormatted(ctx context.Context, messageID int64, mes
 		Entities  []TelegramEntity  `json:"entities"`
 		Keyboard  *TelegramKeyboard `json:"reply_markup,omitempty"`
 	}{message.ChatID, messageID, message.Text, message.Entities, message.Keyboard}, nil)
+}
+
+func validateTelegramKeyboard(keyboard *TelegramKeyboard, allowForceReply bool) error {
+	if keyboard == nil {
+		return nil
+	}
+	if keyboard.ForceReply {
+		if !allowForceReply {
+			return errors.New("force reply requires a new Telegram message")
+		}
+		// Use standalone ForceReply for compatibility with Telegram clients that
+		// predate support for force_reply on inline keyboards.
+		if len(keyboard.Rows) != 0 {
+			return errors.New("force reply must use standalone reply markup")
+		}
+	}
+	if placeholder := keyboard.InputFieldPlaceholder; placeholder != "" {
+		if !keyboard.ForceReply {
+			return errors.New("Telegram reply placeholder requires force reply")
+		}
+		if !utf8.ValidString(placeholder) || utf8.RuneCountInString(placeholder) > 64 {
+			return errors.New("Telegram reply placeholder must contain at most 64 valid Unicode characters")
+		}
+	}
+	return nil
 }
 
 func (t *TelegramClient) DeleteMessage(ctx context.Context, chatID, messageID int64) error {

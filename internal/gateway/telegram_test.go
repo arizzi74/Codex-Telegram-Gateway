@@ -43,6 +43,123 @@ func TestTelegramClientPayloadAndRateLimit(t *testing.T) {
 	}
 }
 
+func TestTelegramClientSendsForceReplyMarkup(t *testing.T) {
+	placeholder := strings.Repeat("🧪", 64)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/botfake-token/sendMessage" {
+			t.Errorf("unexpected API method: %s", r.URL.Path)
+		}
+		var body struct {
+			ChatID   int64                      `json:"chat_id"`
+			Text     string                     `json:"text"`
+			Keyboard map[string]json.RawMessage `json:"reply_markup"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Error(err)
+		}
+		if body.ChatID != 123 || body.Text != "Type your answer and send it." {
+			t.Errorf("unexpected message: %+v", body)
+		}
+		if len(body.Keyboard) != 2 || string(body.Keyboard["force_reply"]) != "true" {
+			t.Errorf("invalid ForceReply markup: %v", body.Keyboard)
+		}
+		var gotPlaceholder string
+		if err := json.Unmarshal(body.Keyboard["input_field_placeholder"], &gotPlaceholder); err != nil || gotPlaceholder != placeholder {
+			t.Errorf("placeholder = %q, err = %v", gotPlaceholder, err)
+		}
+		if _, present := body.Keyboard["inline_keyboard"]; present {
+			t.Error("standalone ForceReply must not include inline_keyboard")
+		}
+		w.Write([]byte(`{"ok":true,"result":{"message_id":77}}`))
+	}))
+	defer server.Close()
+	client := NewTelegramClient("fake-token")
+	client.endpoint, client.http = server.URL, server.Client()
+	id, err := client.Send(context.Background(), SendMessage{
+		ChatID: 123,
+		Text:   "Type your answer and send it.",
+		Keyboard: &TelegramKeyboard{
+			ForceReply:            true,
+			InputFieldPlaceholder: placeholder,
+		},
+	})
+	if err != nil || id != 77 {
+		t.Fatalf("send: id=%d err=%v", id, err)
+	}
+}
+
+func TestTelegramClientPreservesInlineKeyboardPayload(t *testing.T) {
+	const wantMarkup = `{"inline_keyboard":[[{"text":"Reply with text","callback_data":"text-token"}]]}`
+	var methods []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		methods = append(methods, strings.TrimPrefix(r.URL.Path, "/botfake-token/"))
+		var body struct {
+			Keyboard json.RawMessage `json:"reply_markup"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Error(err)
+		}
+		if string(body.Keyboard) != wantMarkup {
+			t.Errorf("reply_markup = %s, want %s", body.Keyboard, wantMarkup)
+		}
+		w.Write([]byte(`{"ok":true,"result":{"message_id":77}}`))
+	}))
+	defer server.Close()
+	client := NewTelegramClient("fake-token")
+	client.endpoint, client.http = server.URL, server.Client()
+	message := SendMessage{
+		ChatID:   123,
+		Text:     "Question",
+		Keyboard: &TelegramKeyboard{Rows: [][]TelegramButton{{{Text: "Reply with text", Data: "text-token"}}}},
+	}
+	ctx := context.Background()
+	if _, err := client.Send(ctx, message); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.Edit(ctx, message.ChatID, 77, message.Text, message.Keyboard); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.EditFormatted(ctx, 77, message); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(methods, ",") != "sendMessage,editMessageText,editMessageText" {
+		t.Fatalf("unexpected Telegram methods: %v", methods)
+	}
+}
+
+func TestTelegramClientRejectsInvalidReplyMarkupBeforeRequest(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Error("invalid reply markup reached Telegram transport")
+		w.Write([]byte(`{"ok":true,"result":{"message_id":77}}`))
+	}))
+	defer server.Close()
+	client := NewTelegramClient("fake-token")
+	client.endpoint, client.http = server.URL, server.Client()
+	for _, test := range []struct {
+		name     string
+		keyboard TelegramKeyboard
+	}{
+		{"combined markup", TelegramKeyboard{ForceReply: true, Rows: [][]TelegramButton{{{Text: "Button", Data: "token"}}}}},
+		{"placeholder without force reply", TelegramKeyboard{InputFieldPlaceholder: "Answer"}},
+		{"long placeholder", TelegramKeyboard{ForceReply: true, InputFieldPlaceholder: strings.Repeat("🧪", 65)}},
+		{"invalid UTF-8 placeholder", TelegramKeyboard{ForceReply: true, InputFieldPlaceholder: "Answer\xff"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			id, err := client.Send(context.Background(), SendMessage{ChatID: 123, Text: "Question", Keyboard: &test.keyboard})
+			if err == nil || id != 0 {
+				t.Fatalf("invalid markup accepted: id=%d err=%v", id, err)
+			}
+		})
+	}
+	keyboard := &TelegramKeyboard{ForceReply: true, InputFieldPlaceholder: "Answer"}
+	if err := client.Edit(context.Background(), 123, 77, "Question", keyboard); err == nil {
+		t.Error("Edit accepted ForceReply")
+	}
+	if err := client.EditFormatted(context.Background(), 77, SendMessage{ChatID: 123, Text: "Question", Keyboard: keyboard}); err == nil {
+		t.Error("EditFormatted accepted ForceReply")
+	}
+}
+
 func TestTelegramClientChatActionAndMenuMethods(t *testing.T) {
 	var methods []string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -60,6 +60,7 @@ type AcceptResult struct {
 	CommandID      string                  `json:"command_id,omitempty"`
 	ApprovalID     string                  `json:"approval_id,omitempty"`
 	QuestionID     string                  `json:"question_id,omitempty"`
+	TextReply      bool                    `json:"text_reply,omitempty"`
 	ErrorCode      string                  `json:"error_code,omitempty"`
 }
 

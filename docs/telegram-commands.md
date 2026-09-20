@@ -253,6 +253,20 @@ with several questions, it resumes at the first unanswered question and keeps
 answers already submitted. **Refresh**, **Previous**, and **Next** update the list.
 Opening or answering a request does not change the current session selection.
 
+For a text answer, tap **Reply with text**. In a private chat, the bot sends an
+**Answer for <session>** prompt and requests Telegram's reply composer. Type in
+the normal message box at the bottom, then press **Send**. If Telegram does not
+select the reply automatically, long-press that prompt and choose **Reply**
+first; use the same steps in a group. You can also reply directly to the original
+question. Keep the reply attached to the bot's question so the answer reaches
+that question's session, even when another session is selected. Ordinary messages
+without a reply continue to use the currently selected session.
+
+Only tapping **Reply with text** opens the composer; incoming questions and
+opening `/tgquestions` do not interrupt a message you are already typing. Use
+the original question's buttons or `/tgquestions` to choose an option or dismiss
+the request after opening text reply mode.
+
 Answered requests and requests for archived sessions or superseded runtimes are
 excluded. Ordinary blocking questions expire when their turn ends. Asynchronous
 questions remain answerable while Codex continues working, including across

@@ -446,6 +446,21 @@ func (s *Sender) renderPendingInput(ctx context.Context, row registry.Delivery, 
 	if err != nil {
 		return "", nil, err
 	}
+	if response.TextReply {
+		text := "✍️ Answer for " + s.sessionListLabel(session) + "\n\n" + question.Prompt
+		var markup *TelegramKeyboard
+		if row.ChatID > 0 {
+			// Request the native composer only after the user explicitly taps
+			// Reply with text. Background questions must not steal its focus.
+			markup = &TelegramKeyboard{ForceReply: true, InputFieldPlaceholder: "Type your answer, then press Send"}
+			text += "\n\nType your answer in Telegram's message box below, then press Send.\nIf the reply box is not selected, long-press this message and choose Reply first."
+		} else {
+			// A group prompt must not activate every participant's composer.
+			text += "\n\nLong-press this message and choose Reply. Type your answer in Telegram's message box, then press Send."
+		}
+		text += "\n\nYour answer goes to this session. Your current session selection stays unchanged.\nTo view or dismiss pending questions, use /tgquestions."
+		return text, markup, nil
+	}
 	return s.renderQuestion(ctx, row, humanIdentity(worker, runtime, session), session, runtime, runtime.Generation, approvalID, approval, question)
 }
 
@@ -678,7 +693,7 @@ func (s *Sender) renderQuestion(ctx context.Context, row registry.Delivery, iden
 		keyboard.Rows = append(keyboard.Rows, []TelegramButton{{Text: "Dismiss question", Data: token}})
 		text += "\n\nYou can dismiss this pending question without sending an answer."
 	}
-	text += "\n\nReply to this message with your answer, or tap Reply with text for a fresh prompt. Your answer goes to this session and keeps your current session selected."
+	text += "\n\nTo answer: tap Reply with text, type in Telegram's message box, then press Send. You can also long-press this question and choose Reply.\nYour answer goes to this session and keeps your current session selected."
 	return text, keyboard, nil
 }
 

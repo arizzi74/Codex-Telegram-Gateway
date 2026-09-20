@@ -295,12 +295,12 @@ func (s *Store) consumeCallback(ctx context.Context, tx *dbTx, in IncomingUpdate
 	}
 	var target routeTarget
 	var requestID, threadID, turnID, state string
-	var requestPayload []byte
+	var requestPayload, persistedAnswers []byte
 	var claimed *uuid.UUID
 	err = tx.QueryRow(ctx, `SELECT worker_id, runtime_id, runtime_generation, session_id,
-        codex_request_id, codex_thread_id, COALESCE(codex_turn_id,''), state, request_payload, response_command_id
+        codex_request_id, codex_thread_id, COALESCE(codex_turn_id,''), state, request_payload, response_command_id, input_answers
         FROM approvals WHERE approval_id=$1`, *approvalID).
-		Scan(&target.workerID, &target.runtimeID, &target.generation, &target.sessionID, &requestID, &threadID, &turnID, &state, &requestPayload, &claimed)
+		Scan(&target.workerID, &target.runtimeID, &target.generation, &target.sessionID, &requestID, &threadID, &turnID, &state, &requestPayload, &claimed, &persistedAnswers)
 	if errors.Is(err, sql.ErrNoRows) {
 		return AcceptResult{}, ErrCallbackInvalid
 	}
@@ -347,10 +347,14 @@ func (s *Store) consumeCallback(ctx context.Context, tx *dbTx, in IncomingUpdate
 		if !approvalQuestionKnown(approval, questionID) {
 			return AcceptResult{}, ErrCallbackInvalid
 		}
+		var answers map[string][]string
+		if err := json.Unmarshal(persistedAnswers, &answers); err != nil || len(answers[questionID]) != 0 {
+			return AcceptResult{}, ErrCallbackInvalid
+		}
 		if err := markUsed(); err != nil {
 			return AcceptResult{}, err
 		}
-		return AcceptResult{View: "input_prompt", UserID: in.UserID, SessionID: target.sessionID.String(), RuntimeID: target.runtimeID.String(), ApprovalID: approvalID.String(), QuestionID: questionID}, nil
+		return AcceptResult{View: "input_prompt", UserID: in.UserID, SessionID: target.sessionID.String(), RuntimeID: target.runtimeID.String(), ApprovalID: approvalID.String(), QuestionID: questionID, TextReply: true}, nil
 	}
 	if action == "input" {
 		questionID := context.QuestionID
