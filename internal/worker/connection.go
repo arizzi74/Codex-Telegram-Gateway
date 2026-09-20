@@ -22,6 +22,7 @@ import (
 	"github.com/iaia/telegramgw/internal/buildinfo"
 	"github.com/iaia/telegramgw/internal/config"
 	"github.com/iaia/telegramgw/internal/protocol"
+	"github.com/iaia/telegramgw/internal/workerupdate"
 )
 
 const (
@@ -33,13 +34,16 @@ const (
 // Connection owns only the Worker-to-Gateway transport. It neither starts nor
 // stops local Codex runtimes; connection loss leaves runtime supervision alone.
 type Connection struct {
-	connected atomic.Bool
-	cfg       config.WorkerConfig
-	store     *Store
-	log       *slog.Logger
-	snapshot  func() []protocol.Runtime
-	onCommand func(context.Context, protocol.Command) (protocol.CommandAck, error)
-	startedAt time.Time
+	connected     atomic.Bool
+	cfg           config.WorkerConfig
+	store         *Store
+	log           *slog.Logger
+	snapshot      func() []protocol.Runtime
+	onCommand     func(context.Context, protocol.Command) (protocol.CommandAck, error)
+	startedAt     time.Time
+	updateWake    chan struct{}
+	updateManager string
+	updateRun     workerupdate.Runner
 
 	// dial is replaceable only by package tests, allowing an httptest TLS client
 	// without a production configuration switch for insecure TLS.
@@ -74,12 +78,20 @@ func NewConnection(cfg config.WorkerConfig, store *Store, logger *slog.Logger, s
 	if onCommand == nil {
 		return nil, errors.New("worker connection: command handler is required")
 	}
-	return &Connection{cfg: cfg, store: store, log: logger, snapshot: snapshot, onCommand: onCommand, startedAt: time.Now(), dial: websocket.Dial}, nil
+	c := &Connection{cfg: cfg, store: store, log: logger, snapshot: snapshot, onCommand: onCommand, startedAt: time.Now(), dial: websocket.Dial, updateWake: make(chan struct{}, 1), updateRun: workerupdate.Run}
+	if workerupdate.Supported() {
+		c.updateManager = workerupdate.ManagerPath()
+	}
+	return c, nil
 }
 
 // Run reconnects until ctx is cancelled. A failed connection never affects
 // local runtimes; it only delays the next outbound dial.
 func (c *Connection) Run(ctx context.Context) error {
+	maintenanceCtx, cancelMaintenance := context.WithCancel(ctx)
+	maintenanceDone := make(chan struct{})
+	go func() { defer close(maintenanceDone); c.workerUpdateLoop(maintenanceCtx) }()
+	defer func() { cancelMaintenance(); <-maintenanceDone }()
 	delay := minimumReconnectDelay
 	for {
 		if ctx.Err() != nil {
@@ -132,7 +144,7 @@ func (c *Connection) connect(ctx context.Context) error {
 		return fmt.Errorf("load local event watermark: %w", err)
 	}
 	hostname, _ := os.Hostname()
-	hello := protocol.Hello{WorkerID: c.cfg.WorkerID, WorkerName: c.cfg.Name, Hostname: hostname, OS: runtime.GOOS, Arch: runtime.GOARCH, WorkerVersion: buildinfo.Version, ProtocolMin: protocol.Version, ProtocolMax: protocol.Version, LastAckedEventSeq: lastAcked, SupportsImageInput: true, SupportsSessionWorkspaces: true, SupportsSessionDeletion: true, SupportsConversationHistory: true, Runtimes: c.snapshot()}
+	hello := protocol.Hello{WorkerID: c.cfg.WorkerID, WorkerName: c.cfg.Name, Hostname: hostname, OS: runtime.GOOS, Arch: runtime.GOARCH, WorkerVersion: buildinfo.Version, ProtocolMin: protocol.Version, ProtocolMax: protocol.Version, LastAckedEventSeq: lastAcked, SupportsImageInput: true, SupportsSessionWorkspaces: true, SupportsSessionDeletion: true, SupportsConversationHistory: true, SupportsWorkerUpdate: c.updateManager != "", Runtimes: c.snapshot()}
 	handshakeCtx, stopHandshake := context.WithTimeout(connectionCtx, 10*time.Second)
 	if err := sendEnvelope(handshakeCtx, writes, "hello", hello); err != nil {
 		stopHandshake()
@@ -179,7 +191,7 @@ func (c *Connection) connect(ctx context.Context) error {
 		case err := <-readErr:
 			return err
 		case <-heartbeat.C:
-			if err := sendEnvelope(connectionCtx, writes, "heartbeat", protocol.Heartbeat{WorkerID: c.cfg.WorkerID, UptimeSeconds: int64(time.Since(c.startedAt).Seconds()), SupportsImageInput: true, SupportsSessionWorkspaces: true, SupportsSessionDeletion: true, SupportsConversationHistory: true, Runtimes: c.snapshot()}); err != nil {
+			if err := sendEnvelope(connectionCtx, writes, "heartbeat", protocol.Heartbeat{WorkerID: c.cfg.WorkerID, UptimeSeconds: int64(time.Since(c.startedAt).Seconds()), SupportsImageInput: true, SupportsSessionWorkspaces: true, SupportsSessionDeletion: true, SupportsConversationHistory: true, SupportsWorkerUpdate: c.updateManager != "", Runtimes: c.snapshot()}); err != nil {
 				return err
 			}
 		case <-poll.C:
@@ -197,6 +209,14 @@ func (c *Connection) readLoop(ctx context.Context, conn *websocket.Conn, writes 
 			return err
 		}
 		switch e.Type {
+		case "worker_update_request":
+			request, err := protocol.Payload[protocol.WorkerUpdateRequest](e)
+			if err != nil {
+				return err
+			}
+			if err := c.receiveWorkerUpdate(request); err != nil {
+				return err
+			}
 		case "event_ack":
 			ack, err := protocol.Payload[protocol.EventAck](e)
 			if err != nil {

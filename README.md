@@ -37,8 +37,11 @@ curl -fsSL https://raw.githubusercontent.com/arizzi74/Codex-Telegram-Gateway/mai
 Follow the prompts for your gateway address, worker ID and token, and initial
 working directory. Setup offers to install Codex if missing and guides sign-in,
 including device login over SSH. New guided workers can access your home
-directory and all its subfolders by default. On Linux, setup enables background
-startup after logout, requesting sudo if required. On macOS, the worker runs
+directory and all its subfolders by default. On Linux, choose restricted service
+access or full system access. Restricted access blocks privilege elevation such
+as `sudo apt update`; full access follows your account's normal permissions.
+Setup also enables background startup after logout, requesting sudo if required.
+On macOS, the worker runs
 while your desktop account is logged in.
 
 Prompts work through the pipe and secret input is hidden. Rerunning the installer
@@ -54,6 +57,9 @@ Both commands enable daily automatic updates from
 The worker also checks for stable Codex runtime updates once per day (UTC).
 Supported standalone installations update when the worker has no active or
 queued work, then its app servers restart and their versions are verified.
+Use `/tgupdateworkers` in Telegram to queue an update check for every worker.
+Each worker installs a newer release and restarts when all its turns finish;
+workers already up to date are left running.
 See the [installation guide](docs/installation.md) for HTTPS setup, worker
 enrollment, and manual updates.
 

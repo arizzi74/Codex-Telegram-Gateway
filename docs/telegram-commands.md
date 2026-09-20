@@ -11,6 +11,7 @@ menu names, so `/debug_config` is the menu spelling of `/debug-config`; both wor
 | --- | --- |
 | `/tgstart`, `/tghelp` | Show gateway help. |
 | `/tginstances` | List workers and their runtimes. |
+| `/tgupdateworkers` | Queue an update check for every worker; install a newer release and restart after its turns finish. |
 | `/tgsessions [runtime]` | Browse sessions, select one, or create a session with **New session**. |
 | `/tgstatus [session]` | Show gateway connectivity, queued commands and approvals. |
 | `/tghistory [count]` | Show saved Codex prompts for the selected session; defaults to 10, maximum 50 per page. |
@@ -37,6 +38,16 @@ helper-agent and ephemeral threads are excluded. Discovery also hides entries
 that no longer exist after a complete successful scan; saved history is retained,
 and this cleanup does not archive or delete threads in Codex. The CLI picker can
 show a different count because it has its own source and directory filters.
+
+`/tgupdateworkers` works without selecting a session. It queues every enabled
+worker, including offline workers, and waits until each worker has no active
+turns or pending work before installing a newer release. Workers already up to
+date are not restarted. Repeated requests share an existing pending update;
+offline workers receive it on reconnection, and requests survive restarts.
+Completion or failure is reported to the requesting chat and topic. The command
+does not change update schedules or trigger the separate daily Codex runtime
+check. Gateway and worker v0.5.29 or later are required; older workers need one
+local update first. See [requested updates](installation.md#request-worker-updates-from-telegram).
 
 ## Create and delete sessions
 

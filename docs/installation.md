@@ -240,7 +240,28 @@ or run the native manager's `codex-telegramgw setup worker` command.
 
 This installs both `codex-worker` and `codex-local` for the current user and sets
 up the worker service. Relative configuration paths are resolved before the
-configuration is installed. On Linux, setup enables systemd lingering so the
+configuration is installed.
+
+For a new Linux service, the wizard asks whether to restrict the worker. The
+default is **yes**. Restricted mode enables `PrivateTmp`, `PrivateUsers`, and
+`NoNewPrivileges`; for example, a command such as `sudo apt update` cannot
+elevate privileges from the worker. Answer **no** for full system access, which
+installs these settings:
+
+```ini
+[Service]
+PrivateTmp=no
+PrivateUsers=no
+NoNewPrivileges=no
+```
+
+Full access uses the Linux account's existing permissions and sudo rules. It
+does not grant sudo privileges or change Codex session permissions or configured
+workspace roots. Updates, adoption, and repeated setup preserve the existing
+service's access settings. macOS services use the account's normal permissions;
+the Linux restriction choice does not apply to launchd.
+
+On Linux, setup enables systemd lingering so the
 worker can stay online after logout and start at boot. If administrator access
 is needed, it offers to run `sudo loginctl enable-linger` and verifies the result.
 Declining leaves the worker installed but it may stop after logout. On macOS,
@@ -271,6 +292,12 @@ Prepared or unattended worker installations require an existing authenticated
 Codex executable. Fresh interactive setup can install and authenticate it for
 you using OpenAI's standalone installer; Node.js, npm, Python, and a compiler are
 not required. Existing Codex installations and credentials are reused.
+
+For a new unattended Linux installation, add `--service-access full` to the
+explicit `install worker` command to select full access, or
+`--service-access restricted` for restricted access. Omitting it uses restricted
+access. This option applies to installing a new Linux service; it cannot change
+an existing service's settings through an update or adoption.
 
 Once worker automatic updates are enabled, the updater also checks the official stable Codex
 release channel once per UTC day. User-owned standalone installations are
@@ -333,6 +360,26 @@ Applying an update preserves configuration, credentials, and database locations.
 Gateway updates back up SQLite before migrations and verify readiness after
 startup. Workers continue running while the gateway restarts and replay their
 durable outboxes when it returns.
+
+### Request worker updates from Telegram
+
+Send `/tgupdateworkers` without arguments. It queues a check for every enabled
+worker, including offline workers, without requiring or changing the selected
+session. Repeated requests share an existing pending update. Offline workers
+receive it when they reconnect, and requests survive gateway and worker restarts.
+
+Each worker checks the configured GitHub release repository and waits until all
+its turns and pending work finish before installing a newer release and
+restarting. A worker already on the latest version reports that result without
+restarting. Results return to the chat and topic that requested the update.
+Temporary download failures are retried; a failed request reports its outcome
+and can be submitted again.
+
+This command requires gateway and worker v0.5.29 or later. An older worker
+reports that it first needs a local `codex-telegramgw update worker`. Requested
+updates use an independent updater service and do not change automatic update
+schedules. They update the worker and its local helper; the separate daily
+Codex runtime check continues on its normal schedule.
 
 ### Upgrade to the `tg` URL routes
 

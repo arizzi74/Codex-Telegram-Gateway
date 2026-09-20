@@ -63,6 +63,7 @@ func (m *Manager) command(ctx context.Context, args ...string) ([]byte, error) {
 
 type options struct {
 	Action, Component, Setting, Config, Environment, Repo, Version string
+	WorkerServiceAccess                                            string
 	AutoUpdate, Check                                              bool
 }
 
@@ -73,10 +74,11 @@ Usage:
   codex-telegramgw finish gateway
   codex-telegramgw https refresh
   codex-telegramgw install gateway --config PATH --secrets-env PATH [--auto-update]
-  codex-telegramgw install worker --config PATH [--auto-update]
+  codex-telegramgw install worker --config PATH [--service-access restricted|full] [--auto-update]
   codex-telegramgw adopt gateway|worker [--auto-update]
   codex-telegramgw update gateway|worker [--check]
   codex-telegramgw update codex [--check]
+  codex-telegramgw request-update worker --request-id UUID --worker-state PATH
   codex-telegramgw auto-update enable|disable gateway|worker
   codex-telegramgw version
 
@@ -87,6 +89,8 @@ Gateway setup reuses ./gateway.json and ./secrets.env or prompts for settings.
 It guides HTTPS, Telegram activation, and administrator enrollment.
 Worker setup can install Codex and guide sign-in when needed.
 Worker setup reuses ./worker.json or prompts for enrollment and workspace details.
+Linux worker setup asks whether to restrict its service or allow full account access.
+Existing worker services keep their access settings during adoption and updates.
 Setup enables daily updates and adopts existing services without restarting them.
 Worker updates also check the stable Codex runtime once per day and apply it when idle.
 Runtime updates support the official standalone installation and preserve active turns.
@@ -131,6 +135,9 @@ func parseOptions(args []string) (options, error) {
 		if result.Action == "install" {
 			flags.StringVar(&result.Config, "config", "", "configuration file")
 			flags.StringVar(&result.Environment, "secrets-env", "", "gateway environment file")
+			if result.Component == "worker" {
+				flags.StringVar(&result.WorkerServiceAccess, "service-access", "", "Linux worker service access: restricted or full")
+			}
 		}
 		if result.Action == "update" {
 			flags.BoolVar(&result.Check, "check", false, "check without installing")
@@ -155,6 +162,9 @@ func parseOptions(args []string) (options, error) {
 	}
 	if result.Component != "gateway" && result.Component != "worker" {
 		return result, errors.New("component must be gateway or worker")
+	}
+	if err := validateWorkerServiceAccess(result.WorkerServiceAccess); err != nil {
+		return result, err
 	}
 	if result.Repo != "" {
 		if err := ValidateRepo(result.Repo); err != nil {
@@ -195,6 +205,8 @@ func Execute(ctx context.Context, args []string, out, errOut io.Writer) int {
 				err = New(out).SetupWorker(ctx)
 			}
 		}
+	} else if args[0] == "request-update" {
+		err = New(out).requestWorkerUpdate(ctx, args[1:])
 	} else if args[0] == "https" {
 		if len(args) != 2 || args[1] != "refresh" {
 			err = errors.New("usage: codex-telegramgw https refresh")
@@ -240,6 +252,9 @@ func (m *Manager) execute(ctx context.Context, opts options) (retErr error) {
 	}
 	l, err := NewLayout(component)
 	if err != nil {
+		return err
+	}
+	if err := configureWorkerServiceAccess(l, opts); err != nil {
 		return err
 	}
 	if opts.Action == "adopt" && l.Component == "gateway" {

@@ -43,6 +43,7 @@ type IncomingUpdate struct {
 // AcceptResult is a durable UI response descriptor. The Telegram renderer owns
 // presentation; the registry only records a bounded view/result code.
 type AcceptResult struct {
+	WorkerUpdates  []WorkerUpdateStatus    `json:"worker_updates,omitempty"`
 	MultiSession   bool                    `json:"multi_session,omitempty"`
 	WizardID       string                  `json:"wizard_id,omitempty"`
 	WizardRevision int64                   `json:"wizard_revision,omitempty"`
@@ -258,6 +259,8 @@ func (s *Store) acceptAction(ctx context.Context, tx *dbTx, in IncomingUpdate) (
 		}
 	}
 	switch action {
+	case "update_workers":
+		return acceptWorkerUpdates(ctx, tx, in)
 	case "multisession":
 		return s.acceptMultiSession(ctx, tx, in)
 	case "session_alias":

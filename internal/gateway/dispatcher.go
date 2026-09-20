@@ -84,6 +84,9 @@ func (d *Dispatcher) flush(ctx context.Context) {
 func (d *Dispatcher) dispatchWorker(ctx context.Context, workerID uuid.UUID) error {
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
+	if err := d.dispatchWorkerUpdates(ctx, workerID); err != nil {
+		return err
+	}
 	commands, err := d.store.PendingCommandsForWorker(ctx, workerID, 20)
 	if err != nil {
 		return err

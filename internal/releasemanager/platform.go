@@ -520,6 +520,10 @@ func (m *Manager) installService(ctx context.Context, l *Layout, pkg string) err
 				return err
 			}
 			data = regexp.MustCompile(`(?m)^Environment=PATH=.*$`).ReplaceAllLiteral(data, []byte(`Environment="PATH=`+path+`"`))
+			data, err = renderWorkerServiceAccess(data, l.WorkerServiceAccess)
+			if err != nil {
+				return err
+			}
 		}
 		if err := AtomicWrite(l.Unit, data, 0644, nil); err != nil {
 			return err

@@ -44,6 +44,7 @@ type Session struct {
 }
 
 type Hello struct {
+	SupportsWorkerUpdate        bool      `json:"supports_worker_update,omitempty"`
 	WorkerID                    string    `json:"worker_id"`
 	WorkerName                  string    `json:"worker_name"`
 	Hostname                    string    `json:"hostname"`
@@ -67,6 +68,7 @@ type HelloAck struct {
 }
 
 type Heartbeat struct {
+	SupportsWorkerUpdate        bool      `json:"supports_worker_update,omitempty"`
 	WorkerID                    string    `json:"worker_id"`
 	SupportsImageInput          bool      `json:"supports_image_input,omitempty"`
 	SupportsSessionWorkspaces   bool      `json:"supports_session_workspaces,omitempty"`

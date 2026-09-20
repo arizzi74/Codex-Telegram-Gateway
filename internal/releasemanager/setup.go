@@ -114,6 +114,10 @@ func (m *Manager) setupWorker(ctx context.Context, l *Layout, cwd string, openPr
 	if _, err := auth.CanonicalWorkspace(workspace, roots); err != nil {
 		roots = append(roots, workspace)
 	}
+	serviceAccess, err := m.setupWorkerServiceAccess(ctx, l, prompt)
+	if err != nil {
+		return err
+	}
 	// Ask for the secret last, after validating the non-secret settings.
 	token, err := askSetupValue(ctx, prompt, m.Out, "Worker enrollment token (hidden)", "", true, func(value string) (string, error) {
 		value = strings.TrimSpace(value)
@@ -158,7 +162,7 @@ func (m *Manager) setupWorker(ctx context.Context, l *Layout, cwd string, openPr
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if err := execute(ctx, options{Action: "install", Component: "worker", Config: configPath, Version: version, AutoUpdate: true}); err != nil {
+	if err := execute(ctx, options{Action: "install", Component: "worker", Config: configPath, Version: version, AutoUpdate: true, WorkerServiceAccess: serviceAccess}); err != nil {
 		return err
 	}
 	return m.finishWorkerSetup(ctx, l, prompt)

@@ -15,6 +15,7 @@ type Layout struct {
 	Component, System, Architecture, Home                              string
 	Bin, Binary, Manager, LegacyManager, Command                       string
 	Config, Environment, State, Lock, Backups, UnitDir, Unit, DataRoot string
+	WorkerServiceAccess                                                string
 }
 
 type CommandResult struct {

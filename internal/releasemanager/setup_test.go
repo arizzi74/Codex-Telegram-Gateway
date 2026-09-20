@@ -102,6 +102,8 @@ func preparedWorkerConfig(t *testing.T, cwd string) string {
 func TestSetupWorkerAdoptsWithoutRestartOrConfigChanges(t *testing.T) {
 	m, l := coreWorkerHome(t)
 	configBefore, _ := os.ReadFile(l.Config)
+	serviceBefore := "[Service]\nPrivateTmp=no\nPrivateUsers=no\nNoNewPrivileges=no\n"
+	platformWrite(t, l.Unit, serviceBefore, 0644)
 	workerState := filepath.Join(l.Home, ".local/state/codex-worker/worker.db")
 	if err := AtomicWrite(workerState, []byte("existing worker state"), 0600, nil); err != nil {
 		t.Fatal(err)
@@ -125,8 +127,8 @@ func TestSetupWorkerAdoptsWithoutRestartOrConfigChanges(t *testing.T) {
 	}
 	configAfter, _ := os.ReadFile(l.Config)
 	stateAfter, _ := os.ReadFile(workerState)
-	if !bytes.Equal(configBefore, configAfter) || string(stateAfter) != "existing worker state" {
-		t.Fatal("adoption changed worker configuration or state")
+	if !bytes.Equal(configBefore, configAfter) || string(stateAfter) != "existing worker state" || updateRead(t, l.Unit) != serviceBefore {
+		t.Fatal("adoption changed worker configuration, service access, or state")
 	}
 	if len(commands) < 3 {
 		t.Fatal("automatic updates were not enabled")
@@ -169,12 +171,12 @@ func TestSetupWorkerGuidedConfigIsPrivateValidatedAndTemporary(t *testing.T) {
 			m.Out = &output
 			token := `private-token-"quotes"-$()-&=:`
 			prompt := &scriptedWorkerSetup{t: t, answers: []string{
-				"https://gateway.example.com:8443/", "00000000-0000-4000-8000-000000000001", `Worker "one"`, "", token,
+				"https://gateway.example.com:8443/", "00000000-0000-4000-8000-000000000001", `Worker "one"`, "", "", token,
 			}}
 			var stage string
 			installErr := errors.New("test install failure")
 			err := m.setupWorker(context.Background(), l, cwd, func() (workerSetupPrompt, error) { return prompt, nil }, func(_ context.Context, opts options) error {
-				if opts.Action != "install" || opts.Component != "worker" || !opts.AutoUpdate || opts.Version != "v0.5.1" {
+				if opts.Action != "install" || opts.Component != "worker" || !opts.AutoUpdate || opts.Version != "v0.5.1" || opts.WorkerServiceAccess != workerServiceRestricted {
 					t.Fatalf("unexpected install options: %+v", opts)
 				}
 				stage = filepath.Dir(opts.Config)
@@ -210,7 +212,7 @@ func TestSetupWorkerGuidedConfigIsPrivateValidatedAndTemporary(t *testing.T) {
 			if (installFails && !errors.Is(err, installErr)) || (!installFails && err != nil) {
 				t.Fatal(err)
 			}
-			if stage == "" || FileExists(stage) || !prompt.closed || !reflect.DeepEqual(prompt.secrets, []bool{false, false, false, false, true}) {
+			if stage == "" || FileExists(stage) || !prompt.closed || !reflect.DeepEqual(prompt.secrets, []bool{false, false, false, false, false, true}) {
 				t.Fatal("setup did not hide token or clean temporary files")
 			}
 			if strings.Contains(output.String(), token) || (err != nil && strings.Contains(err.Error(), token)) {
@@ -256,7 +258,7 @@ func TestSetupWorkerGuidedRootsCoverHomeAndOnlyExplicitOutsideWorkspaces(t *test
 			wantRoots, _ = auth.CanonicalWorkspaceRoots(wantRoots)
 			runtime, _ = filepath.EvalSymlinks(runtime)
 			prompt := &scriptedWorkerSetup{t: t, answers: []string{
-				"https://gateway.example.com", "00000000-0000-4000-8000-000000000001", "", answer, "enrollment-token",
+				"https://gateway.example.com", "00000000-0000-4000-8000-000000000001", "", answer, "", "enrollment-token",
 			}}
 			called := false
 			err := m.setupWorker(t.Context(), l, cwd, func() (workerSetupPrompt, error) { return prompt, nil }, func(_ context.Context, opts options) error {
@@ -309,13 +311,14 @@ func TestSetupWorkerRetriesInvalidAnswersWithoutRestartingSetup(t *testing.T) {
 		"private-token", "00000000-0000-4000-8000-000000000001",
 		"   ", "Worker one",
 		"missing-directory", "~",
+		"invalid-access", "no",
 		"private-token\nsecond-line", "valid-enrollment-token",
 	}}
 	called := false
 	err := m.setupWorker(t.Context(), l, cwd, func() (workerSetupPrompt, error) { return prompt, nil }, func(_ context.Context, opts options) error {
 		called = true
 		cfg, err := config.LoadWorker(opts.Config)
-		if err != nil || cfg.Name != "Worker one" {
+		if err != nil || cfg.Name != "Worker one" || opts.WorkerServiceAccess != workerServiceFull {
 			t.Fatal("corrected answers did not produce a valid configuration", err)
 		}
 		return nil
@@ -323,7 +326,7 @@ func TestSetupWorkerRetriesInvalidAnswersWithoutRestartingSetup(t *testing.T) {
 	if err != nil || !called || !prompt.closed || len(prompt.answers) != 0 {
 		t.Fatal("worker setup did not recover from invalid answers", err)
 	}
-	if !reflect.DeepEqual(prompt.secrets, []bool{false, false, false, false, false, false, false, false, true, true}) {
+	if !reflect.DeepEqual(prompt.secrets, []bool{false, false, false, false, false, false, false, false, false, false, true, true}) {
 		t.Fatal("enrollment token was not hidden on every attempt")
 	}
 	if strings.Contains(output.String(), "private-token") || strings.Contains(output.String(), "valid-enrollment-token") {
@@ -352,7 +355,8 @@ func TestSetupWorkerRejectsInvalidInputBeforeInstallation(t *testing.T) {
 		{"gateway", []string{"https://private-token@example.com"}},
 		{"identity", []string{"https://gateway.example.com", "private-token"}},
 		{"workspace", []string{"https://gateway.example.com", "00000000-0000-4000-8000-000000000001", "", "missing-directory"}},
-		{"token", []string{"https://gateway.example.com", "00000000-0000-4000-8000-000000000001", "", "", "private-token\nsecond-line"}},
+		{"access", []string{"https://gateway.example.com", "00000000-0000-4000-8000-000000000001", "", "", "invalid-access"}},
+		{"token", []string{"https://gateway.example.com", "00000000-0000-4000-8000-000000000001", "", "", "", "private-token\nsecond-line"}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			m, l, cwd := setupFixture(t)

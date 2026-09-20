@@ -368,6 +368,9 @@ func nullGeneration(event protocol.Event) any {
 }
 
 func (s *Store) applyEvent(ctx context.Context, tx *dbTx, workerID uuid.UUID, event protocol.Event, target eventTarget) (notify bool, commandID *uuid.UUID, err error) {
+	if event.Kind == "worker_update_result" {
+		return false, nil, applyWorkerUpdateEvent(ctx, tx, workerID, event)
+	}
 	if handled, notify, commandID, err := applySettingsMenuEvent(ctx, tx, workerID, event, target); handled || err != nil {
 		return notify, commandID, err
 	}

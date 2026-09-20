@@ -46,7 +46,7 @@ func (e Envelope) Validate() error {
 		return &Error{Code: UnsupportedProtocol, Message: "Unsupported worker protocol version."}
 	}
 	switch e.Type {
-	case "hello", "hello_ack", "heartbeat", "command", "command_ack", "worker_event", "event_ack", "error":
+	case "hello", "hello_ack", "heartbeat", "command", "command_ack", "worker_update_request", "worker_event", "event_ack", "error":
 	default:
 		return fmt.Errorf("unknown envelope type %q", e.Type)
 	}

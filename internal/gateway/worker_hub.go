@@ -43,6 +43,7 @@ type Hub struct {
 
 type peer struct {
 	workerID, connectionID      uuid.UUID
+	supportsWorkerUpdate        bool
 	supportsImageInput          bool
 	supportsSessionWorkspaces   bool
 	supportsSessionDeletion     bool
@@ -127,6 +128,7 @@ func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// builds advertise their actual capabilities, including development builds.
 	legacySessionSupport := strings.TrimPrefix(hello.WorkerVersion, "v") == "0.5.19"
 	p := &peer{workerID: worker.ID, connectionID: connectionID, supportsImageInput: hello.SupportsImageInput,
+		supportsWorkerUpdate:        hello.SupportsWorkerUpdate,
 		supportsSessionWorkspaces:   hello.SupportsSessionWorkspaces || legacySessionSupport,
 		supportsSessionDeletion:     hello.SupportsSessionDeletion || legacySessionSupport,
 		supportsConversationHistory: hello.SupportsConversationHistory,
