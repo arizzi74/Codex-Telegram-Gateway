@@ -59,7 +59,7 @@ func TestHistoryCommandPreservesIdleColdAndRunningSessions(t *testing.T) {
 				t.Fatalf("history made non-read RPCs: %#v", calls)
 			}
 			var params map[string]any
-			if err := json.Unmarshal(calls[0].Params, &params); err != nil || params["threadId"] != session.ThreadID || params["itemsView"] != "full" || params["limit"] != float64(1) || params["sortDirection"] != "asc" {
+			if err := json.Unmarshal(calls[0].Params, &params); err != nil || params["threadId"] != session.ThreadID || params["itemsView"] != "full" || params["limit"] != float64(1) || params["sortDirection"] != "desc" {
 				t.Fatalf("history RPC = %#v, %v", params, err)
 			}
 		})
@@ -122,6 +122,42 @@ func TestHistoryCommandFailuresPreserveSessionAndHideRawErrors(t *testing.T) {
 	}
 }
 
+func TestHistoryDefaultReadsNewestPromptsWithoutTraversingOldTurns(t *testing.T) {
+	a, runtime, server, cleanup := testAgent(t)
+	defer cleanup()
+	session := protocol.Session{ID: uuid.NewString(), RuntimeID: runtime.ID, ThreadID: "large-thread", CWD: runtime.DefaultCWD, State: "idle", Loaded: true}
+	actor := &sessionActor{agent: a, runtime: runtime, session: session}
+	turns := make([]map[string]any, 100)
+	for i := range turns {
+		turnID := fmt.Sprintf("turn-%03d", i)
+		turns[i] = map[string]any{"id": turnID, "startedAt": int64(1800441000 + i), "items": []map[string]any{{"id": "user", "type": "userMessage", "content": []map[string]any{{"type": "text", "text": fmt.Sprintf("prompt %d", i)}}}}}
+	}
+	server.SetThreads([]map[string]any{{"id": session.ThreadID, "turns": turns}}, nil)
+	command := agentCommand(runtime, session, protocol.ReadHistory)
+	command.Arguments.History = &protocol.HistoryRequest{Limit: protocol.DefaultHistoryLimit}
+	record := runHistoryCommand(t, actor, command)
+	page := record.Result.History
+	if page == nil || page.Limit != 2 || len(page.Prompts) != 2 || page.Prompts[0].Text != "prompt 99" || page.Prompts[1].Text != "prompt 98" || page.Next == nil || page.Next.TurnID != "turn-098" {
+		t.Fatalf("default history did not start at latest prompt: %#v", page)
+	}
+	if got := countCall(historyOperationCalls(server.Calls()), "thread/turns/list"); got != 3 {
+		t.Fatalf("reading two prompts traversed old conversation history: got %d requests, want 3 including older-page check", got)
+	}
+	if page.Prompts[0].Timestamp == nil || page.Prompts[0].Timestamp.Unix() != 1800441099 {
+		t.Fatalf("history did not preserve saved timestamp: %#v", page.Prompts[0])
+	}
+	// New input after the first page must not move the exclusive older cursor.
+	newTurn := map[string]any{"id": "turn-100", "items": []map[string]any{{"id": "user", "type": "userMessage", "content": []map[string]any{{"type": "text", "text": "prompt 100"}}}}}
+	server.SetThreads([]map[string]any{{"id": session.ThreadID, "turns": append(turns, newTurn)}}, nil)
+	command = agentCommand(runtime, session, protocol.ReadHistory)
+	command.Arguments.History = &protocol.HistoryRequest{Limit: 2, Before: page.Next}
+	record = runHistoryCommand(t, actor, command)
+	page = record.Result.History
+	if page == nil || len(page.Prompts) != 2 || page.Prompts[0].Text != "prompt 97" || page.Prompts[1].Text != "prompt 96" {
+		t.Fatalf("older page skipped or repeated prompts after append: %#v", page)
+	}
+}
+
 func TestHistoryFiltersRecordedGatewayInputByTurnAndCount(t *testing.T) {
 	a, runtime, _, cleanup := testAgent(t)
 	defer cleanup()
@@ -169,18 +205,22 @@ func TestHistoryFiltersRecordedGatewayInputByTurnAndCount(t *testing.T) {
 	}
 }
 
-func TestHistoryPagesAreChronologicalExclusiveAndStable(t *testing.T) {
+func TestHistoryPagesAreNewestFirstExclusiveAndStable(t *testing.T) {
 	prompts := make([]codexadapter.UserPrompt, 6)
 	for i := range prompts {
-		prompts[i] = codexadapter.UserPrompt{TurnID: "turn", ItemID: fmt.Sprintf("item-%d", i), Text: fmt.Sprintf("prompt %d", i)}
+		stamp := time.Date(2026, 9, 20, 10, i, 0, 0, time.UTC)
+		prompts[i] = codexadapter.UserPrompt{TurnID: "turn", ItemID: fmt.Sprintf("item-%d", i), Text: fmt.Sprintf("prompt %d", i), Timestamp: &stamp}
 	}
 	first, err := historyPage(prompts[:5], &protocol.HistoryRequest{Limit: 2}, nil)
-	if err != nil || len(first.Prompts) != 2 || first.Prompts[0].ItemID != "item-3" || first.Prompts[1].ItemID != "item-4" || first.Next == nil || first.Next.ItemID != "item-3" {
+	if err != nil || len(first.Prompts) != 2 || first.Prompts[0].ItemID != "item-4" || first.Prompts[1].ItemID != "item-3" || first.Next == nil || first.Next.ItemID != "item-3" {
 		t.Fatalf("first page = %#v, %v", first, err)
+	}
+	if first.Prompts[0].Timestamp == nil || !first.Prompts[0].Timestamp.Equal(*prompts[4].Timestamp) {
+		t.Fatalf("history lost original turn time: %#v", first.Prompts[0])
 	}
 	// A new prompt arriving does not shift the boundary of older pages.
 	second, err := historyPage(prompts, &protocol.HistoryRequest{Limit: 2, Before: first.Next}, nil)
-	if err != nil || len(second.Prompts) != 2 || second.Prompts[0].ItemID != "item-1" || second.Prompts[1].ItemID != "item-2" || second.Next == nil || second.Next.ItemID != "item-1" {
+	if err != nil || len(second.Prompts) != 2 || second.Prompts[0].ItemID != "item-2" || second.Prompts[1].ItemID != "item-1" || second.Next == nil || second.Next.ItemID != "item-1" {
 		t.Fatalf("second page = %#v, %v", second, err)
 	}
 	last, err := historyPage(prompts, &protocol.HistoryRequest{Limit: 2, Before: second.Next}, nil)
@@ -216,7 +256,7 @@ func TestHistoryFiltersBeforePagingAndRedacting(t *testing.T) {
 	command.Arguments.History = &protocol.HistoryRequest{Limit: 2}
 	record := runHistoryCommand(t, actor, command)
 	page := record.Result.History
-	if page == nil || len(page.Prompts) != 2 || page.Prompts[0].Text != "[hidden]" || page.Prompts[1].Text != "new CLI" || page.Next == nil || page.Next.ItemID != "item-1" {
+	if page == nil || len(page.Prompts) != 2 || page.Prompts[0].Text != "new CLI" || page.Prompts[1].Text != "[hidden]" || page.Next == nil || page.Next.ItemID != "item-1" {
 		t.Fatalf("wrong order of filtering, paging, redaction: %#v", page)
 	}
 }
@@ -273,7 +313,7 @@ func TestHistoryRedactsAndBoundsPagesWithoutSkippingOlderPrompts(t *testing.T) {
 		}
 		request.Before = page.Next
 	}
-	if want := []string{"3", "4", "5", "6", "0", "1", "2"}; !reflect.DeepEqual(visited, want) {
+	if want := []string{"6", "5", "4", "3", "2", "1", "0"}; !reflect.DeepEqual(visited, want) {
 		t.Fatalf("pagination skipped or repeated input: %#v", visited)
 	}
 }

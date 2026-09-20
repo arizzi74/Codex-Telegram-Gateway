@@ -3,14 +3,16 @@ package gateway
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/iaia/telegramgw/internal/auth"
 	"github.com/iaia/telegramgw/internal/protocol"
 )
 
 func TestLastMessagesDisplaysBothRolesWithSessionAndPrivatePaging(t *testing.T) {
+	stamp := time.Date(2026, 9, 20, 10, 11, 12, 0, time.UTC)
 	page := &protocol.HistoryPage{Limit: 2, Conversation: true, Messages: []protocol.HistoryMessage{
-		{TurnID: "turn", ItemID: "user", Role: "user", Text: "/status is saved Telegram input"},
+		{TurnID: "turn", ItemID: "user", Role: "user", Text: "/status is saved Telegram input", Timestamp: &stamp},
 		{TurnID: "turn", ItemID: "answer", Role: "assistant", Text: "SECRET_HISTORY_VALUE is secret", Truncated: true},
 	}, Next: &protocol.HistoryCursor{TurnID: "turn", ItemID: "user"}}
 	store, row := historyRenderFixture(t, page)
@@ -25,6 +27,9 @@ func TestLastMessagesDisplaysBothRolesWithSessionAndPrivatePaging(t *testing.T) 
 	}
 	if strings.Contains(strings.Join(parts, ""), "SECRET_HISTORY_VALUE") {
 		t.Fatal("conversation bypassed redaction")
+	}
+	if !strings.Contains(parts[0], "Turn time: 2026-09-20 10:11:12 UTC") || !strings.Contains(parts[1], "Turn date/time unavailable") {
+		t.Fatalf("missing persisted or unavailable timestamp: %#v", parts)
 	}
 	if keyboard == nil || keyboard.Rows[0][0].Text != "Older messages" || len(store.callbacks) != 1 {
 		t.Fatal("missing conversation paging")

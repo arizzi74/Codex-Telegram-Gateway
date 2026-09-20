@@ -9,8 +9,8 @@ import (
 	"time"
 
 	"github.com/iaia/telegramgw/internal/protocol"
+	"github.com/iaia/telegramgw/internal/workerdb"
 	"github.com/iaia/telegramgw/internal/workerupdate"
-	bolt "go.etcd.io/bbolt"
 )
 
 func (c *Connection) receiveWorkerUpdate(request protocol.WorkerUpdateRequest) error {
@@ -85,7 +85,7 @@ func (c *Connection) reconcileWorkerUpdates(ctx context.Context) error {
 	return nil
 }
 
-// Marking the request and creating its event share one bbolt transaction. A
+// Marking the request and creating its event share one SQLite transaction. A
 // crash after writing the external result, before or after gateway ACK, cannot
 // lose the outcome or generate duplicate completion messages.
 func (s *Store) recordWorkerUpdateResult(result protocol.WorkerUpdateResult) error {
@@ -96,7 +96,7 @@ func (s *Store) recordWorkerUpdateResult(result protocol.WorkerUpdateResult) err
 	if err != nil {
 		return err
 	}
-	return s.db.Update(func(tx *bolt.Tx) error {
+	return s.db.Update(func(tx *workerdb.Tx) error {
 		key := []byte("worker_update_result/" + result.RequestID)
 		meta := tx.Bucket(bucketMeta)
 		if meta.Get(key) != nil {

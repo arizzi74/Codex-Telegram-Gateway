@@ -577,13 +577,13 @@ func (s *sessionActor) run() {
 					}
 				}
 			}
-			s.save()
-			s.recoverAsyncQuestions()
 			current := s.session
 			previous.UpdatedAt, current.UpdatedAt = time.Time{}, time.Time{}
 			if !reflect.DeepEqual(previous, current) {
+				s.save()
 				s.agent.report(s.agent.emit(s.runtime, s.session.ID, "session_state_changed", s.session))
 			}
+			s.recoverAsyncQuestions()
 			if snapshot.processed != nil {
 				close(snapshot.processed)
 			}
@@ -907,6 +907,31 @@ func (s *sessionActor) event(event codexadapter.Event) {
 		return
 	}
 	switch event.Kind {
+	case "thread_status_changed":
+		previous := s.session.State
+		switch event.State {
+		case "active", "running":
+			if len(s.pending) == 0 {
+				s.session.State = "running"
+			}
+		case "idle", "notLoaded", "not_loaded":
+			// Only the matching turn completion can end a known active turn.
+			// An idle notification may arrive before its final message event.
+			if s.session.ActiveTurnID != "" || s.activeCommand != nil || s.awaitingTurnStart || len(s.pending) != 0 {
+				return
+			}
+			s.session.State = "idle"
+			if event.State != "idle" {
+				s.session.State = "not_loaded"
+				s.session.Loaded = false
+			}
+		default:
+			return
+		}
+		if previous != s.session.State {
+			s.save()
+			s.agent.report(s.agent.emit(s.runtime, s.session.ID, "session_state_changed", s.session))
+		}
 	case "input_requested_async":
 		s.observeAsyncQuestion(event)
 	case "turn_started":

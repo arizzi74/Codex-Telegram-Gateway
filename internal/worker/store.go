@@ -14,9 +14,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	bolt "go.etcd.io/bbolt"
-
 	"github.com/iaia/telegramgw/internal/protocol"
+	"github.com/iaia/telegramgw/internal/workerdb"
 )
 
 const DefaultStoreLockTimeout = time.Second
@@ -61,12 +60,12 @@ type ReceiveResult struct {
 
 // Store is a transactional worker-local ledger and durable event outbox.
 type Store struct {
-	db       *bolt.DB
+	db       *workerdb.DB
 	workerID string
 }
 
-// OpenStore opens a 0600 bbolt database and binds it permanently to workerID.
-// A second process receives bbolt's lock-timeout error rather than sharing the
+// OpenStore opens a 0600 SQLite database and binds it permanently to workerID.
+// A second worker receives a lock-timeout error rather than sharing the
 // file. Existing files that group or others can read are rejected.
 func OpenStore(path, workerID string) (*Store, error) {
 	if _, err := uuid.Parse(workerID); err != nil {
@@ -82,12 +81,12 @@ func OpenStore(path, workerID string) (*Store, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return nil, fmt.Errorf("worker store: create state directory: %w", err)
 	}
-	db, err := bolt.Open(path, 0o600, &bolt.Options{Timeout: DefaultStoreLockTimeout})
+	db, err := workerdb.Open(path, 0o600, &workerdb.Options{Timeout: DefaultStoreLockTimeout, WorkerID: workerID})
 	if err != nil {
 		return nil, fmt.Errorf("worker store: open: %w", err)
 	}
 	s := &Store{db: db, workerID: workerID}
-	if err := db.Update(func(tx *bolt.Tx) error {
+	if err := db.Update(func(tx *workerdb.Tx) error {
 		for _, bucket := range [][]byte{bucketMeta, bucketCommands, bucketOutbox, bucketRuntimes, bucketSessions} {
 			if _, err := tx.CreateBucketIfNotExists(bucket); err != nil {
 				return err
@@ -144,7 +143,7 @@ func (s *Store) Receive(command protocol.Command) (ReceiveResult, error) {
 		return ReceiveResult{}, errors.New("worker store: command targets another worker")
 	}
 	var result ReceiveResult
-	err := s.db.Update(func(tx *bolt.Tx) error {
+	err := s.db.Update(func(tx *workerdb.Tx) error {
 		b := tx.Bucket(bucketCommands)
 		if value := b.Get([]byte(command.ID)); value != nil {
 			record, err := decodeCommand(value)
@@ -174,7 +173,7 @@ func (s *Store) SetCommandState(commandID string, state CommandState, result *pr
 	if !validCommandState(state) {
 		return errors.New("worker store: invalid command state")
 	}
-	return s.db.Update(func(tx *bolt.Tx) error {
+	return s.db.Update(func(tx *workerdb.Tx) error {
 		b := tx.Bucket(bucketCommands)
 		value := b.Get([]byte(commandID))
 		if value == nil {
@@ -197,7 +196,7 @@ func (s *Store) SetCommandState(commandID string, state CommandState, result *pr
 func (s *Store) LoadCommand(commandID string) (CommandRecord, bool, error) {
 	var record CommandRecord
 	found := false
-	err := s.db.View(func(tx *bolt.Tx) error {
+	err := s.db.View(func(tx *workerdb.Tx) error {
 		value := tx.Bucket(bucketCommands).Get([]byte(commandID))
 		if value == nil {
 			return nil
@@ -214,7 +213,7 @@ func (s *Store) LoadCommand(commandID string) (CommandRecord, bool, error) {
 // executing commands are deliberately marked outcome_unknown, never replayed.
 func (s *Store) PendingCommands() ([]CommandRecord, error) {
 	var records []CommandRecord
-	err := s.db.View(func(tx *bolt.Tx) error {
+	err := s.db.View(func(tx *workerdb.Tx) error {
 		return tx.Bucket(bucketCommands).ForEach(func(_, value []byte) error {
 			record, err := decodeCommand(value)
 			if err != nil {
@@ -237,7 +236,7 @@ func (s *Store) AppendEvent(event protocol.Event) (protocol.Event, error) {
 		return protocol.Event{}, errors.New("worker store: event targets another worker")
 	}
 	var persisted protocol.Event
-	err := s.db.Update(func(tx *bolt.Tx) error {
+	err := s.db.Update(func(tx *workerdb.Tx) error {
 		var err error
 		persisted, err = appendEvent(tx, event)
 		return err
@@ -252,7 +251,7 @@ func (s *Store) OutboxAfter(seq uint64) ([]protocol.Event, error) {
 		return nil, errors.New("worker store: event sequence exceeds supported range")
 	}
 	var events []protocol.Event
-	err := s.db.View(func(tx *bolt.Tx) error {
+	err := s.db.View(func(tx *workerdb.Tx) error {
 		cursor := tx.Bucket(bucketOutbox).Cursor()
 		for key, value := cursor.Seek(sequenceKey(seq + 1)); key != nil; key, value = cursor.Next() {
 			var event protocol.Event
@@ -269,7 +268,7 @@ func (s *Store) OutboxAfter(seq uint64) ([]protocol.Event, error) {
 // EventWatermarks returns the last gateway ACK and highest locally persisted
 // event sequence. A reconnect must not invent history after data loss.
 func (s *Store) EventWatermarks() (acked, high uint64, err error) {
-	err = s.db.View(func(tx *bolt.Tx) error {
+	err = s.db.View(func(tx *workerdb.Tx) error {
 		meta := tx.Bucket(bucketMeta)
 		acked = parseSequence(meta.Get(keyLastAck))
 		next := parseSequence(meta.Get(keyNextEvent))
@@ -291,7 +290,7 @@ func (s *Store) RecordResult(commandID string, state CommandState, result *proto
 		return protocol.Event{}, errors.New("worker store: event targets another worker")
 	}
 	var saved protocol.Event
-	err := s.db.Update(func(tx *bolt.Tx) error {
+	err := s.db.Update(func(tx *workerdb.Tx) error {
 		b := tx.Bucket(bucketCommands)
 		raw := b.Get([]byte(commandID))
 		if raw == nil {
@@ -319,7 +318,7 @@ func (s *Store) RecordResult(commandID string, state CommandState, result *proto
 // AckThrough rejects acknowledgements beyond the persisted high-water mark.
 // Valid acknowledgements are monotonic and only delete events at or below seq.
 func (s *Store) AckThrough(seq uint64) error {
-	return s.db.Update(func(tx *bolt.Tx) error {
+	return s.db.Update(func(tx *workerdb.Tx) error {
 		meta := tx.Bucket(bucketMeta)
 		next := parseSequence(meta.Get(keyNextEvent))
 		high := uint64(0)
@@ -348,7 +347,7 @@ func (s *Store) AckThrough(seq uint64) error {
 func (s *Store) RuntimeForProfile(profileID string) (protocol.Runtime, bool, error) {
 	var runtime protocol.Runtime
 	found := false
-	err := s.db.View(func(tx *bolt.Tx) error {
+	err := s.db.View(func(tx *workerdb.Tx) error {
 		value := tx.Bucket(bucketRuntimes).Get([]byte(profileID))
 		if value == nil {
 			return nil
@@ -368,7 +367,7 @@ func (s *Store) BeginRuntime(profileID, name, defaultCWD string) (protocol.Runti
 		return protocol.Runtime{}, errors.New("worker store: runtime profile_id is required")
 	}
 	var runtime protocol.Runtime
-	err := s.db.Update(func(tx *bolt.Tx) error {
+	err := s.db.Update(func(tx *workerdb.Tx) error {
 		b := tx.Bucket(bucketRuntimes)
 		if value := b.Get([]byte(profileID)); value != nil {
 			if err := json.Unmarshal(value, &runtime); err != nil {
@@ -400,7 +399,7 @@ func (s *Store) UpsertSession(session protocol.Session) (protocol.Session, error
 		return protocol.Session{}, errors.New("worker store: session targets another worker")
 	}
 	var saved protocol.Session
-	err := s.db.Update(func(tx *bolt.Tx) error {
+	err := s.db.Update(func(tx *workerdb.Tx) error {
 		b := tx.Bucket(bucketSessions)
 		key := sessionKey(session.RuntimeID, session.ThreadID)
 		saved = session
@@ -467,7 +466,7 @@ func (s *Store) changeDiscoveredSessionVisibility(runtime protocol.Runtime, expe
 	}
 	var saved protocol.Session
 	changed := false
-	err := s.db.Update(func(tx *bolt.Tx) error {
+	err := s.db.Update(func(tx *workerdb.Tx) error {
 		bucket := tx.Bucket(bucketSessions)
 		key := sessionKey(runtime.ID, expected.ThreadID)
 		value := bucket.Get(key)
@@ -514,7 +513,7 @@ func (s *Store) changeDiscoveredSessionVisibility(runtime protocol.Runtime, expe
 // ListSessions returns every session, optionally limited to a runtime ID.
 func (s *Store) ListSessions(runtimeID string) ([]protocol.Session, error) {
 	var sessions []protocol.Session
-	err := s.db.View(func(tx *bolt.Tx) error {
+	err := s.db.View(func(tx *workerdb.Tx) error {
 		return tx.Bucket(bucketSessions).ForEach(func(_, value []byte) error {
 			var session protocol.Session
 			if err := json.Unmarshal(value, &session); err != nil {
@@ -530,7 +529,7 @@ func (s *Store) ListSessions(runtimeID string) ([]protocol.Session, error) {
 	return sessions, err
 }
 
-func recoverExecuting(tx *bolt.Tx) error {
+func recoverExecuting(tx *workerdb.Tx) error {
 	return tx.Bucket(bucketCommands).ForEach(func(key, value []byte) error {
 		record, err := decodeCommand(value)
 		if err != nil {
@@ -557,7 +556,7 @@ func recoverExecuting(tx *bolt.Tx) error {
 	})
 }
 
-func appendEvent(tx *bolt.Tx, event protocol.Event) (protocol.Event, error) {
+func appendEvent(tx *workerdb.Tx, event protocol.Event) (protocol.Event, error) {
 	meta := tx.Bucket(bucketMeta)
 	next := parseSequence(meta.Get(keyNextEvent))
 	if next == 0 || next >= math.MaxInt64 {

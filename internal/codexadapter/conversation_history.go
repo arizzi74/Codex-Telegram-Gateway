@@ -94,8 +94,10 @@ func (c *Client) conversationMessages(ctx context.Context, threadID string, limi
 
 func decodeConversationTurn(raw json.RawMessage) ([]protocol.HistoryMessage, error) {
 	var turn struct {
-		ID    string          `json:"id"`
-		Items json.RawMessage `json:"items"`
+		ID          string          `json:"id"`
+		Items       json.RawMessage `json:"items"`
+		StartedAt   *int64          `json:"startedAt"`
+		CompletedAt *int64          `json:"completedAt"`
 	}
 	if !historyObject(raw) || json.Unmarshal(raw, &turn) != nil || strings.TrimSpace(turn.ID) == "" || len(turn.ID) > 512 {
 		return nil, fmt.Errorf("invalid conversation turn: %w", ErrHistoryUnavailable)
@@ -126,7 +128,7 @@ func decodeConversationTurn(raw json.RawMessage) ([]protocol.HistoryMessage, err
 		if json.Unmarshal(rawItem, &item) != nil {
 			return nil, fmt.Errorf("invalid conversation item: %w", ErrHistoryUnavailable)
 		}
-		message := protocol.HistoryMessage{TurnID: turn.ID, ItemID: item.ID}
+		message := protocol.HistoryMessage{TurnID: turn.ID, ItemID: item.ID, Timestamp: historyTimestamp(turn.StartedAt)}
 		switch item.Type {
 		case "userMessage":
 			message.Role = "user"
@@ -144,6 +146,9 @@ func decodeConversationTurn(raw json.RawMessage) ([]protocol.HistoryMessage, err
 				return nil, fmt.Errorf("missing conversation text: %w", ErrHistoryUnavailable)
 			}
 			message.Role, message.Text = "assistant", *item.Text
+			if completedAt := historyTimestamp(turn.CompletedAt); completedAt != nil {
+				message.Timestamp = completedAt
+			}
 		default:
 			continue
 		}

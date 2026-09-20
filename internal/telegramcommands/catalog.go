@@ -16,7 +16,7 @@ var gateway = []Command{
 	{"tgupdateworkers", "Gateway: update all workers when their turns finish"},
 	{"tgsessions", "Gateway: choose a session"},
 	{"tgstatus", "Gateway: connection, session and queue state"},
-	{"tghistory", "Gateway: show saved Codex prompts"},
+	{"tghistory", "Gateway: last 2 saved Codex prompts, newest first"},
 	{"tglastmessages", "Gateway: last message or last N user and Codex messages"},
 	{"tgmultisession", "Gateway: toggle messages from all sessions"},
 	{"tgdisconnect", "Gateway: clear the selected session"},

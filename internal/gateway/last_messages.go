@@ -44,7 +44,7 @@ func (s *Sender) renderLastMessages(ctx context.Context, row registry.Delivery, 
 		default:
 			return nil, nil, errors.New("render messages: invalid role")
 		}
-		text := "📜 " + label + " · " + role + "\n\n" + message.Text
+		text := "📜 " + label + " · " + role + "\n" + historyTimestamp(message.Timestamp) + "\n\n" + message.Text
 		if message.Truncated {
 			text += "\n\n[Long message shortened in this history view.]"
 		}

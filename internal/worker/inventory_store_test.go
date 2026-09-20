@@ -8,7 +8,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	bolt "go.etcd.io/bbolt"
+	"github.com/iaia/telegramgw/internal/workerdb"
 
 	"github.com/iaia/telegramgw/internal/protocol"
 )
@@ -145,7 +145,7 @@ func TestArchiveDiscoveredSessionRejectsInvalidTargets(t *testing.T) {
 
 func TestArchiveDiscoveredSessionRollsBackWhenEventCannotCommit(t *testing.T) {
 	store, runtime, original := inventoryStoreFixture(t)
-	if err := store.db.Update(func(tx *bolt.Tx) error {
+	if err := store.db.Update(func(tx *workerdb.Tx) error {
 		return tx.Bucket(bucketMeta).Put(keyNextEvent, sequenceKey(math.MaxInt64))
 	}); err != nil {
 		t.Fatal(err)
@@ -221,7 +221,7 @@ func TestRestoreDiscoveredSessionRequiresUnchangedArchivedSnapshot(t *testing.T)
 				candidate.WorkerID, wantError = uuid.NewString(), true
 			case "event_failure":
 				wantError = true
-				if err := store.db.Update(func(tx *bolt.Tx) error {
+				if err := store.db.Update(func(tx *workerdb.Tx) error {
 					return tx.Bucket(bucketMeta).Put(keyNextEvent, sequenceKey(math.MaxInt64))
 				}); err != nil {
 					t.Fatal(err)

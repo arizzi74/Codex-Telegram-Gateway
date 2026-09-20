@@ -9,7 +9,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/iaia/telegramgw/internal/protocol"
-	bolt "go.etcd.io/bbolt"
+	"github.com/iaia/telegramgw/internal/workerdb"
 )
 
 func TestAsyncQuestionStoreSurvivesReopenAndDeduplicatesGeneration(t *testing.T) {
@@ -126,7 +126,7 @@ func TestAsyncQuestionStoreRollsBackWhenOutboxAppendFails(t *testing.T) {
 	question := testAsyncQuestionApproval()
 	setNext := func(next uint64) {
 		t.Helper()
-		if err := store.db.Update(func(tx *bolt.Tx) error { return tx.Bucket(bucketMeta).Put(keyNextEvent, sequenceKey(next)) }); err != nil {
+		if err := store.db.Update(func(tx *workerdb.Tx) error { return tx.Bucket(bucketMeta).Put(keyNextEvent, sequenceKey(next)) }); err != nil {
 			t.Fatal(err)
 		}
 	}

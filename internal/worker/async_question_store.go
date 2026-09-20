@@ -8,7 +8,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/iaia/telegramgw/internal/protocol"
-	bolt "go.etcd.io/bbolt"
+	"github.com/iaia/telegramgw/internal/workerdb"
 )
 
 var bucketAsyncQuestions = []byte("async_questions")
@@ -27,7 +27,7 @@ func asyncQuestionKey(sessionID, requestID string) []byte {
 // reopen an answered question or duplicate a notification after reconnecting.
 func (s *Store) announceAsyncQuestion(runtime protocol.Runtime, sessionID string, approval protocol.Approval) (protocol.Approval, bool, error) {
 	var pending bool
-	err := s.db.Update(func(tx *bolt.Tx) error {
+	err := s.db.Update(func(tx *workerdb.Tx) error {
 		b, err := tx.CreateBucketIfNotExists(bucketAsyncQuestions)
 		if err != nil {
 			return err
@@ -68,7 +68,7 @@ func (s *Store) announceAsyncQuestion(runtime protocol.Runtime, sessionID string
 
 func (s *Store) asyncQuestionRecords(sessionID string) ([]asyncQuestionRecord, error) {
 	var records []asyncQuestionRecord
-	err := s.db.View(func(tx *bolt.Tx) error {
+	err := s.db.View(func(tx *workerdb.Tx) error {
 		b := tx.Bucket(bucketAsyncQuestions)
 		if b == nil {
 			return nil
@@ -88,7 +88,7 @@ func (s *Store) asyncQuestionRecords(sessionID string) ([]asyncQuestionRecord, e
 }
 
 func (s *Store) setAsyncQuestionState(runtime protocol.Runtime, sessionID, requestID, state string, resolve bool) error {
-	return s.db.Update(func(tx *bolt.Tx) error {
+	return s.db.Update(func(tx *workerdb.Tx) error {
 		b := tx.Bucket(bucketAsyncQuestions)
 		if b == nil {
 			return fmt.Errorf("async question is unavailable")

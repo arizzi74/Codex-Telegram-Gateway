@@ -2,8 +2,10 @@ package worker
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"os"
@@ -57,6 +59,7 @@ type managedRuntime struct {
 	subscriptions     map[string]struct{}
 	degraded          bool
 	capabilityRetryAt time.Time
+	hiddenLoaded      map[string]bool
 }
 
 // runtimePersistenceError marks failures which have crossed the durable local
@@ -99,6 +102,9 @@ func NewRuntimeManager(cfg config.WorkerConfig, store *Store, logger *slog.Logge
 		return nil, err
 	}
 	m.statsRedactor = redactor
+	m.stats.store = store
+	patterns, _ := json.Marshal(cfg.RedactPatterns)
+	m.stats.namespace = fmt.Sprintf("%x", sha256.Sum256(patterns))
 	m.start = func(ctx context.Context, options codexadapter.Config) (*codexadapter.Client, error) {
 		base := filepath.Join(filepath.Dir(cfg.StateFile), "runtimes")
 		if err := os.MkdirAll(base, 0o700); err != nil {
@@ -384,6 +390,10 @@ func (m *RuntimeManager) discover(ctx context.Context, runtime protocol.Runtime,
 		return err
 	}
 	complete = complete && loadedComplete
+	byThread := make(map[string]protocol.Session, len(existing))
+	for _, session := range existing {
+		byThread[session.ThreadID] = session
+	}
 	// A loaded thread may not yet have a stored log or appear in a history
 	// page. Read its current turn independently, without changing selection.
 	indexed := make(map[string]int, len(threads))
@@ -391,7 +401,36 @@ func (m *RuntimeManager) discover(ctx context.Context, runtime protocol.Runtime,
 		indexed[thread.ID] = index
 	}
 	for id := range loaded {
-		thread, readErr := client.ReadThreadState(ctx, id)
+		var thread codexadapter.Thread
+		var readErr error
+		if index, ok := indexed[id]; ok {
+			thread = threads[index]
+		} else if m.hiddenLoadedThread(runtime, client, id, false) {
+			continue
+		} else {
+			thread, readErr = client.ReadThread(ctx, id, false)
+		}
+		if readErr == nil && !thread.UserSession() {
+			m.hiddenLoadedThread(runtime, client, id, true)
+			continue
+		}
+		if readErr == nil && (thread.CWD == "" || workspaceAllowed(thread.CWD, m.cfg.AllowedWorkspaceRoots)) {
+			if m.loadedThreadSubscribed(runtime, client, id) && !retryUnavailable {
+				// Subscribed events maintain current activity. Repeatedly loading
+				// the latest persisted turn reparses the entire rollout in Codex.
+				thread.ActiveTurnID = ""
+				if thread.Status == "active" || thread.Status == "running" || thread.Status == "" {
+					thread.ActiveTurnID = client.ActiveTurn(id)
+				}
+				if thread.ActiveTurnID == "" && (thread.Status == "active" || thread.Status == "running") {
+					// A turn already running when we subscribed need not replay its
+					// start notification. Retain the initial authoritative snapshot.
+					thread.ActiveTurnID = byThread[id].ActiveTurnID
+				}
+			} else {
+				thread, readErr = client.ReadThreadState(ctx, id)
+			}
+		}
 		if readErr != nil {
 			if errors.Is(readErr, codexadapter.ErrMethodUnavailable) {
 				m.markRuntimeDegraded(runtime, readErr)
@@ -404,10 +443,6 @@ func (m *RuntimeManager) discover(ctx context.Context, runtime protocol.Runtime,
 		} else {
 			threads = append(threads, thread)
 		}
-	}
-	byThread := make(map[string]protocol.Session, len(existing))
-	for _, session := range existing {
-		byThread[session.ThreadID] = session
 	}
 	visible := make(map[string]bool, len(threads))
 	observed := make(map[string]bool, len(threads))
@@ -500,6 +535,35 @@ func (m *RuntimeManager) discover(ctx context.Context, runtime protocol.Runtime,
 	}
 	m.markRuntimeRecovered(runtime, client)
 	return nil
+}
+
+func (m *RuntimeManager) loadedThreadSubscribed(runtime protocol.Runtime, client *codexadapter.Client, id string) bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	current := m.runtimes[runtime.ID]
+	if current == nil || current.client != client || current.runtime.Generation != runtime.Generation {
+		return false
+	}
+	_, ok := current.subscriptions[id]
+	return ok
+}
+
+// Internal thread identity cannot turn into a user conversation. Remembering
+// it for this app-server connection avoids opening its old rollout every tick.
+func (m *RuntimeManager) hiddenLoadedThread(runtime protocol.Runtime, client *codexadapter.Client, id string, remember bool) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	current := m.runtimes[runtime.ID]
+	if current == nil || current.client != client || current.runtime.Generation != runtime.Generation {
+		return false
+	}
+	if remember {
+		if current.hiddenLoaded == nil {
+			current.hiddenLoaded = map[string]bool{}
+		}
+		current.hiddenLoaded[id] = true
+	}
+	return current.hiddenLoaded[id]
 }
 
 var requiredDiscoveryMethods = [...]string{"thread/list", "thread/loaded/list", "thread/read", "thread/turns/list", "thread/resume"}

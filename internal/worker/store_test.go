@@ -7,7 +7,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	bolt "go.etcd.io/bbolt"
+	"github.com/iaia/telegramgw/internal/workerdb"
 
 	"github.com/iaia/telegramgw/internal/protocol"
 )
@@ -142,13 +142,13 @@ func TestStoreRejectsMismatchedWorkerIdentity(t *testing.T) {
 	}
 }
 
-func TestBoltTransactionRollbackDoesNotPersistOutboxMutation(t *testing.T) {
+func TestSQLiteTransactionRollbackDoesNotPersistOutboxMutation(t *testing.T) {
 	store, err := OpenStore(filepath.Join(t.TempDir(), "state.db"), uuid.NewString())
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer store.Close()
-	err = store.db.Update(func(tx *bolt.Tx) error {
+	err = store.db.Update(func(tx *workerdb.Tx) error {
 		if err := tx.Bucket(bucketOutbox).Put(sequenceKey(1), []byte(`{"event_seq":1}`)); err != nil {
 			return err
 		}

@@ -6,7 +6,7 @@ import (
 	"errors"
 	"time"
 
-	bolt "go.etcd.io/bbolt"
+	"github.com/iaia/telegramgw/internal/workerdb"
 
 	"github.com/iaia/telegramgw/internal/auth"
 	"github.com/iaia/telegramgw/internal/codexadapter"
@@ -184,7 +184,7 @@ func (s *Store) DeleteSession(runtime protocol.Runtime, expected protocol.Sessio
 		return protocol.Session{}, errors.New("worker store: invalid permanent session deletion target")
 	}
 	var saved protocol.Session
-	err := s.db.Update(func(tx *bolt.Tx) error {
+	err := s.db.Update(func(tx *workerdb.Tx) error {
 		bucket := tx.Bucket(bucketSessions)
 		key := sessionKey(runtime.ID, expected.ThreadID)
 		value := bucket.Get(key)
@@ -196,6 +196,9 @@ func (s *Store) DeleteSession(runtime protocol.Runtime, expected protocol.Sessio
 		}
 		if saved.ID != expected.ID {
 			return errors.New("worker store: deleted session identity changed")
+		}
+		if err := purgeAsyncHistoryCache(tx, runtime.ID, expected.ThreadID); err != nil {
+			return err
 		}
 		if saved.Deleted {
 			return nil

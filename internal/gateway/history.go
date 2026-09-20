@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/iaia/telegramgw/internal/protocol"
@@ -28,7 +29,7 @@ func (s *Sender) renderDeliveryParts(ctx context.Context, row registry.Delivery)
 			if s.options.Redactor != nil {
 				part = s.options.Redactor.Redact(part)
 			}
-			chunks = append(chunks, SplitText(part, 4000)...)
+			chunks = append(chunks, splitHistoryPart(part, 4000)...)
 		}
 		return chunks, keyboard, nil
 	}
@@ -60,12 +61,17 @@ func (s *Sender) renderHistory(ctx context.Context, row registry.Delivery, event
 		}
 		return []string{header + "\n\nNo saved Codex prompts to show. Prompts already recorded through Telegram are omitted."}, nil, nil
 	}
-	parts := []string{header + "\n\nSaved prompts, oldest first within this page. Prompts already recorded through Telegram are omitted."}
-	for _, prompt := range page.Prompts {
+	parts := []string{header + "\n\nSaved prompts, newest first. Prompts already recorded through Telegram are omitted; use /tglastmessages to include them and Codex replies."}
+	for i := range page.Prompts {
+		index := i
+		if !page.NewestFirst {
+			index = len(page.Prompts) - 1 - i
+		}
+		prompt := page.Prompts[index]
 		if prompt.TurnID == "" || prompt.ItemID == "" || strings.TrimSpace(prompt.Text) == "" {
 			return nil, nil, errors.New("render history: invalid prompt")
 		}
-		text := "👤 You · Codex\n\n" + prompt.Text
+		text := "👤 You · Codex\n" + historyTimestamp(prompt.Timestamp) + "\n\n" + prompt.Text
 		if prompt.Truncated {
 			text += "\n\n[Long prompt shortened in this history view.]"
 		}
@@ -76,6 +82,32 @@ func (s *Sender) renderHistory(ctx context.Context, row registry.Delivery, event
 	}
 	keyboard, err := s.historyOlderKeyboard(ctx, row, event, session.ID, runtime.ID, commandID, &protocol.HistoryRequest{Limit: page.Limit, Before: page.Next})
 	return parts, keyboard, err
+}
+
+func historyTimestamp(timestamp *time.Time) string {
+	if timestamp == nil || timestamp.IsZero() {
+		return "Turn date/time unavailable"
+	}
+	return "Turn time: " + timestamp.UTC().Format("2006-01-02 15:04:05 UTC")
+}
+
+// Long saved messages can span several Telegram messages. Repeat the identity
+// and timestamp on each continuation so none can be mistaken for new input.
+func splitHistoryPart(part string, limit int) []string {
+	header, body, found := strings.Cut(part, "\n\n")
+	if !found || !strings.Contains(header, "Turn ") || telegramTextLength(part) <= limit {
+		return SplitText(part, limit)
+	}
+	prefix := header + "\n\n"
+	remaining := limit - telegramTextLength(prefix)
+	if remaining <= 0 {
+		return SplitText(part, limit)
+	}
+	chunks := SplitText(body, remaining)
+	for i := range chunks {
+		chunks[i] = prefix + chunks[i]
+	}
+	return chunks
 }
 
 func (s *Sender) historyOlderKeyboard(ctx context.Context, row registry.Delivery, event protocol.Event, session, runtime, commandID string, request *protocol.HistoryRequest) (*TelegramKeyboard, error) {

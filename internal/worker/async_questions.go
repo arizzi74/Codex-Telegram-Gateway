@@ -68,7 +68,7 @@ func (s *sessionActor) recoverAsyncQuestions() {
 	}
 	ctx, cancel := context.WithTimeout(s.agent.ctx, 10*time.Second)
 	defer cancel()
-	history, historyErr := client.AsyncQuestions(ctx, s.session.ThreadID)
+	history, historyErr := s.readPendingQuestionHistory(ctx, client, pending)
 	if historyErr == nil {
 		for _, item := range history {
 			requestID := "async:" + item.ItemID

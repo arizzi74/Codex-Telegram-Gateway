@@ -14,7 +14,7 @@ menu names, so `/debug_config` is the menu spelling of `/debug-config`; both wor
 | `/tgupdateworkers` | Queue an update check for every worker; install a newer release and restart after its turns finish. |
 | `/tgsessions [runtime]` | Browse sessions, select one, or create a session with **New session**. |
 | `/tgstatus [session]` | Show gateway connectivity, queued commands and approvals. |
-| `/tghistory [count]` | Show saved Codex prompts for the selected session; defaults to 10, maximum 50 per page. |
+| `/tghistory [count]` | Show saved Codex prompts for the selected session; newest first, defaults to 2, maximum 50 per page. |
 | `/tglastmessages [count]` | Show the last saved user or Codex message; request 1–50 messages from both sides. |
 | `/tgmultisession [on\|off]` | Toggle messages from all sessions, or explicitly enable/disable them. |
 | `/tgdisconnect` | Clear the selection. |
@@ -198,7 +198,8 @@ resend them after the upgrade.
 Use `/tglastmessages` to display the selected session's last saved message, or
 `/tglastmessages 10` for the last ten. The count includes both user messages and
 final Codex responses, including user input sent through Telegram or the CLI.
-Messages are labelled by role and shown oldest first within the page. Request
+Messages are labelled by role and shown oldest first within the page. Each
+message includes its saved turn date and time in UTC. Request
 1–50 messages and use **Older messages** to continue back through the conversation.
 Commentary, reasoning and tool calls are not included. Reading messages does not
 start a turn or resume the session. An unavailable history or an older worker
@@ -209,17 +210,26 @@ in Codex. Each prompt appears as a separate bot message labelled **You · Codex*
 The bot remains the Telegram sender; these messages are copies of saved input.
 Reading history never submits the prompts again, starts a turn, resumes a cold
 thread, or interrupts work already running.
-History is fetched one turn at a time so images from earlier turns do not
-accumulate in a single app-server response. This requires a Codex runtime with
-`thread/turns/list` support; older runtimes receive an update-required error.
+History is fetched from the newest turns backwards, one turn at a time, and
+stops when the requested page and its older-page check are complete. Images
+from earlier turns do not accumulate in a single app-server response. This
+requires a Codex runtime with `thread/turns/list` support; older runtimes receive
+an update-required error.
 
-The newest page contains up to 10 prompts by default, shown oldest first within
-that page. `/tghistory 25` requests a larger page. Use **Older prompts** to read
-earlier pages. The button is restricted to the requesting user, chat, topic,
+The newest page contains up to 2 prompts by default, shown newest first and
+then going backwards. `/tghistory 25` requests a larger page. Use **Older prompts**
+to read earlier pages. The button is restricted to the requesting user, chat, topic,
 session, and runtime; select a different session or restart the runtime and use
 `/tghistory` again. Repeating the command deliberately displays the newest page
 again. Delivery retries preserve already-sent messages instead of repeating the
 whole page.
+
+Every displayed prompt or conversation message, including continuations of long
+messages, includes a saved turn timestamp in UTC. Codex supplies turn start and
+completion times rather than individual message times: user prompts use the
+turn start, and Codex replies use its completion time when available. History
+from runtimes that omit these fields is labelled **Turn date/time unavailable**;
+the gateway never substitutes the time you requested history.
 
 Prompts matched to accepted Telegram submissions in the worker's command ledger
 are omitted, since they are already available in Telegram. If that ledger has

@@ -1,6 +1,6 @@
 # Codex Telegram control plane
 
-A Go gateway, embedded SQLite registry, and Linux/macOS worker for controlling local
+A Go gateway and Linux/macOS worker with embedded SQLite storage for controlling local
 Codex sessions through an allowlisted Telegram bot. The gateway includes a
 passkey-authenticated admin console. Workers supervise private Codex app-server
 processes and support local terminal attachment.
@@ -102,6 +102,11 @@ The worker needs a private enrollment-token file and access to the Codex executa
 When using a custom configuration file, pass the same `--config` option to
 diagnostics and terminal attachment commands.
 
+Workers also use embedded SQLite at their configured `state_file`; no database
+server, SQLite CLI, Python, or separate C library is required. Existing worker state is
+converted automatically on startup, retaining a private `.bbolt-backup` of the
+original. See [worker storage and recovery](docs/operations.md#worker-storage-and-ambiguous-outcomes).
+
 [Service and proxy templates](deploy/) are provided for Linux systemd, macOS
 launchd, and nginx. Customize their paths, service accounts, permissions, and
 TLS settings before installing them. Choose worker permissions to match the
@@ -127,9 +132,11 @@ commands explain how to use the attached CLI. The bot shows “typing…” whil
 Codex is preparing a response and stops when a reply or an input request arrives.
 See [Telegram commands](docs/telegram-commands.md) for syntax and supported actions.
 
-Use `/tghistory` to display saved Codex prompts as separate **You · Codex** bot
-messages, with an **Older prompts** button for earlier pages. This reads the
-selected session's history without running those prompts again.
+Use `/tghistory` to display the last two saved Codex prompts, newest first, as
+separate **You · Codex** bot messages with saved turn timestamps. Set a count
+with `/tghistory 10` and use **Older prompts** to continue backwards. Prompts
+already sent through Telegram are omitted. This reads the selected session's
+history without running those prompts again.
 Use `/tglastmessages` for the last saved user or Codex message, or
 `/tglastmessages 10` for the last ten messages from both sides, including prompts
 sent through Telegram.
@@ -267,7 +274,7 @@ before starting this version. Changing the configuration alone does not transfer
 
 Gateway commands are persisted with immutable worker/runtime/generation/session
 identities before dispatch. Workers commit command receipts and important
-events to bbolt before acknowledgement. Reconnection replays unacknowledged
+events to local SQLite before acknowledgement. Reconnection replays unacknowledged
 events; a gateway outage leaves local Codex processes running. Commands with
 ambiguous execution outcomes are reported for inspection and never blindly
 replayed. Telegram itself has no send idempotency key: a process crash between

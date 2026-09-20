@@ -6,6 +6,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/iaia/telegramgw/internal/auth"
@@ -52,11 +53,12 @@ func historyRenderFixture(t *testing.T, page *protocol.HistoryPage) (*historyRen
 }
 
 func TestHistoryDisplaysSeparateUserPromptsAndRequesterScopedPaging(t *testing.T) {
+	stamp := time.Date(2026, 9, 20, 14, 5, 6, 0, time.FixedZone("CEST", 2*60*60))
 	page := &protocol.HistoryPage{
-		Limit: 2,
+		Limit: 2, NewestFirst: true,
 		Prompts: []protocol.HistoryPrompt{
+			{TurnID: "turn-new", ItemID: "item-new", Text: "Token: SECRET_HISTORY_VALUE", Truncated: true, Timestamp: &stamp},
 			{TurnID: "turn-old", ItemID: "item-old", Text: "/status is saved text"},
-			{TurnID: "turn-new", ItemID: "item-new", Text: "Token: SECRET_HISTORY_VALUE", Truncated: true},
 		},
 		Next: &protocol.HistoryCursor{TurnID: "turn-old", ItemID: "item-old"},
 	}
@@ -70,8 +72,9 @@ func TestHistoryDisplaysSeparateUserPromptsAndRequesterScopedPaging(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(parts) != 3 || !strings.Contains(parts[0], "auth-fix") ||
-		parts[1] != "👤 You · Codex\n\n/status is saved text" || !strings.HasPrefix(parts[2], "👤 You · Codex\n\n") || !strings.Contains(parts[2], "shortened") {
+	if len(parts) != 3 || !strings.Contains(parts[0], "auth-fix") || !strings.Contains(parts[0], "newest first") ||
+		parts[2] != "👤 You · Codex\nTurn date/time unavailable\n\n/status is saved text" ||
+		!strings.HasPrefix(parts[1], "👤 You · Codex\nTurn time: 2026-09-20 12:05:06 UTC\n\n") || !strings.Contains(parts[1], "shortened") {
 		t.Fatalf("unexpected history messages: %#v", parts)
 	}
 	if strings.Contains(strings.Join(parts, ""), "SECRET_HISTORY_VALUE") {
@@ -94,6 +97,32 @@ func TestHistoryDisplaysSeparateUserPromptsAndRequesterScopedPaging(t *testing.T
 	}
 }
 
+func TestHistoryRepeatsOriginalTimestampAcrossLongMessageChunks(t *testing.T) {
+	stamp := time.Date(2026, 9, 20, 10, 11, 12, 0, time.UTC)
+	text := strings.Repeat("Long saved prompt. ", 900)
+	for _, conversation := range []bool{false, true} {
+		page := &protocol.HistoryPage{Limit: 1, Conversation: conversation}
+		if conversation {
+			page.Messages = []protocol.HistoryMessage{{TurnID: "turn", ItemID: "item", Role: "assistant", Text: text[:15000], Timestamp: &stamp}}
+		} else {
+			page.Prompts = []protocol.HistoryPrompt{{TurnID: "turn", ItemID: "item", Text: text, Timestamp: &stamp}}
+		}
+		store, row := historyRenderFixture(t, page)
+		parts, _, err := NewSender(store, nil, nil).renderDeliveryParts(t.Context(), row)
+		if err != nil || len(parts) < 3 {
+			t.Fatalf("long history parts=%d, %v", len(parts), err)
+		}
+		if !conversation {
+			parts = parts[1:]
+		}
+		for _, part := range parts {
+			if !strings.Contains(part, "Turn time: 2026-09-20 10:11:12 UTC") || telegramTextLength(part) > 4000 {
+				t.Fatalf("history chunk lost timestamp or exceeds Telegram budget: %q", part[:100])
+			}
+		}
+	}
+}
+
 func TestHistoryEmptyPageAndInvalidPage(t *testing.T) {
 	store, row := historyRenderFixture(t, &protocol.HistoryPage{Limit: 10})
 	sender := NewSender(store, nil, nil)
@@ -104,6 +133,18 @@ func TestHistoryEmptyPageAndInvalidPage(t *testing.T) {
 	_, row = historyRenderFixture(t, &protocol.HistoryPage{Limit: 0})
 	if _, _, err := sender.renderDeliveryParts(t.Context(), row); err == nil {
 		t.Fatal("invalid page accepted")
+	}
+}
+
+func TestHistoryLegacyWorkerPageRendersNewestFirst(t *testing.T) {
+	page := &protocol.HistoryPage{Limit: 2, Prompts: []protocol.HistoryPrompt{
+		{TurnID: "turn-1", ItemID: "old", Text: "Earlier input"},
+		{TurnID: "turn-2", ItemID: "new", Text: "Latest input"},
+	}}
+	store, row := historyRenderFixture(t, page)
+	parts, _, err := NewSender(store, nil, nil).renderDeliveryParts(t.Context(), row)
+	if err != nil || len(parts) != 3 || !strings.HasSuffix(parts[1], "Latest input") || !strings.HasSuffix(parts[2], "Earlier input") {
+		t.Fatalf("legacy worker page not rendered newest first: %#v, %v", parts, err)
 	}
 }
 

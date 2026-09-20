@@ -242,6 +242,14 @@ This installs both `codex-worker` and `codex-local` for the current user and set
 up the worker service. Relative configuration paths are resolved before the
 configuration is installed.
 
+The worker stores its command ledger, event outbox, and conversation statistics
+cache in embedded SQLite at the configured `state_file`. The Go binary includes
+the database engine; installing SQLite, Python, a database server, or a separate
+C library is unnecessary. Existing bbolt state is converted automatically at
+startup without changing the configured path. A private `.bbolt-backup` copy is
+retained before conversion; see [worker storage and recovery](operations.md#worker-storage-and-ambiguous-outcomes)
+before restoring a backup or rolling back to an older binary.
+
 For a new Linux service, the wizard asks whether to restrict the worker. The
 default is **yes**. Restricted mode enables `PrivateTmp`, `PrivateUsers`, and
 `NoNewPrivileges`; for example, a command such as `sudo apt update` cannot

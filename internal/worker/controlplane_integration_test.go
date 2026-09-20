@@ -31,7 +31,7 @@ import (
 )
 
 // This test runs the real registry, websocket hub, dispatcher, sender, worker
-// Agent and bbolt outbox. The fixture is an app-server JSONL peer, so the only
+// Agent and SQLite outbox. The fixture is an app-server JSONL peer, so the only
 // substituted edges are TLS trust and Telegram's external HTTP API.
 func TestControlPlaneWorkerOutboxSurvivesGatewayRestartIntegration(t *testing.T) {
 	store, registryProbe := controlPlaneRegistry(t)
@@ -297,7 +297,7 @@ func TestControlPlaneWorkerOutboxSurvivesGatewayRestartIntegration(t *testing.T)
 	}
 
 	// Stop only the gateway. The live worker/runtime continues; a final event
-	// emitted during the outage must remain in bbolt until reconnection.
+	// emitted during the outage must remain in SQLite until reconnection.
 	gw.close()
 	if active == "" {
 		t.Fatal("fixture did not return a turn id")

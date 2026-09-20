@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 )
 
 // ErrHistoryUnavailable means the server returned thread metadata without the
@@ -21,6 +22,9 @@ type UserPrompt struct {
 	TurnID string
 	ItemID string
 	Text   string
+	// Timestamp is the saved turn start, not the history read time. Codex
+	// does not persist individual timestamps for later inputs in a turn.
+	Timestamp *time.Time
 }
 
 // UserPrompts reads stored user messages in chronological order without
@@ -111,8 +115,9 @@ func decodeUserPromptTurns(turns []json.RawMessage) ([]UserPrompt, error) {
 	seen := make(map[[2]string]struct{})
 	for _, rawTurn := range turns {
 		var turn struct {
-			ID    string          `json:"id"`
-			Items json.RawMessage `json:"items"`
+			ID        string          `json:"id"`
+			Items     json.RawMessage `json:"items"`
+			StartedAt *int64          `json:"startedAt"`
 		}
 		if !historyObject(rawTurn) || json.Unmarshal(rawTurn, &turn) != nil {
 			return nil, errors.New("invalid user-prompt history turn")
@@ -151,7 +156,7 @@ func decodeUserPromptTurns(turns []json.RawMessage) ([]UserPrompt, error) {
 				return nil, err
 			}
 			if strings.TrimSpace(text) != "" {
-				result = append(result, UserPrompt{TurnID: turn.ID, ItemID: item.ID, Text: text})
+				result = append(result, UserPrompt{TurnID: turn.ID, ItemID: item.ID, Text: text, Timestamp: historyTimestamp(turn.StartedAt)})
 			}
 		}
 	}

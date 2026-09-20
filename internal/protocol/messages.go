@@ -283,7 +283,7 @@ func (m *PermissionMenu) Validate() error {
 	return nil
 }
 
-const DefaultHistoryLimit = 10
+const DefaultHistoryLimit = 2
 const DefaultLastMessagesLimit = 1
 const MaxHistoryLimit = 50
 
@@ -315,12 +315,15 @@ type HistoryPrompt struct {
 	ItemID    string `json:"item_id"`
 	Text      string `json:"text"`
 	Truncated bool   `json:"truncated,omitempty"`
+	// Timestamp comes from the saved turn, not the time history was read.
+	Timestamp *time.Time `json:"timestamp,omitempty"`
 }
 
 type HistoryPage struct {
 	Prompts      []HistoryPrompt  `json:"prompts"`
 	Messages     []HistoryMessage `json:"messages,omitempty"`
 	Conversation bool             `json:"conversation,omitempty"`
+	NewestFirst  bool             `json:"newest_first,omitempty"`
 	Next         *HistoryCursor   `json:"next,omitempty"`
 	Limit        int              `json:"limit"`
 }
@@ -328,11 +331,12 @@ type HistoryPage struct {
 // HistoryMessage is user-visible conversation text. Reasoning and tool items
 // are never part of this projection. Role is either user or assistant.
 type HistoryMessage struct {
-	TurnID    string `json:"turn_id"`
-	ItemID    string `json:"item_id"`
-	Role      string `json:"role"`
-	Text      string `json:"text"`
-	Truncated bool   `json:"truncated,omitempty"`
+	TurnID    string     `json:"turn_id"`
+	ItemID    string     `json:"item_id"`
+	Role      string     `json:"role"`
+	Text      string     `json:"text"`
+	Truncated bool       `json:"truncated,omitempty"`
+	Timestamp *time.Time `json:"timestamp,omitempty"`
 }
 
 type Approval struct {

@@ -677,8 +677,11 @@ func validHistoryPage(page *protocol.HistoryPage, request *protocol.HistoryReque
 		if !validHistoryCursor(*page.Next) || len(page.Prompts) == 0 {
 			return false
 		}
-		first := page.Prompts[0]
-		if page.Next.TurnID != first.TurnID || page.Next.ItemID != first.ItemID {
+		oldest := page.Prompts[0]
+		if page.NewestFirst {
+			oldest = page.Prompts[len(page.Prompts)-1]
+		}
+		if page.Next.TurnID != oldest.TurnID || page.Next.ItemID != oldest.ItemID {
 			return false
 		}
 	}

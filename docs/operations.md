@@ -183,14 +183,54 @@ for routine installation and updates. The current release manager is the
 native Go `codex-telegramgw` executable described in
 [installation and updates](installation.md).
 
-## Worker bbolt recovery and ambiguous outcomes
+## Worker storage and ambiguous outcomes
 
-Stop the worker before copying or inspecting its `state_file`; bbolt is a
-single-writer database. Preserve the original first:
+The worker uses embedded SQLite at its configured `state_file`, with WAL mode
+and a separate `.lock` file enforcing a single worker per store. The database,
+WAL, shared-memory files, and migration backup remain private to the worker
+account. No SQLite CLI, external database server, or C library is needed by the
+worker binary.
+
+Routine discovery requests database-only thread listings and uses subscribed
+turn/status events for already-loaded user conversations. Hidden helper threads
+are classified without repeatedly loading their turn history. The independent
+maintenance check still reads current activity before allowing an update.
+
+Transcript statistics keep their scan offsets and partial-line state in SQLite.
+Once indexed, unchanged files are not reread, even after a worker restart or
+in-memory cache eviction; appended data is scanned from the saved offset.
+Replacing or truncating a file, or changing redaction rules, invalidates its
+checkpoint. The first scan of existing history still performs the initial
+indexing work.
+
+Pending-question recovery reads newest turns first and stops after reaching the
+questions the worker already knows. Each attempt reads at most eight fresh
+pages; completed older pages are cached in SQLite so an interrupted attempt can
+make progress on the next inventory cycle. A changed newest page invalidates
+the previous cache, and old unknown questions are never imported.
+
+On the first startup with an older bbolt store, the worker locks and verifies
+the original, copies every record into SQLite, verifies the copied data, and
+keeps a private `state_file.bbolt-backup` before atomically replacing the state
+file. Existing backups are preserved using `.bbolt-backup.1`, `.2`, and so on.
+Commands, event acknowledgements, runtime generations, enrollment identity, and update
+request markers retain their values. A failure before replacement leaves the
+original store unchanged.
+
+Older worker binaries cannot open the converted SQLite store. Restoring the
+legacy backup after the new worker has accepted commands discards newer ledger
+and outbox records and can replay old submissions. Preserve the current state
+and review outcomes before considering that rollback.
+
+For backup, stop the worker cleanly first or use SQLite's online backup API.
+Copying only the main file while WAL is active does not produce a complete
+backup. Read-only SQL connections can inspect the current format, but never
+open the live database with bbolt or delete the lock file. Preserve the original
+first, using the actual configured `state_file`:
 
 ```sh
 systemctl --user stop codex-worker
-cp --preserve=mode,timestamps ~/.config/codex-worker/state/worker.db ~/worker.db.recovery-copy
+cp -p /path/to/configured/worker.db ~/worker.db.recovery-copy
 ```
 
 If the state file cannot open, restore the most recent verified copy, start the

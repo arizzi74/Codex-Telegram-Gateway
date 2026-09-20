@@ -29,10 +29,26 @@ func newHistoryTestEnv(t *testing.T) eventTestEnv {
 }
 
 func historyTestPage() *protocol.HistoryPage {
-	return &protocol.HistoryPage{Limit: protocol.DefaultHistoryLimit, Prompts: []protocol.HistoryPrompt{
-		{TurnID: "old-turn", ItemID: "old-item", Text: "Earlier CLI prompt"},
+	return &protocol.HistoryPage{Limit: protocol.DefaultHistoryLimit, NewestFirst: true, Prompts: []protocol.HistoryPrompt{
 		{TurnID: "new-turn", ItemID: "new-item", Text: "Later Telegram prompt"},
+		{TurnID: "old-turn", ItemID: "old-item", Text: "Earlier CLI prompt"},
 	}, Next: &protocol.HistoryCursor{TurnID: "old-turn", ItemID: "old-item"}}
+}
+
+func TestHistoryValidatesOldAndNewWorkerPagination(t *testing.T) {
+	page := historyTestPage()
+	request := &protocol.HistoryRequest{Limit: protocol.DefaultHistoryLimit}
+	if !validHistoryPage(page, request) {
+		t.Fatal("newest-first page rejected")
+	}
+	page.NewestFirst = false
+	if validHistoryPage(page, request) {
+		t.Fatal("oldest cursor was accepted in the wrong position")
+	}
+	page.Prompts[0], page.Prompts[1] = page.Prompts[1], page.Prompts[0]
+	if !validHistoryPage(page, request) {
+		t.Fatal("legacy chronological worker page rejected")
+	}
 }
 
 func historyTestEvent(t *testing.T, env eventTestEnv, kind string, result protocol.Result) protocol.Event {

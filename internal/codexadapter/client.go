@@ -115,19 +115,20 @@ type Client struct {
 	reqs      chan Request
 	done      chan struct{}
 
-	mu              sync.Mutex
-	pending         map[int64]chan rpcResponse
-	active          map[string]string
-	cause           error
-	ready           bool
-	info            InitializeInfo
-	methods         map[string]bool
-	serverRequests  map[string]Request
-	pid             int
-	localSocket     string
-	updateUncertain bool
-	nextID          atomic.Int64
-	stop            sync.Once
+	mu                     sync.Mutex
+	pending                map[int64]chan rpcResponse
+	active                 map[string]string
+	cause                  error
+	ready                  bool
+	info                   InitializeInfo
+	methods                map[string]bool
+	serverRequests         map[string]Request
+	pid                    int
+	localSocket            string
+	updateUncertain        bool
+	stateDBListUnsupported bool
+	nextID                 atomic.Int64
+	stop                   sync.Once
 }
 
 type outbound struct {

@@ -393,6 +393,10 @@ func (c *Client) track(event Event) {
 		if event.ThreadID != "" && (event.TurnID == "" || c.active[event.ThreadID] == event.TurnID) {
 			delete(c.active, event.ThreadID)
 		}
+	case "thread/status/changed":
+		if event.State == "idle" || event.State == "notLoaded" {
+			delete(c.active, event.ThreadID)
+		}
 	case "thread/deleted":
 		delete(c.active, event.ThreadID)
 		for id, request := range c.serverRequests {
@@ -657,7 +661,7 @@ type ThreadPage struct {
 // ListThreads returns one persisted-thread page. Call ListAllThreads to follow
 // cursors through a bounded discovery scan.
 func (c *Client) ListThreads(ctx context.Context, cursor string, limit int) (ThreadPage, error) {
-	params := map[string]any{"sourceKinds": []string{"cli", "vscode", "exec", "appServer"}}
+	params := map[string]any{"sourceKinds": []string{"cli", "vscode", "exec", "appServer"}, "sortKey": "updated_at", "sortDirection": "desc"}
 	if cursor != "" {
 		params["cursor"] = cursor
 	}
@@ -716,7 +720,7 @@ func (c *Client) listThreads(ctx context.Context, method string, params map[stri
 		Data       []json.RawMessage `json:"data"`
 		NextCursor string            `json:"nextCursor"`
 	}
-	if err := c.request(ctx, method, params, &reply, false); err != nil {
+	if err := c.requestThreadList(ctx, params, &reply); err != nil {
 		return ThreadPage{}, err
 	}
 	page := ThreadPage{NextCursor: reply.NextCursor}
@@ -870,4 +874,13 @@ func (c *Client) matchesActive(threadID, turnID string) bool {
 	defer c.mu.Unlock()
 	known := c.active[threadID]
 	return known == "" || known == turnID
+}
+
+// ActiveTurn returns the last turn identity observed in the live notification
+// stream. Empty means no active turn is known; it is not an idle-safety check
+// for a thread to which this client has never subscribed.
+func (c *Client) ActiveTurn(threadID string) string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.active[threadID]
 }

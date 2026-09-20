@@ -16,7 +16,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/iaia/telegramgw/internal/config"
 	"github.com/iaia/telegramgw/internal/protocol"
-	bolt "go.etcd.io/bbolt"
+	"github.com/iaia/telegramgw/internal/workerdb"
 )
 
 const updateLeaseDuration = 120 * time.Second
@@ -299,7 +299,7 @@ func (a *Agent) clearUpdateLocked() {
 	a.manager.lifecycle.Unlock()
 }
 func (s *Store) checkUpdateIdle() error {
-	return s.db.View(func(tx *bolt.Tx) error {
+	return s.db.View(func(tx *workerdb.Tx) error {
 		if err := tx.Bucket(bucketCommands).ForEach(func(_, value []byte) error {
 			record, err := decodeCommand(value)
 			if err != nil {

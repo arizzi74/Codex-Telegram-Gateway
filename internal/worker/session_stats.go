@@ -28,8 +28,11 @@ const (
 // A separate bounded tail supplies recent activity while older prompt counts
 // catch up. Files are never loaded wholesale or handed to a model.
 type rolloutStatsCache struct {
-	mu      sync.Mutex
-	entries map[string]*rolloutStatsEntry
+	mu        sync.Mutex
+	entries   map[string]*rolloutStatsEntry
+	store     *Store
+	namespace string
+	bytesRead int64
 }
 
 type rolloutStatsEntry struct {
@@ -93,53 +96,63 @@ func (c *rolloutStatsCache) read(home, path, threadID, activeTurn string, redact
 		return nil
 	}
 	defer root.Close()
-	file, err := root.Open(rel)
-	if err != nil {
-		return nil
-	}
-	defer file.Close()
-	stat, err := file.Stat()
+	stat, err := root.Stat(rel)
 	if err != nil || !stat.Mode().IsRegular() {
 		return nil
 	}
-	metaLine, err := bufio.NewReader(io.LimitReader(file, statsLineBytes)).ReadBytes('\n')
-	if err != nil {
-		return nil
-	}
-	var meta struct {
-		Type    string `json:"type"`
-		Payload struct {
-			ID string `json:"id"`
-		} `json:"payload"`
-	}
-	if json.Unmarshal(metaLine, &meta) != nil || meta.Type != "session_meta" || meta.Payload.ID != threadID {
-		return nil
-	}
-
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.entries == nil {
 		c.entries = make(map[string]*rolloutStatsEntry)
 	}
-	key := home + "\x00" + rel + "\x00" + threadID
+	key := c.namespace + "\x00" + home + "\x00" + rel + "\x00" + threadID
 	entry := c.entries[key]
-	if entry == nil || !os.SameFile(entry.fileInfo, stat) || stat.Size() < entry.fileInfo.Size() || (stat.Size() == entry.fileInfo.Size() && !stat.ModTime().Equal(entry.fileInfo.ModTime())) {
-		if entry == nil && len(c.entries) >= statsCacheSize {
-			oldestKey := ""
-			var oldest time.Time
-			for k, e := range c.entries {
-				if oldestKey == "" || e.used.Before(oldest) {
-					oldestKey, oldest = k, e.used
-				}
-			}
-			delete(c.entries, oldestKey)
-		}
+	if entry == nil && c.store != nil {
+		entry = c.store.loadStatsCheckpoint(key, stat)
+	}
+	if entry == nil || !sameStatsFile(entry.fileInfo, stat) || stat.Size() < entry.fileInfo.Size() || (stat.Size() == entry.fileInfo.Size() && !stat.ModTime().Equal(entry.fileInfo.ModTime())) {
 		entry = &rolloutStatsEntry{fileInfo: stat}
 		entry.scan.stats.PromptCount, entry.scan.stats.AssistantMessageCount = statsNumber(0), statsNumber(0)
-		c.entries[key] = entry
 	}
+	if c.entries[key] == nil && len(c.entries) >= statsCacheSize {
+		oldestKey := ""
+		var oldest time.Time
+		for k, e := range c.entries {
+			if oldestKey == "" || e.used.Before(oldest) {
+				oldestKey, oldest = k, e.used
+			}
+		}
+		delete(c.entries, oldestKey)
+	}
+	c.entries[key] = entry
 	entry.used = time.Now().UTC()
 	changed := entry.observed.IsZero() || stat.Size() != entry.fileInfo.Size() || !stat.ModTime().Equal(entry.fileInfo.ModTime())
+	needsRead := changed || entry.offset < stat.Size()
+	var file *os.File
+	if needsRead {
+		file, err = root.Open(rel)
+		if err != nil {
+			return nil
+		}
+		defer file.Close()
+		opened, err := file.Stat()
+		if err != nil || !os.SameFile(stat, opened) || stat.Size() != opened.Size() || !stat.ModTime().Equal(opened.ModTime()) {
+			return nil
+		}
+		metaLine, err := bufio.NewReader(io.LimitReader(file, statsLineBytes)).ReadBytes('\n')
+		if err != nil {
+			return nil
+		}
+		var meta struct {
+			Type    string `json:"type"`
+			Payload struct {
+				ID string `json:"id"`
+			} `json:"payload"`
+		}
+		if json.Unmarshal(metaLine, &meta) != nil || meta.Type != "session_meta" || meta.Payload.ID != threadID {
+			return nil
+		}
+	}
 	if entry.offset < stat.Size() {
 		if _, err := file.Seek(entry.offset, io.SeekStart); err != nil {
 			return nil
@@ -149,6 +162,7 @@ func (c *rolloutStatsCache) read(home, path, threadID, activeTurn string, redact
 			return nil
 		}
 		entry.offset += consumed
+		c.bytesRead += consumed
 		entry.observed = entry.used
 	}
 	entry.fileInfo = stat
@@ -158,7 +172,14 @@ func (c *rolloutStatsCache) read(home, path, threadID, activeTurn string, redact
 			return nil
 		}
 		entry.tail = rolloutStatsScan{discard: start > 0}
-		if _, err := entry.tail.read(io.LimitReader(file, statsTailBytes), redactor); err != nil {
+		consumed, err := entry.tail.read(io.LimitReader(file, statsTailBytes), redactor)
+		if err != nil {
+			return nil
+		}
+		c.bytesRead += consumed
+	}
+	if needsRead && c.store != nil {
+		if err := c.store.saveStatsCheckpoint(key, entry); err != nil {
 			return nil
 		}
 	}
