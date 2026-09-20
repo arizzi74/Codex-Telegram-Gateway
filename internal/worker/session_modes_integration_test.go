@@ -17,6 +17,7 @@ import (
 	"github.com/iaia/telegramgw/internal/codexadapter"
 	"github.com/iaia/telegramgw/internal/codexadapter/codextest"
 	"github.com/iaia/telegramgw/internal/config"
+	"github.com/iaia/telegramgw/internal/gateway"
 	"github.com/iaia/telegramgw/internal/protocol"
 	"github.com/iaia/telegramgw/internal/registry"
 )
@@ -33,7 +34,7 @@ type sessionModeControl struct {
 	sessions map[string]protocol.Session
 }
 
-func newSessionModeControl(t *testing.T) sessionModeControl {
+func newSessionModeControl(t *testing.T, wrap ...func(*telegramRecorder) gateway.TelegramAPI) sessionModeControl {
 	t.Helper()
 	registryStore, probe := controlPlaneRegistry(t)
 	ctx, stop := context.WithCancel(context.Background())
@@ -79,7 +80,11 @@ func newSessionModeControl(t *testing.T) sessionModeControl {
 		return client, err
 	}
 	telegram := &telegramRecorder{}
-	gw := startControlGateway(t, registryStore, telegram, log)
+	var api gateway.TelegramAPI = telegram
+	if len(wrap) != 0 {
+		api = wrap[0](telegram)
+	}
+	gw := startControlGateway(t, registryStore, api, log)
 	slot := &gatewaySlot{}
 	slot.set(gw)
 	agent.newConnection = dialTestServer(slot)

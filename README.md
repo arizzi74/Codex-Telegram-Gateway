@@ -228,7 +228,7 @@ files. The pure-Go SQLite driver also works with `CGO_ENABLED=0`.
 
 ```sh
 go test ./...
-go test -race ./... -timeout=90s
+go test -race ./... -timeout=240s
 make lint
 make build VERSION=0.4.0
 make release VERSION=0.4.0

@@ -8,6 +8,6 @@ go vet ./...
 # Installation, updates and release packaging use native Go executables.
 PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts -p 'test_sqlite_*.py'
 # Allow the isolated SQLite integration suite to finish under race instrumentation.
-go test -race ./... -timeout=180s
+go test -race ./... -timeout=240s
 ./scripts/release.sh
 ./scripts/verify-release.sh

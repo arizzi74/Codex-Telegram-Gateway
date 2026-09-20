@@ -3,6 +3,7 @@ package gateway
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -127,7 +128,7 @@ func (h *Webhook) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
-	_, err = h.store.AcceptTelegram(ctx, in)
+	_, err = h.acceptTelegramReply(ctx, in)
 	if err != nil {
 		h.log.Warn("Telegram update could not be persisted", "telegram_update_id", update.ID, "error", err)
 		http.Error(w, "registry unavailable", 503)
@@ -145,6 +146,26 @@ func (h *Webhook) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				h.log.Debug("callback acknowledgement unavailable")
 			}
 		}()
+	}
+}
+
+// Telegram can deliver a reply before the outbound sender commits its message
+// route. Retry only that transient ambiguity, outside the registry transaction,
+// so the sender can finish its checkpoint. The webhook's existing deadline
+// bounds the wait; a 503 leaves the update available for Telegram to retry.
+func (h *Webhook) acceptTelegramReply(ctx context.Context, in registry.IncomingUpdate) (registry.AcceptResult, error) {
+	for {
+		result, err := h.store.AcceptTelegram(ctx, in)
+		if !errors.Is(err, registry.ErrTelegramReplyPending) {
+			return result, err
+		}
+		timer := time.NewTimer(25 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return registry.AcceptResult{}, ctx.Err()
+		case <-timer.C:
+		}
 	}
 }
 

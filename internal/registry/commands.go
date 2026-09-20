@@ -465,19 +465,22 @@ func acceptInput(ctx context.Context, tx *dbTx, in IncomingUpdate) (AcceptResult
 // acceptReplyInput gives a reply to an input request precedence over normal
 // session routing. The route is recorded when the question is delivered.
 func (s *Store) acceptReplyInput(ctx context.Context, tx *dbTx, in IncomingUpdate) (AcceptResult, error) {
+	if err := awaitTelegramReplyRoute(ctx, tx, in); err != nil {
+		return AcceptResult{}, err
+	}
 	var approvalID *uuid.UUID
 	var questionID *string
 	err := tx.QueryRow(ctx, `SELECT approval_id, question_id FROM bot_message_routes
         WHERE bot_id=$1 AND chat_id=$2 AND message_id=$3`, in.BotID, in.ChatID, in.ReplyToMessageID).
 		Scan(&approvalID, &questionID)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return AcceptResult{}, fmt.Errorf("registry: resolve input reply route: %w", err)
+	}
 	if errors.Is(err, sql.ErrNoRows) || approvalID == nil {
 		if handled, result, err := s.acceptWizardText(ctx, tx, in); handled || err != nil {
 			return result, err
 		}
 		return s.acceptAction(ctx, tx, in)
-	}
-	if err != nil {
-		return AcceptResult{}, fmt.Errorf("registry: resolve input reply route: %w", err)
 	}
 	if len(in.Images) > 0 {
 		return mediaErrorResult("image_input_reply"), nil
@@ -639,6 +642,9 @@ func nextUnansweredQuestion(approval protocol.Approval, answers map[string][]str
 }
 
 func resolveRoute(ctx context.Context, tx *dbTx, in IncomingUpdate) (routeTarget, error) {
+	if err := awaitTelegramReplyRoute(ctx, tx, in); err != nil {
+		return routeTarget{}, err
+	}
 	if in.TopicID > 0 {
 		if target, ok, err := bindingRoute(ctx, tx, in, in.TopicID); err != nil {
 			return routeTarget{}, err
