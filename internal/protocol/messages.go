@@ -295,14 +295,18 @@ type HistoryCursor struct {
 }
 
 type HistoryRequest struct {
-	Limit    int            `json:"limit"`
-	Before   *HistoryCursor `json:"before,omitempty"`
-	Messages bool           `json:"messages,omitempty"`
+	Limit       int            `json:"limit"`
+	Before      *HistoryCursor `json:"before,omitempty"`
+	Messages    bool           `json:"messages,omitempty"`
+	NewestFirst bool           `json:"newest_first,omitempty"`
 }
 
 func (h *HistoryRequest) Validate() error {
 	if h == nil || h.Limit < 1 || h.Limit > MaxHistoryLimit {
 		return errors.New("invalid history page size")
+	}
+	if h.NewestFirst && !h.Messages {
+		return errors.New("newest-first history requires conversation messages")
 	}
 	if h.Before != nil && (strings.TrimSpace(h.Before.TurnID) == "" || strings.TrimSpace(h.Before.ItemID) == "" || len(h.Before.TurnID) > 512 || len(h.Before.ItemID) > 512) {
 		return errors.New("invalid history cursor")
@@ -337,6 +341,9 @@ type HistoryMessage struct {
 	Text      string     `json:"text"`
 	Truncated bool       `json:"truncated,omitempty"`
 	Timestamp *time.Time `json:"timestamp,omitempty"`
+	// TimestampSource is "message" only when the saved message record supplied
+	// its own timestamp. Empty preserves the older turn-time fallback.
+	TimestampSource string `json:"timestamp_source,omitempty"`
 }
 
 type Approval struct {

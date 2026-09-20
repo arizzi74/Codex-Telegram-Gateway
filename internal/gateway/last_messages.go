@@ -19,6 +19,9 @@ func (s *Sender) renderLastMessages(ctx context.Context, row registry.Delivery, 
 		return nil, nil, err
 	}
 	label := sessionLabel(session)
+	if page.NewestFirst {
+		label = "History · " + label
+	}
 	if len(page.Messages) == 0 {
 		if page.Next != nil {
 			return nil, nil, errors.New("render messages: empty page with older cursor")
@@ -44,7 +47,7 @@ func (s *Sender) renderLastMessages(ctx context.Context, row registry.Delivery, 
 		default:
 			return nil, nil, errors.New("render messages: invalid role")
 		}
-		text := "📜 " + label + " · " + role + "\n" + historyTimestamp(message.Timestamp) + "\n\n" + message.Text
+		text := "📜 " + label + " · " + role + "\n" + historyTimestamp(message.Timestamp, message.TimestampSource) + "\n\n" + message.Text
 		if message.Truncated {
 			text += "\n\n[Long message shortened in this history view.]"
 		}
@@ -53,10 +56,13 @@ func (s *Sender) renderLastMessages(ctx context.Context, row registry.Delivery, 
 	if page.Next == nil {
 		return parts, nil, nil
 	}
-	first := page.Messages[0]
-	if page.Next.TurnID != first.TurnID || page.Next.ItemID != first.ItemID {
+	oldest := page.Messages[0]
+	if page.NewestFirst {
+		oldest = page.Messages[len(page.Messages)-1]
+	}
+	if page.Next.TurnID != oldest.TurnID || page.Next.ItemID != oldest.ItemID {
 		return nil, nil, errors.New("render messages: invalid older cursor")
 	}
-	keyboard, err := s.historyOlderKeyboard(ctx, row, event, session.ID, runtime.ID, commandID, &protocol.HistoryRequest{Limit: page.Limit, Before: page.Next, Messages: true})
+	keyboard, err := s.historyOlderKeyboard(ctx, row, event, session.ID, runtime.ID, commandID, &protocol.HistoryRequest{Limit: page.Limit, Before: page.Next, Messages: true, NewestFirst: page.NewestFirst})
 	return parts, keyboard, err
 }

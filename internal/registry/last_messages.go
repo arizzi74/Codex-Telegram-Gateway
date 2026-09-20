@@ -57,8 +57,11 @@ func validLastMessagesPage(page *protocol.HistoryPage, request *protocol.History
 		if !validHistoryCursor(*page.Next) || len(page.Messages) == 0 {
 			return false
 		}
-		first := page.Messages[0]
-		if page.Next.TurnID != first.TurnID || page.Next.ItemID != first.ItemID {
+		oldest := page.Messages[0]
+		if page.NewestFirst {
+			oldest = page.Messages[len(page.Messages)-1]
+		}
+		if page.Next.TurnID != oldest.TurnID || page.Next.ItemID != oldest.ItemID {
 			return false
 		}
 	}

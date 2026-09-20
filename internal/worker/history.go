@@ -18,8 +18,9 @@ const (
 	historyReadTimeout = 20 * time.Second
 )
 
-// readHistory only projects saved input. In particular, it never resumes a
-// cold thread or changes the actor's active command, turn, or session state.
+// New gateways request conversation messages, including Telegram input and
+// final replies. The prompt-only path remains for gateways predating that
+// option. Neither path resumes a thread or changes active execution state.
 func (s *sessionActor) readHistory(client *codexadapter.Client, request *protocol.HistoryRequest) (*protocol.HistoryPage, error) {
 	if request != nil && request.Messages {
 		return s.readLastMessages(client, request)

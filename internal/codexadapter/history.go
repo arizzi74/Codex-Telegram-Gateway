@@ -22,8 +22,8 @@ type UserPrompt struct {
 	TurnID string
 	ItemID string
 	Text   string
-	// Timestamp is the saved turn start, not the history read time. Codex
-	// does not persist individual timestamps for later inputs in a turn.
+	// Timestamp is the saved turn start, not the history read time. App-server
+	// thread items omit the individual message times kept in local rollouts.
 	Timestamp *time.Time
 }
 

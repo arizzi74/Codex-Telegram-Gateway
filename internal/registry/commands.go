@@ -299,7 +299,7 @@ func (s *Store) acceptAction(ctx context.Context, tx *dbTx, in IncomingUpdate) (
 		if err != nil {
 			return AcceptResult{}, err
 		}
-		return acceptHistoryCommand(ctx, tx, in, target, &protocol.HistoryRequest{Limit: limit, Messages: action == "last_messages"})
+		return acceptHistoryCommand(ctx, tx, in, target, &protocol.HistoryRequest{Limit: limit, Messages: true, NewestFirst: action == "history"})
 	case "input_command":
 		if strings.TrimSpace(in.Text) == "" {
 			return AcceptResult{View: "questions", UserID: in.UserID}, nil

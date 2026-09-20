@@ -100,10 +100,14 @@ func TestHistoryDisplaysSeparateUserPromptsAndRequesterScopedPaging(t *testing.T
 func TestHistoryRepeatsOriginalTimestampAcrossLongMessageChunks(t *testing.T) {
 	stamp := time.Date(2026, 9, 20, 10, 11, 12, 0, time.UTC)
 	text := strings.Repeat("Long saved prompt. ", 900)
-	for _, conversation := range []bool{false, true} {
+	for _, source := range []string{"prompt", "turn", "message"} {
+		conversation := source != "prompt"
 		page := &protocol.HistoryPage{Limit: 1, Conversation: conversation}
 		if conversation {
 			page.Messages = []protocol.HistoryMessage{{TurnID: "turn", ItemID: "item", Role: "assistant", Text: text[:15000], Timestamp: &stamp}}
+			if source == "message" {
+				page.Messages[0].TimestampSource = source
+			}
 		} else {
 			page.Prompts = []protocol.HistoryPrompt{{TurnID: "turn", ItemID: "item", Text: text, Timestamp: &stamp}}
 		}
@@ -115,8 +119,12 @@ func TestHistoryRepeatsOriginalTimestampAcrossLongMessageChunks(t *testing.T) {
 		if !conversation {
 			parts = parts[1:]
 		}
+		prefix := "Turn time: "
+		if source == "message" {
+			prefix = "Message time: "
+		}
 		for _, part := range parts {
-			if !strings.Contains(part, "Turn time: 2026-09-20 10:11:12 UTC") || telegramTextLength(part) > 4000 {
+			if !strings.Contains(part, prefix+"2026-09-20 10:11:12 UTC") || telegramTextLength(part) > 4000 {
 				t.Fatalf("history chunk lost timestamp or exceeds Telegram budget: %q", part[:100])
 			}
 		}

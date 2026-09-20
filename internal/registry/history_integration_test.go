@@ -29,14 +29,19 @@ func newHistoryTestEnv(t *testing.T) eventTestEnv {
 }
 
 func historyTestPage() *protocol.HistoryPage {
-	return &protocol.HistoryPage{Limit: protocol.DefaultHistoryLimit, NewestFirst: true, Prompts: []protocol.HistoryPrompt{
-		{TurnID: "new-turn", ItemID: "new-item", Text: "Later Telegram prompt"},
-		{TurnID: "old-turn", ItemID: "old-item", Text: "Earlier CLI prompt"},
+	return &protocol.HistoryPage{Limit: protocol.DefaultHistoryLimit, Conversation: true, NewestFirst: true, Messages: []protocol.HistoryMessage{
+		{TurnID: "new-turn", ItemID: "new-item", Role: "assistant", Text: "Later Codex answer"},
+		{TurnID: "old-turn", ItemID: "old-item", Role: "user", Text: "Earlier Telegram prompt"},
 	}, Next: &protocol.HistoryCursor{TurnID: "old-turn", ItemID: "old-item"}}
 }
 
 func TestHistoryValidatesOldAndNewWorkerPagination(t *testing.T) {
 	page := historyTestPage()
+	page.Conversation, page.Messages = false, nil
+	page.Prompts = []protocol.HistoryPrompt{
+		{TurnID: "new-turn", ItemID: "new-item", Text: "Later CLI prompt"},
+		{TurnID: "old-turn", ItemID: "old-item", Text: "Earlier CLI prompt"},
+	}
 	request := &protocol.HistoryRequest{Limit: protocol.DefaultHistoryLimit}
 	if !validHistoryPage(page, request) {
 		t.Fatal("newest-first page rejected")
@@ -48,6 +53,38 @@ func TestHistoryValidatesOldAndNewWorkerPagination(t *testing.T) {
 	page.Prompts[0], page.Prompts[1] = page.Prompts[1], page.Prompts[0]
 	if !validHistoryPage(page, request) {
 		t.Fatal("legacy chronological worker page rejected")
+	}
+}
+
+func TestHistoryValidatesNewestConversationPagination(t *testing.T) {
+	for _, scenario := range []string{"valid", "empty", "old worker", "wrong order", "wrong next", "last messages", "before", "mixed"} {
+		t.Run(scenario, func(t *testing.T) {
+			request := &protocol.HistoryRequest{Limit: 2, Messages: true, NewestFirst: true}
+			page := &protocol.HistoryPage{Limit: 2, Conversation: true, NewestFirst: true, Messages: []protocol.HistoryMessage{
+				{TurnID: "turn", ItemID: "answer", Role: "assistant", Text: "Most recent answer"},
+				{TurnID: "turn", ItemID: "telegram-input", Role: "user", Text: "Recent Telegram prompt"},
+			}, Next: &protocol.HistoryCursor{TurnID: "turn", ItemID: "telegram-input"}}
+			switch scenario {
+			case "empty":
+				page.Messages, page.Next = nil, nil
+			case "wrong order":
+				page.NewestFirst = false
+			case "old worker":
+				page.NewestFirst = false
+				page.Messages[0], page.Messages[1] = page.Messages[1], page.Messages[0]
+			case "wrong next":
+				page.Next.ItemID = "answer"
+			case "last messages":
+				request.NewestFirst = false
+			case "before":
+				request.Before = page.Next
+			case "mixed":
+				page.Prompts = []protocol.HistoryPrompt{{TurnID: "turn", ItemID: "legacy", Text: "legacy"}}
+			}
+			if got := validHistoryPage(page, request); got != (scenario == "valid" || scenario == "empty" || scenario == "old worker") {
+				t.Fatalf("validHistoryPage=%v", got)
+			}
+		})
 	}
 }
 
@@ -72,11 +109,7 @@ func acceptHistoryTestCommand(t *testing.T, env eventTestEnv, count string) Acce
 }
 
 func TestHistoryFrozenRoutingAndPrivateDeliveryIntegration(t *testing.T) {
-	for _, empty := range []bool{false, true} {
-		name := "prompts"
-		if empty {
-			name = "empty history"
-		}
+	for _, name := range []string{"older worker", "older worker empty", "conversation", "conversation empty"} {
 		t.Run(name, func(t *testing.T) {
 			env := newHistoryTestEnv(t)
 			ctx := context.Background()
@@ -101,7 +134,7 @@ func TestHistoryFrozenRoutingAndPrivateDeliveryIntegration(t *testing.T) {
 				t.Fatalf("pending: %#v, %v", commands, err)
 			}
 			command := commands[0]
-			if command.Operation != protocol.ReadHistory || command.SessionID != env.session.String() || command.ThreadID != "thread-1" || command.RuntimeGeneration != 1 || command.Arguments.History.Limit != protocol.DefaultHistoryLimit || command.Arguments.Text != "" || command.ExpectedTurnID != "" || command.Arguments.Codex != nil {
+			if command.Operation != protocol.ReadHistory || command.SessionID != env.session.String() || command.ThreadID != "thread-1" || command.RuntimeGeneration != 1 || command.Arguments.History.Limit != protocol.DefaultHistoryLimit || !command.Arguments.History.Messages || !command.Arguments.History.NewestFirst || command.Arguments.Text != "" || command.ExpectedTurnID != "" || command.Arguments.Codex != nil {
 				t.Fatalf("history became a prompt or lost its target: %#v", command)
 			}
 			requester, err := env.store.HistoryRequester(ctx, uuid.MustParse(command.ID))
@@ -109,8 +142,12 @@ func TestHistoryFrozenRoutingAndPrivateDeliveryIntegration(t *testing.T) {
 				t.Fatalf("history requester: %d, %v", requester, err)
 			}
 			page := historyTestPage()
-			if empty {
-				page.Prompts, page.Next = nil, nil
+			if strings.HasPrefix(name, "older worker") {
+				page.NewestFirst = false
+				page.Messages[0], page.Messages[1] = page.Messages[1], page.Messages[0]
+			}
+			if strings.HasSuffix(name, "empty") {
+				page.Prompts, page.Messages, page.Next = nil, nil, nil
 			}
 			event := historyTestEvent(t, env, "command_completed", protocol.Result{CommandID: accepted.CommandID, State: "completed", History: page})
 			for range 2 {
@@ -122,6 +159,21 @@ func TestHistoryFrozenRoutingAndPrivateDeliveryIntegration(t *testing.T) {
 			var chat, topic int64
 			if err := env.store.pool.QueryRow(ctx, `SELECT count(*), min(chat_id), min(message_thread_id) FROM telegram_deliveries WHERE event_id=$1`, event.ID).Scan(&count, &chat, &topic); err != nil || count != 1 || chat != 20 || topic != 77 {
 				t.Fatalf("private history delivery: count=%d chat=%d topic=%d err=%v", count, chat, topic, err)
+			}
+			var deliveryJSON, auditJSON []byte
+			if err := env.store.pool.QueryRow(ctx, `SELECT payload FROM telegram_deliveries WHERE event_id=$1`, event.ID).Scan(&deliveryJSON); err != nil {
+				t.Fatal(err)
+			}
+			if err := env.store.pool.QueryRow(ctx, `SELECT payload FROM events WHERE event_id=$1`, event.ID).Scan(&auditJSON); err != nil || !equalEventJSON(auditJSON, event.Data) {
+				t.Fatalf("history delivery normalization altered the audit event: %s, %v", auditJSON, err)
+			}
+			var delivered protocol.Event
+			var deliveredResult protocol.Result
+			if json.Unmarshal(deliveryJSON, &delivered) != nil || json.Unmarshal(delivered.Data, &deliveredResult) != nil || deliveredResult.History == nil || !deliveredResult.History.Conversation || !deliveredResult.History.NewestFirst {
+				t.Fatalf("history was not delivered newest-first: %s", deliveryJSON)
+			}
+			if len(deliveredResult.History.Messages) != 0 && (deliveredResult.History.Messages[0].ItemID != "new-item" || deliveredResult.History.Next == nil || deliveredResult.History.Next.ItemID != "old-item") {
+				t.Fatalf("normalization lost message order or older cursor: %#v", deliveredResult.History)
 			}
 			var state, turn, selected, status string
 			if err := env.store.pool.QueryRow(ctx, "SELECT state, active_turn_id FROM sessions WHERE session_id=$1", env.session).Scan(&state, &turn); err != nil || state != "running" || turn != "current-turn" {
@@ -305,24 +357,24 @@ func TestHistoryResultRejectsMalformedAndUnsolicitedPagesIntegration(t *testing.
 			case "wrong limit":
 				result.History.Limit++
 			case "too many prompts":
-				result.History.Prompts = make([]protocol.HistoryPrompt, 11)
+				result.History.Messages = make([]protocol.HistoryMessage, 11)
 			case "long prompt":
-				result.History.Prompts[0].Text = strings.Repeat("a", 16001)
+				result.History.Messages[0].Text = strings.Repeat("a", 16001)
 			case "large page":
-				result.History.Prompts = nil
+				result.History.Messages = nil
 				for range 5 {
-					result.History.Prompts = append(result.History.Prompts, protocol.HistoryPrompt{TurnID: "turn", ItemID: uuid.NewString(), Text: strings.Repeat("a", 16000)})
+					result.History.Messages = append(result.History.Messages, protocol.HistoryMessage{TurnID: "turn", ItemID: uuid.NewString(), Role: "user", Text: strings.Repeat("a", 16000)})
 				}
 			case "duplicate prompt":
-				result.History.Prompts[1] = result.History.Prompts[0]
+				result.History.Messages[1] = result.History.Messages[0]
 			case "empty prompt":
-				result.History.Prompts[0].Text = " "
+				result.History.Messages[0].Text = " "
 			case "long id":
-				result.History.Prompts[0].ItemID = strings.Repeat("a", 513)
+				result.History.Messages[0].ItemID = strings.Repeat("a", 513)
 			case "wrong next":
 				result.History.Next.ItemID = "unrelated-item"
 			case "empty next":
-				result.History.Prompts = nil
+				result.History.Messages = nil
 			case "turn mutation":
 				kind, result.TurnID, result.History = "turn_started", "forged-turn", nil
 			case "session mutation":

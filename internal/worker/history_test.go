@@ -36,9 +36,9 @@ func TestHistoryCommandPreservesIdleColdAndRunningSessions(t *testing.T) {
 			active := actor.activeCommand
 			server.SetThreads([]map[string]any{historyThread(session.ThreadID, "cli prompt")}, nil)
 			command := agentCommand(runtime, session, protocol.ReadHistory)
-			command.Arguments.History = &protocol.HistoryRequest{Limit: 10}
+			command.Arguments.History = &protocol.HistoryRequest{Messages: true, NewestFirst: true, Limit: 10}
 			result := runHistoryCommand(t, actor, command)
-			if result.State != CommandCompleted || result.Result == nil || result.Result.History == nil || len(result.Result.History.Prompts) != 1 || result.Result.History.Prompts[0].Text != "cli prompt" {
+			if result.State != CommandCompleted || result.Result == nil || result.Result.History == nil || len(result.Result.History.Messages) != 1 || result.Result.History.Messages[0].Text != "cli prompt" {
 				t.Fatalf("history result = %#v", result)
 			}
 			if result.Result.TurnID != "" || result.Result.Session != nil || result.Result.Text != "" {
@@ -74,7 +74,7 @@ func TestHistoryCommandFailuresPreserveSessionAndHideRawErrors(t *testing.T) {
 			session := protocol.Session{ID: uuid.NewString(), RuntimeID: runtime.ID, ThreadID: "thread-history", CWD: runtime.DefaultCWD, State: "running", Loaded: true, ActiveTurnID: "live-turn"}
 			actor := &sessionActor{agent: a, runtime: runtime, session: session, activeCommand: &protocol.Command{ID: "live-command"}, finalText: "keep final"}
 			command := agentCommand(runtime, session, protocol.ReadHistory)
-			command.Arguments.History = &protocol.HistoryRequest{Limit: 10}
+			command.Arguments.History = &protocol.HistoryRequest{Messages: true, NewestFirst: true, Limit: 10}
 			server.SetThreads([]map[string]any{historyThread(session.ThreadID, "saved")}, nil)
 			wantCode, wantReads := protocol.CodexUnavailable, 1
 			switch scenario {
@@ -134,26 +134,26 @@ func TestHistoryDefaultReadsNewestPromptsWithoutTraversingOldTurns(t *testing.T)
 	}
 	server.SetThreads([]map[string]any{{"id": session.ThreadID, "turns": turns}}, nil)
 	command := agentCommand(runtime, session, protocol.ReadHistory)
-	command.Arguments.History = &protocol.HistoryRequest{Limit: protocol.DefaultHistoryLimit}
+	command.Arguments.History = &protocol.HistoryRequest{Messages: true, NewestFirst: true, Limit: protocol.DefaultHistoryLimit}
 	record := runHistoryCommand(t, actor, command)
 	page := record.Result.History
-	if page == nil || page.Limit != 2 || len(page.Prompts) != 2 || page.Prompts[0].Text != "prompt 99" || page.Prompts[1].Text != "prompt 98" || page.Next == nil || page.Next.TurnID != "turn-098" {
+	if page == nil || page.Limit != 2 || len(page.Messages) != 2 || page.Messages[0].Text != "prompt 99" || page.Messages[1].Text != "prompt 98" || page.Next == nil || page.Next.TurnID != "turn-098" {
 		t.Fatalf("default history did not start at latest prompt: %#v", page)
 	}
 	if got := countCall(historyOperationCalls(server.Calls()), "thread/turns/list"); got != 3 {
 		t.Fatalf("reading two prompts traversed old conversation history: got %d requests, want 3 including older-page check", got)
 	}
-	if page.Prompts[0].Timestamp == nil || page.Prompts[0].Timestamp.Unix() != 1800441099 {
-		t.Fatalf("history did not preserve saved timestamp: %#v", page.Prompts[0])
+	if page.Messages[0].Timestamp == nil || page.Messages[0].Timestamp.Unix() != 1800441099 {
+		t.Fatalf("history did not preserve saved timestamp: %#v", page.Messages[0])
 	}
 	// New input after the first page must not move the exclusive older cursor.
 	newTurn := map[string]any{"id": "turn-100", "items": []map[string]any{{"id": "user", "type": "userMessage", "content": []map[string]any{{"type": "text", "text": "prompt 100"}}}}}
 	server.SetThreads([]map[string]any{{"id": session.ThreadID, "turns": append(turns, newTurn)}}, nil)
 	command = agentCommand(runtime, session, protocol.ReadHistory)
-	command.Arguments.History = &protocol.HistoryRequest{Limit: 2, Before: page.Next}
+	command.Arguments.History = &protocol.HistoryRequest{Messages: true, NewestFirst: true, Limit: 2, Before: page.Next}
 	record = runHistoryCommand(t, actor, command)
 	page = record.Result.History
-	if page == nil || len(page.Prompts) != 2 || page.Prompts[0].Text != "prompt 97" || page.Prompts[1].Text != "prompt 96" {
+	if page == nil || len(page.Messages) != 2 || page.Messages[0].Text != "prompt 97" || page.Messages[1].Text != "prompt 96" {
 		t.Fatalf("older page skipped or repeated prompts after append: %#v", page)
 	}
 }
@@ -205,35 +205,7 @@ func TestHistoryFiltersRecordedGatewayInputByTurnAndCount(t *testing.T) {
 	}
 }
 
-func TestHistoryPagesAreNewestFirstExclusiveAndStable(t *testing.T) {
-	prompts := make([]codexadapter.UserPrompt, 6)
-	for i := range prompts {
-		stamp := time.Date(2026, 9, 20, 10, i, 0, 0, time.UTC)
-		prompts[i] = codexadapter.UserPrompt{TurnID: "turn", ItemID: fmt.Sprintf("item-%d", i), Text: fmt.Sprintf("prompt %d", i), Timestamp: &stamp}
-	}
-	first, err := historyPage(prompts[:5], &protocol.HistoryRequest{Limit: 2}, nil)
-	if err != nil || len(first.Prompts) != 2 || first.Prompts[0].ItemID != "item-4" || first.Prompts[1].ItemID != "item-3" || first.Next == nil || first.Next.ItemID != "item-3" {
-		t.Fatalf("first page = %#v, %v", first, err)
-	}
-	if first.Prompts[0].Timestamp == nil || !first.Prompts[0].Timestamp.Equal(*prompts[4].Timestamp) {
-		t.Fatalf("history lost original turn time: %#v", first.Prompts[0])
-	}
-	// A new prompt arriving does not shift the boundary of older pages.
-	second, err := historyPage(prompts, &protocol.HistoryRequest{Limit: 2, Before: first.Next}, nil)
-	if err != nil || len(second.Prompts) != 2 || second.Prompts[0].ItemID != "item-2" || second.Prompts[1].ItemID != "item-1" || second.Next == nil || second.Next.ItemID != "item-1" {
-		t.Fatalf("second page = %#v, %v", second, err)
-	}
-	last, err := historyPage(prompts, &protocol.HistoryRequest{Limit: 2, Before: second.Next}, nil)
-	if err != nil || len(last.Prompts) != 1 || last.Prompts[0].ItemID != "item-0" || last.Next != nil {
-		t.Fatalf("last page = %#v, %v", last, err)
-	}
-	_, err = historyPage(prompts, &protocol.HistoryRequest{Limit: 2, Before: &protocol.HistoryCursor{TurnID: "unrelated", ItemID: "item-3"}}, nil)
-	if err == nil {
-		t.Fatal("unknown cursor restarted history instead of rejecting it")
-	}
-}
-
-func TestHistoryFiltersBeforePagingAndRedacting(t *testing.T) {
+func TestHistoryIncludesRecordedTelegramInputBeforePagingAndRedacting(t *testing.T) {
 	a, runtime, server, cleanup := testAgent(t)
 	defer cleanup()
 	session := protocol.Session{ID: uuid.NewString(), RuntimeID: runtime.ID, ThreadID: "thread-history", CWD: runtime.DefaultCWD, State: "idle", Loaded: true}
@@ -253,68 +225,11 @@ func TestHistoryFiltersBeforePagingAndRedacting(t *testing.T) {
 		t.Fatal(err)
 	}
 	command := agentCommand(runtime, session, protocol.ReadHistory)
-	command.Arguments.History = &protocol.HistoryRequest{Limit: 2}
+	command.Arguments.History = &protocol.HistoryRequest{Messages: true, NewestFirst: true, Limit: 2}
 	record := runHistoryCommand(t, actor, command)
 	page := record.Result.History
-	if page == nil || len(page.Prompts) != 2 || page.Prompts[0].Text != "new CLI" || page.Prompts[1].Text != "[hidden]" || page.Next == nil || page.Next.ItemID != "item-1" {
+	if page == nil || len(page.Messages) != 2 || page.Messages[0].Text != "[hidden]" || page.Messages[1].Text != "new CLI" || page.Next == nil || page.Next.ItemID != "item-2" {
 		t.Fatalf("wrong order of filtering, paging, redaction: %#v", page)
-	}
-}
-
-func TestHistoryRejectsUnusableMessageIdentities(t *testing.T) {
-	for _, prompt := range []codexadapter.UserPrompt{
-		{TurnID: "", ItemID: "item", Text: "saved"},
-		{TurnID: "turn", ItemID: " ", Text: "saved"},
-		{TurnID: strings.Repeat("t", 513), ItemID: "item", Text: "saved"},
-		{TurnID: "turn", ItemID: strings.Repeat("i", 513), Text: "saved"},
-	} {
-		if _, err := historyPage([]codexadapter.UserPrompt{prompt}, &protocol.HistoryRequest{Limit: 10}, nil); err == nil {
-			t.Fatal("accepted a prompt that cannot have a valid pagination cursor")
-		}
-	}
-}
-
-func TestHistoryRedactsAndBoundsPagesWithoutSkippingOlderPrompts(t *testing.T) {
-	redactor, err := auth.NewRedactor([]string{`secret-value`}, "[hidden]")
-	if err != nil {
-		t.Fatal(err)
-	}
-	prompts := make([]codexadapter.UserPrompt, 7)
-	for i := range prompts {
-		prompts[i] = codexadapter.UserPrompt{TurnID: "turn", ItemID: fmt.Sprint(i), Text: "secret-value" + strings.Repeat("界", historyPromptRunes)}
-	}
-	request := &protocol.HistoryRequest{Limit: 50}
-	var visited []string
-	for {
-		page, err := historyPage(prompts, request, redactor)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if len(page.Prompts) == 0 {
-			t.Fatal("history failed to make progress")
-		}
-		total := 0
-		for _, prompt := range page.Prompts {
-			if !prompt.Truncated || !utf8.ValidString(prompt.Text) || !strings.HasPrefix(prompt.Text, "[hidden]") || strings.Contains(prompt.Text, "secret-value") {
-				t.Fatalf("invalid redacted/truncated prompt %q", prompt.ItemID)
-			}
-			n := utf8.RuneCountInString(prompt.Text)
-			if n > historyPromptRunes {
-				t.Fatalf("prompt size = %d", n)
-			}
-			total += n
-			visited = append(visited, prompt.ItemID)
-		}
-		if total > historyPageRunes {
-			t.Fatalf("page size = %d", total)
-		}
-		if page.Next == nil {
-			break
-		}
-		request.Before = page.Next
-	}
-	if want := []string{"6", "5", "4", "3", "2", "1", "0"}; !reflect.DeepEqual(visited, want) {
-		t.Fatalf("pagination skipped or repeated input: %#v", visited)
 	}
 }
 
@@ -356,4 +271,100 @@ func historyOperationCalls(calls []codextest.Call) []codextest.Call {
 		}
 	}
 	return operations
+}
+
+// Reproduce a long-lived turn with old CLI input and a recent Telegram prompt:
+// a history request must include that prompt and the latest final answer.
+func TestHistoryDefaultIncludesLatestTelegramPromptAndCodexReply(t *testing.T) {
+	a, runtime, server, cleanup := testAgent(t)
+	defer cleanup()
+	session := protocol.Session{ID: uuid.NewString(), RuntimeID: runtime.ID, ThreadID: "long-lived", CWD: runtime.DefaultCWD, State: "idle"}
+	actor := &sessionActor{agent: a, runtime: runtime, session: session}
+	thread := historyThread(session.ThreadID, "morning CLI prompt", "recent Telegram prompt")
+	turn := thread["turns"].([]map[string]any)[0]
+	turn["items"] = append(turn["items"].([]map[string]any), map[string]any{"id": "answer", "type": "agentMessage", "phase": "final_answer", "text": "latest Codex reply"})
+	server.SetThreads([]map[string]any{thread}, nil)
+	prompt := agentCommand(runtime, session, protocol.Steer)
+	prompt.Arguments.Text, prompt.ExpectedTurnID = "recent Telegram prompt", "turn"
+	if _, err := a.store.Receive(prompt); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.store.SetCommandState(prompt.ID, CommandCompleted, &protocol.Result{TurnID: "turn"}); err != nil {
+		t.Fatal(err)
+	}
+	command := agentCommand(runtime, session, protocol.ReadHistory)
+	command.Arguments.History = &protocol.HistoryRequest{Messages: true, NewestFirst: true, Limit: protocol.DefaultHistoryLimit}
+	page := runHistoryCommand(t, actor, command).Result.History
+	if page == nil || !page.Conversation || !page.NewestFirst || len(page.Messages) != 2 || page.Messages[0].Text != "latest Codex reply" || page.Messages[1].Text != "recent Telegram prompt" || page.Next == nil || page.Next.ItemID != "item-1" {
+		t.Fatalf("history skipped latest conversation: %#v", page)
+	}
+	if got := countCall(historyOperationCalls(server.Calls()), "thread/turns/list"); got != 1 {
+		t.Fatalf("history made %d reads for latest two messages in one turn", got)
+	}
+}
+
+func TestHistoryBoundsAndRedactsWithoutSkippingOlderMessages(t *testing.T) {
+	a, runtime, server, cleanup := testAgent(t)
+	defer cleanup()
+	session := protocol.Session{ID: uuid.NewString(), RuntimeID: runtime.ID, ThreadID: "long-messages", CWD: runtime.DefaultCWD, State: "idle"}
+	actor := &sessionActor{agent: a, runtime: runtime, session: session}
+	var err error
+	a.redactor, err = auth.NewRedactor([]string{"secret-value"}, "[hidden]")
+	if err != nil {
+		t.Fatal(err)
+	}
+	texts := make([]string, 7)
+	for i := range texts {
+		texts[i] = "secret-value" + strings.Repeat("界", historyPromptRunes)
+	}
+	server.SetThreads([]map[string]any{historyThread(session.ThreadID, texts...)}, nil)
+	request := &protocol.HistoryRequest{Messages: true, NewestFirst: true, Limit: 50}
+	var visited []string
+	for pages := 0; pages < 5; pages++ {
+		command := agentCommand(runtime, session, protocol.ReadHistory)
+		command.Arguments.History = request
+		page := runHistoryCommand(t, actor, command).Result.History
+		if page == nil || len(page.Messages) == 0 {
+			t.Fatal("history made no progress")
+		}
+		total := 0
+		for _, message := range page.Messages {
+			if !message.Truncated || !utf8.ValidString(message.Text) || !strings.HasPrefix(message.Text, "[hidden]") || strings.Contains(message.Text, "secret-value") {
+				t.Fatalf("invalid message %q", message.ItemID)
+			}
+			total += utf8.RuneCountInString(message.Text)
+			visited = append(visited, message.ItemID)
+		}
+		if total > historyPageRunes {
+			t.Fatalf("page exceeds budget: %d", total)
+		}
+		if page.Next == nil {
+			break
+		}
+		request = &protocol.HistoryRequest{Messages: true, NewestFirst: true, Limit: 50, Before: page.Next}
+	}
+	want := []string{"item-6", "item-5", "item-4", "item-3", "item-2", "item-1", "item-0"}
+	if !reflect.DeepEqual(visited, want) {
+		t.Fatalf("history skipped/repeated messages: %v", visited)
+	}
+}
+
+func TestHistoryLegacyGatewayRequestStillReceivesPromptPage(t *testing.T) {
+	a, runtime, server, cleanup := testAgent(t)
+	defer cleanup()
+	session := protocol.Session{ID: uuid.NewString(), RuntimeID: runtime.ID, ThreadID: "legacy-history", CWD: runtime.DefaultCWD, State: "idle"}
+	actor := &sessionActor{agent: a, runtime: runtime, session: session}
+	server.SetThreads([]map[string]any{historyThread(session.ThreadID, "old", "new")}, nil)
+	command := agentCommand(runtime, session, protocol.ReadHistory)
+	command.Arguments.History = &protocol.HistoryRequest{Limit: 1}
+	page := runHistoryCommand(t, actor, command).Result.History
+	if page == nil || page.Conversation || len(page.Messages) != 0 || len(page.Prompts) != 1 || page.Prompts[0].Text != "new" || page.Next == nil || page.Next.ItemID != "item-1" {
+		t.Fatalf("old gateway request got incompatible history: %#v", page)
+	}
+	command = agentCommand(runtime, session, protocol.ReadHistory)
+	command.Arguments.History = &protocol.HistoryRequest{Limit: 1, Before: page.Next}
+	page = runHistoryCommand(t, actor, command).Result.History
+	if page == nil || page.Conversation || len(page.Prompts) != 1 || page.Prompts[0].Text != "old" || page.Next != nil {
+		t.Fatalf("old gateway cursor got incompatible history: %#v", page)
+	}
 }

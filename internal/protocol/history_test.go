@@ -34,6 +34,7 @@ func TestReadHistoryRequiresFrozenTargetAndBoundedPagination(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, request := range []*HistoryRequest{nil, {}, {Limit: 51}, {Limit: -1},
+		{Limit: 2, NewestFirst: true},
 		{Limit: 10, Before: &HistoryCursor{TurnID: "turn"}},
 		{Limit: 10, Before: &HistoryCursor{TurnID: "\n", ItemID: "item"}},
 		{Limit: 10, Before: &HistoryCursor{TurnID: "turn", ItemID: strings.Repeat("x", 513)}},

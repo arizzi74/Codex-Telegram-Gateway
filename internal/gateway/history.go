@@ -59,9 +59,9 @@ func (s *Sender) renderHistory(ctx context.Context, row registry.Delivery, event
 		if page.Next != nil {
 			return nil, nil, errors.New("render history: empty page with older cursor")
 		}
-		return []string{header + "\n\nNo saved Codex prompts to show. Prompts already recorded through Telegram are omitted."}, nil, nil
+		return []string{header + "\n\nNo saved Codex prompts to show in this older prompt-only history view. Run /tghistory again to include Telegram messages and Codex replies."}, nil, nil
 	}
-	parts := []string{header + "\n\nSaved prompts, newest first. Prompts already recorded through Telegram are omitted; use /tglastmessages to include them and Codex replies."}
+	parts := []string{header + "\n\nSaved prompts, newest first. This is an older prompt-only history view. Run /tghistory again to include Telegram messages and Codex replies."}
 	for i := range page.Prompts {
 		index := i
 		if !page.NewestFirst {
@@ -84,18 +84,22 @@ func (s *Sender) renderHistory(ctx context.Context, row registry.Delivery, event
 	return parts, keyboard, err
 }
 
-func historyTimestamp(timestamp *time.Time) string {
-	if timestamp == nil || timestamp.IsZero() {
-		return "Turn date/time unavailable"
+func historyTimestamp(timestamp *time.Time, source ...string) string {
+	label := "Turn"
+	if len(source) != 0 && source[0] == "message" {
+		label = "Message"
 	}
-	return "Turn time: " + timestamp.UTC().Format("2006-01-02 15:04:05 UTC")
+	if timestamp == nil || timestamp.IsZero() {
+		return label + " date/time unavailable"
+	}
+	return label + " time: " + timestamp.UTC().Format("2006-01-02 15:04:05 UTC")
 }
 
 // Long saved messages can span several Telegram messages. Repeat the identity
 // and timestamp on each continuation so none can be mistaken for new input.
 func splitHistoryPart(part string, limit int) []string {
 	header, body, found := strings.Cut(part, "\n\n")
-	if !found || !strings.Contains(header, "Turn ") || telegramTextLength(part) <= limit {
+	if !found || (!strings.Contains(header, "Turn ") && !strings.Contains(header, "Message ")) || telegramTextLength(part) <= limit {
 		return SplitText(part, limit)
 	}
 	prefix := header + "\n\n"
@@ -140,9 +144,5 @@ func (s *Sender) historyOlderKeyboard(ctx context.Context, row registry.Delivery
 	if err != nil {
 		return nil, err
 	}
-	label := "Older prompts"
-	if request.Messages {
-		label = "Older messages"
-	}
-	return &TelegramKeyboard{Rows: [][]TelegramButton{{{Text: label, Data: token}}}}, nil
+	return &TelegramKeyboard{Rows: [][]TelegramButton{{{Text: "Older messages", Data: token}}}}, nil
 }

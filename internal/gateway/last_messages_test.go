@@ -60,6 +60,36 @@ func TestLastMessagesDefaultReplyIsOneMessageAndEmptyViewIsExplicit(t *testing.T
 	}
 }
 
+func TestHistoryConversationDisplaysNewestFirstAndKeepsHistoryPaging(t *testing.T) {
+	stamp := time.Date(2026, 9, 20, 20, 11, 12, 0, time.UTC)
+	page := &protocol.HistoryPage{Limit: 2, Conversation: true, NewestFirst: true, Messages: []protocol.HistoryMessage{
+		{TurnID: "latest-turn", ItemID: "answer", Role: "assistant", Text: "Most recent Codex answer", Timestamp: &stamp, TimestampSource: "message"},
+		{TurnID: "latest-turn", ItemID: "telegram-prompt", Role: "user", Text: "Recent Telegram question"},
+	}, Next: &protocol.HistoryCursor{TurnID: "latest-turn", ItemID: "telegram-prompt"}}
+	store, row := historyRenderFixture(t, page)
+	sender := NewSender(store, nil, nil, SenderOptions{BotID: "bot", OwnerID: 42})
+	parts, keyboard, err := sender.renderDeliveryParts(t.Context(), row)
+	if err != nil || len(parts) != 2 || !strings.Contains(parts[0], "History · auth-fix · 🤖 Codex") || !strings.Contains(parts[0], "Most recent Codex answer") || !strings.Contains(parts[1], "Recent Telegram question") {
+		t.Fatalf("newest conversation history=%#v, %v", parts, err)
+	}
+	if strings.Contains(strings.Join(parts, ""), "omitted") || keyboard == nil || keyboard.Rows[0][0].Text != "Older messages" || len(store.callbacks) != 1 {
+		t.Fatalf("unexpected history explanation or paging: %#v, %#v", parts, keyboard)
+	}
+	if !strings.Contains(parts[0], "Message time: 2026-09-20 20:11:12 UTC") {
+		t.Fatalf("verified message timestamp lost its source: %q", parts[0])
+	}
+	callback := store.callbacks[0]
+	if callback.Action != "history" || callback.History == nil || !callback.History.Messages || !callback.History.NewestFirst || callback.History.Limit != 2 || callback.History.Before == nil || *callback.History.Before != *page.Next {
+		t.Fatalf("history paging lost newest-first mode: %#v", callback)
+	}
+
+	page.Next = &protocol.HistoryCursor{TurnID: "latest-turn", ItemID: "answer"}
+	_, row = historyRenderFixture(t, page)
+	if _, _, err := sender.renderDeliveryParts(t.Context(), row); err == nil {
+		t.Fatal("newest message incorrectly accepted as older-history cursor")
+	}
+}
+
 func TestLastMessagesRenderRejectsMalformedPages(t *testing.T) {
 	for _, scenario := range []string{"role", "duplicate", "overlimit", "mixed", "oversize", "cursor"} {
 		t.Run(scenario, func(t *testing.T) {

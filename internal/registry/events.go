@@ -651,6 +651,11 @@ func validHistoryPage(page *protocol.HistoryPage, request *protocol.HistoryReque
 		return false
 	}
 	if page.Conversation {
+		// Older workers ignore the newest-first request. Accept their
+		// chronological pages and reorder only the private delivery copy.
+		if page.NewestFirst && !request.NewestFirst {
+			return false
+		}
 		return validLastMessagesPage(page, request)
 	}
 	if len(page.Messages) != 0 || len(page.Prompts) > page.Limit {
@@ -833,6 +838,11 @@ func applyApproval(ctx context.Context, tx *dbTx, workerID, runtimeID, sessionID
 }
 
 func enqueueEventDeliveries(ctx context.Context, tx *dbTx, eventID uuid.UUID, event protocol.Event, sessionID, runtimeID, commandID *uuid.UUID) error {
+	var err error
+	event, err = historyDeliveryEvent(ctx, tx, event, commandID)
+	if err != nil {
+		return err
+	}
 	payload, err := json.Marshal(event)
 	if err != nil {
 		return fmt.Errorf("registry: encode delivery payload: %w", err)
