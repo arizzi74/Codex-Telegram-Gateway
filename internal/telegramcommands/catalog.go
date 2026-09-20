@@ -28,7 +28,7 @@ var gateway = []Command{
 
 var codex = []Command{
 	{"status", "Codex: session settings, context and usage"},
-	{"model", "Codex: list models or set model and effort"},
+	{"model", "Codex: choose model and reasoning effort"},
 	{"reasoning", "Codex: inspect or set reasoning effort"},
 	{"permissions", "Codex: choose session permissions"},
 	{"approvals", "Codex: inspect or change approval policy"},

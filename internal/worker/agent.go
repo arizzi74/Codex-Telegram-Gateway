@@ -784,7 +784,9 @@ func codexCommandNeedsIdle(name, args string) bool {
 	case "permissions":
 		choice := strings.ToLower(args)
 		return choice != "" && choice != "cancel" && choice != "full-access" && choice != "danger-full-access"
-	case "rename", "model", "reasoning", "approvals", "plan", "personality", "memories", "goal":
+	case "model":
+		return !modelMenuReadOnly(args)
+	case "rename", "reasoning", "approvals", "plan", "personality", "memories", "goal":
 		return args != ""
 	case "fast":
 		return args != "" && args != "status"

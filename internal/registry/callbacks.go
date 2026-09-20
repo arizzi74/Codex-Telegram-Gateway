@@ -64,6 +64,17 @@ func (s *Store) CreateCallback(ctx context.Context, callback Callback) (string, 
 			return "", err
 		}
 	}
+	if callback.Action == "model" {
+		if callback.SessionID == uuid.Nil || callback.RuntimeID == uuid.Nil || callback.Generation <= 0 || !protocol.ValidModelMenuArgs(callback.Decision) {
+			return "", errors.New("registry: invalid model callback")
+		}
+		if err := validateSettingsCallbackOrigin(ctx, s.pool, "model", callback.QuestionID, callback.SessionID, callback.RuntimeID.String(), callback.Generation, callback.BotID, callback.UserID, callback.ChatID, callback.TopicID); err != nil {
+			return "", err
+		}
+		if err := validateModelMenuChoice(ctx, s.pool, callback.QuestionID, callback.Decision); err != nil {
+			return "", err
+		}
+	}
 	if isWizardCallback(callback.Action) && (callback.WizardID == "" || callback.WizardRevision <= 0 || callback.Offset < 0 || callback.Offset > 1_000_000 || len(callback.Path) > 4096) {
 		return "", errors.New("registry: invalid wizard callback")
 	}
@@ -175,6 +186,8 @@ func (s *Store) consumeCallback(ctx context.Context, tx *dbTx, in IncomingUpdate
 		return result, nil
 	case "permissions":
 		return consumePermissionsCallback(ctx, tx, in, context, sessionID)
+	case "model":
+		return consumeModelCallback(ctx, tx, in, context, sessionID)
 	case "history":
 		if sessionID == nil || context.RuntimeID == "" || context.Generation <= 0 || context.History.Validate() != nil {
 			return AcceptResult{}, ErrCallbackInvalid

@@ -115,6 +115,7 @@ Gateway commands begin with `/tg`: `/tgstatus`, `/tgdeletesession`,
 Unprefixed commands control Codex: `/status` shows the selected session's model,
 reasoning, recorded context/token usage and limits; `/model`, `/compact`,
 `/review`, `/fork`, `/rename`, and the other commands appear in the bot menu.
+Use `/model` to choose a model with buttons, then choose its reasoning effort.
 Use `/help` for Codex commands and `/tghelp` for gateway controls. Terminal-only
 commands explain how to use the attached CLI. The bot shows “typing…” while
 Codex is preparing a response and stops when a reply or an input request arrives.
@@ -137,8 +138,9 @@ and tool calls appear temporarily while the turn runs. The latest tool call
 appears in a monospace message that each subsequent tool call replaces.
 Temporary messages are removed after the final response is delivered. Switching
 sessions removes the previous session's progress and shows the selected session's
-latest progress if it is running. Only the selected session's turn responses and
-typing appear by default. Questions and approvals from any session still arrive,
+latest progress if it is running, after the connection confirmation is delivered.
+Only the selected session's turn responses and typing appear by default.
+Questions and approvals from any session still arrive,
 labelled with its name; answering them does not change your selection.
 Use `/tgquestions` (or `/tginput` without arguments) to reopen pending questions
 and approvals from any session that the worker received while running.

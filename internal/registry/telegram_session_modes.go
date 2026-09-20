@@ -265,12 +265,20 @@ func reconcileTelegramSelection(ctx context.Context, tx *dbTx, in IncomingUpdate
 // before each Telegram API call. Private command responses and questions retain
 // their frozen destinations, independently of the current selection.
 func (s *Store) SuppressTelegramDelivery(ctx context.Context, id string) (bool, error) {
-	var suppress bool
-	err := s.pool.QueryRow(ctx, `SELECT delivery.status IN ('cancelled','sent') OR delivery.visibility_revoked=1 OR NOT `+eventVisibleSQL()+` FROM telegram_deliveries delivery LEFT JOIN events event ON event.event_id=delivery.event_id WHERE delivery.delivery_id=$1`, id).Scan(&suppress)
+	if suppress, err := s.SuppressProgressDelivery(ctx, id); err != nil || suppress {
+		return suppress, err
+	}
+	var suppress, awaitingSelection bool
+	err := s.pool.QueryRow(ctx, `SELECT delivery.status IN ('cancelled','sent') OR delivery.visibility_revoked=1 OR NOT `+eventVisibleSQL()+`,
+        delivery.kind IN ('agent_progress_message','tool_progress_message') AND `+pendingSelectionConfirmationSQL+`
+        FROM telegram_deliveries delivery LEFT JOIN events event ON event.event_id=delivery.event_id WHERE delivery.delivery_id=$1`, id).Scan(&suppress, &awaitingSelection)
 	if err != nil || suppress {
 		return suppress, err
 	}
-	return s.SuppressProgressDelivery(ctx, id)
+	if awaitingSelection {
+		return false, ErrTelegramSelectionPending
+	}
+	return false, nil
 }
 
 // A session-addressed answer can satisfy exactly one current question. Ambiguous

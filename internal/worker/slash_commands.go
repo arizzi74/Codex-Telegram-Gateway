@@ -67,8 +67,7 @@ func (s *sessionActor) executeCodexCommand(ctx context.Context, client *codexada
 		text, err := codexUsage(ctx, client, s.session.ThreadID)
 		return protocol.Result{Text: text}, err
 	case "model":
-		text, err := s.codexModel(ctx, client, args)
-		return protocol.Result{Text: text}, err
+		return s.codexModelMenu(ctx, client, args)
 	case "reasoning":
 		text, err := s.codexReasoning(ctx, client, args)
 		return protocol.Result{Text: text}, err

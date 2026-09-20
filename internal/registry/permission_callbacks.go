@@ -20,6 +20,12 @@ func validPermissionDecision(decision string) bool {
 func validatePermissionCallbackOrigin(ctx context.Context, db interface {
 	QueryRow(context.Context, string, ...any) *dbRow
 }, commandID string, sessionID uuid.UUID, runtimeID string, generation int64, botID string, userID, chatID, topicID int64) error {
+	return validateSettingsCallbackOrigin(ctx, db, "permissions", commandID, sessionID, runtimeID, generation, botID, userID, chatID, topicID)
+}
+
+func validateSettingsCallbackOrigin(ctx context.Context, db interface {
+	QueryRow(context.Context, string, ...any) *dbRow
+}, name, commandID string, sessionID uuid.UUID, runtimeID string, generation int64, botID string, userID, chatID, topicID int64) error {
 	id, err := uuid.Parse(commandID)
 	if err != nil || id == uuid.Nil {
 		return ErrCallbackInvalid
@@ -27,12 +33,12 @@ func validatePermissionCallbackOrigin(ctx context.Context, db interface {
 	var valid bool
 	err = db.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM commands
         WHERE command_id=$1 AND source='telegram' AND operation='codex_command'
-          AND json_extract(payload, '$.arguments.codex.name')='permissions'
+          AND json_extract(payload, '$.arguments.codex.name')=$9
           AND session_id=$2 AND runtime_id=$3 AND runtime_generation=$4
           AND telegram_bot_id=$5 AND telegram_user_id=$6 AND telegram_chat_id=$7
-          AND telegram_message_thread_id=$8)`, id, sessionID, runtimeID, generation, botID, userID, chatID, topicID).Scan(&valid)
+          AND telegram_message_thread_id=$8)`, id, sessionID, runtimeID, generation, botID, userID, chatID, topicID, name).Scan(&valid)
 	if err != nil {
-		return fmt.Errorf("registry: validate permissions callback origin: %w", err)
+		return fmt.Errorf("registry: validate settings callback origin: %w", err)
 	}
 	if !valid {
 		return ErrCallbackInvalid

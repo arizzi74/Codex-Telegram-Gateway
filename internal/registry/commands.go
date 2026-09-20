@@ -863,6 +863,9 @@ func bindingMatches(ctx context.Context, tx *dbTx, in IncomingUpdate, sessionID 
 }
 
 func queueUIResponse(ctx context.Context, tx *dbTx, in IncomingUpdate, result AcceptResult) error {
+	if err := retireSelectionConfirmations(ctx, tx, in, result); err != nil {
+		return err
+	}
 	if result.View == "queued" && result.CommandID != "" {
 		var prompt bool
 		if err := tx.QueryRow(ctx, `SELECT operation='start_turn' FROM commands WHERE command_id=$1`, result.CommandID).Scan(&prompt); err != nil {

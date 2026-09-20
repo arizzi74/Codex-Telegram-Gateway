@@ -86,7 +86,7 @@ becoming model prompts.
 | --- | --- |
 | `/status` | Session model, reasoning, workspace, recorded context and token counts, configuration defaults and account limits. Historical counters and policies are labeled as recorded values. |
 | `/usage` | Account usage and rate limits reported by Codex. |
-| `/model [MODEL [EFFORT]]` | List available models or update the session model. |
+| `/model [MODEL [EFFORT]]` | Open model buttons followed by reasoning-effort buttons, or update the session model directly. |
 | `/reasoning [EFFORT]` | Inspect or change reasoning effort. |
 | `/permissions` | Open buttons for the session's Codex permission presets and allowed custom profiles. |
 | `/approvals [POLICY]` | Inspect or change session approval policy. |
@@ -113,6 +113,15 @@ becoming model prompts.
 | `/debug_config` | Show selected configuration diagnostics without secrets. |
 | `/quit`, `/exit` | Leave the Telegram selection; the supervised runtime stays available. |
 | `/help` | List Codex commands and guidance. |
+
+The `/model` menu lists the models available to the session's Codex runtime.
+Choose a model to see its supported reasoning efforts, then choose an effort to
+apply both settings together. **Back to models** returns to the model list and
+**Cancel** leaves the settings unchanged. Models without reasoning choices offer an
+**Apply model** button. Opening and browsing the menu works during a running
+turn; wait for it to finish before applying a change. The menu stays tied to the
+session where you opened it, even if you select another session before answering.
+Text shortcuts such as `/model MODEL high` and `/reasoning high` remain available.
 
 The `/permissions` menu offers **Ask for approval**, **Full Access**, and
 **Read Only**, subject to the runtime's managed requirements. **Approve for me**
@@ -274,8 +283,10 @@ refreshing stops. API failures do not fail the underlying command.
 
 By default, turn progress and completion messages follow the selected session.
 Switching from A to B removes A's temporary messages and restores the latest
-commentary and tool message for B if its turn is running. A subsequent completion
-from A stays hidden. Final answers already displayed remain in the chat; use
+commentary and tool message for B if its turn is running. The **Connected to**
+confirmation is delivered before B's commentary or tool messages, including
+progress arriving while the confirmation is being retried. A subsequent
+completion from A stays hidden. Final answers already displayed remain in the chat; use
 `/tglastmessages` to read a session's saved responses later.
 
 Questions and approvals are an exception: they arrive even when another session

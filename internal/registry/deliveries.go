@@ -36,6 +36,7 @@ var ErrDeliveryLeaseChanged = errors.New("registry: delivery lease changed")
 // A crashed sender's lease becomes eligible again after 30 seconds.
 // Only the latest event of each progress kind at each destination is eligible.
 // An existing send of that kind must finish or expire before its replacement.
+// Newly selected progress also waits for the connection confirmation to send.
 func (s *Store) ClaimDeliveries(ctx context.Context, limit int) ([]Delivery, error) {
 	if limit < 1 || limit > 100 {
 		return nil, errors.New("registry: invalid delivery claim limit")
@@ -57,7 +58,7 @@ func (s *Store) ClaimDeliveries(ctx context.Context, limit int) ([]Delivery, err
 	rows, err := tx.Query(ctx, `WITH claimed AS (
  SELECT delivery.delivery_id FROM telegram_deliveries delivery
  WHERE delivery.status IN ('pending','failed','sending') AND delivery.visibility_revoked=0 AND delivery.next_attempt_at <= `+sqliteNow+`
-   AND (delivery.kind NOT IN ('agent_progress_message','tool_progress_message') OR (NOT `+newerProgressDeliverySQL+` AND NOT EXISTS (
+   AND (delivery.kind NOT IN ('agent_progress_message','tool_progress_message') OR (NOT `+pendingSelectionConfirmationSQL+` AND NOT `+newerProgressDeliverySQL+` AND NOT EXISTS (
      SELECT 1 FROM events progress
      JOIN events active_event ON active_event.runtime_id=progress.runtime_id
        AND active_event.runtime_generation=progress.runtime_generation AND active_event.session_id=progress.session_id

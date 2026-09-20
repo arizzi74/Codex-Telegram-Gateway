@@ -23,21 +23,27 @@ func acceptModeUpdate(t *testing.T, env eventTestEnv, id int64, action, target, 
 }
 func sessionModeDeliveries(t *testing.T, store *Store) []Delivery {
 	t.Helper()
-	all, err := store.ClaimDeliveries(context.Background(), 100)
-	if err != nil {
-		t.Fatal(err)
-	}
 	var result []Delivery
-	for _, d := range all {
-		if d.Kind == "ui_response" {
-			if err := store.MarkDeliverySent(context.Background(), d.ID, 901, "", "", ""); err != nil {
-				t.Fatal(err)
+	for {
+		all, err := store.ClaimDeliveries(context.Background(), 100)
+		if err != nil {
+			t.Fatal(err)
+		}
+		confirmed := false
+		for _, d := range all {
+			if d.Kind == "ui_response" {
+				if err := store.MarkDeliverySent(context.Background(), d.ID, 901, "", "", ""); err != nil {
+					t.Fatal(err)
+				}
+				confirmed = true
+			} else {
+				result = append(result, d)
 			}
-		} else {
-			result = append(result, d)
+		}
+		if !confirmed {
+			return result
 		}
 	}
-	return result
 }
 func TestTelegramSessionSwitchRestoresProgressAndSuppressesOldFinalIntegration(t *testing.T) {
 	env := newEventTestEnv(t)
