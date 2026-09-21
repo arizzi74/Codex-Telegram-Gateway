@@ -28,8 +28,9 @@ by isolated fixtures:
 - Recent-message history includes user and final Codex messages, preserves
   pagination in the requested order, includes Telegram input, and excludes
   temporary progress, tools and reasoning. `/tghistory` defaults to the latest
-  two messages newest first; `/tglastmessages` retains its chronological window
-  and one-message default. Old workers return an actionable upgrade explanation.
+  two messages; `/tglastmessages` defaults to one. Both show each recent page in
+  original conversation order, with the newest message last. Old workers return
+  an actionable upgrade explanation.
 - Scoped menus retain Codex commands, remove retired gateway commands, and
   refresh aliases after changes. Revoked destinations lose their stored menus;
   an unavailable destination cannot block other menu updates.

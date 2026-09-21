@@ -31,7 +31,14 @@ func (s *Sender) renderLastMessages(ctx context.Context, row registry.Delivery, 
 	parts := make([]string, 0, len(page.Messages))
 	total := 0
 	seen := make(map[protocol.HistoryCursor]bool)
-	for _, message := range page.Messages {
+	// Worker pages may arrive newest first for backward pagination. Display
+	// each requested window in conversation order, with its newest entry last.
+	for i := range page.Messages {
+		index := i
+		if page.NewestFirst {
+			index = len(page.Messages) - 1 - i
+		}
+		message := page.Messages[index]
 		cursor := protocol.HistoryCursor{TurnID: message.TurnID, ItemID: message.ItemID}
 		length := utf8.RuneCountInString(message.Text)
 		total += length

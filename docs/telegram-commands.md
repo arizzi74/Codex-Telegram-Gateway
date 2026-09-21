@@ -14,8 +14,8 @@ menu names, so `/debug_config` is the menu spelling of `/debug-config`; both wor
 | `/tgupdateworkers` | Queue an update check for every worker; install a newer release and restart after its turns finish. |
 | `/tgsessions [runtime]` | Browse sessions, select one, or create a session with **New session**. |
 | `/tgstatus [session]` | Show gateway connectivity, queued commands and approvals. |
-| `/tghistory [count]` | Show saved user and Codex messages for the selected session, including Telegram input; newest first, defaults to 2, maximum 50 per page. |
-| `/tglastmessages [count]` | Show the last saved user or Codex message; request 1–50 messages from both sides. |
+| `/tghistory [count]` | Show saved user and Codex messages for the selected session, including Telegram input; original order with newest last, defaults to 2, maximum 50 per page. |
+| `/tglastmessages [count]` | Show the last saved user or Codex message; request 1–50 messages from both sides, in original order with newest last. |
 | `/tgmultisession [on\|off]` | Toggle messages from all sessions, or explicitly enable/disable them. |
 | `/tgdisconnect` | Clear the selection. |
 | `/tgdeletesession [runtime]` | Choose a Codex session to delete while keeping its working directory and files. |
@@ -195,16 +195,17 @@ resend them after the upgrade.
 
 ## Conversation history
 
-Use `/tghistory` to display the selected session's last two saved messages,
-newest first. This includes your prompts from Telegram or the CLI and final
-Codex replies. `/tghistory 25` requests a larger page; use **Older messages** to
-continue backwards. Each message is labelled with its session, role, and date
+Use `/tghistory` to display the selected session's last two saved messages in
+their original conversation order, with the newest last. This includes your
+prompts from Telegram or the CLI and final Codex replies. `/tghistory 25`
+requests a larger page; use **Older messages** to continue backwards. Each
+message is labelled with its session, role, and date
 and time. The bot remains the Telegram sender; these are copies of saved
 conversation messages. Commentary, reasoning and tool calls are not included.
 
 Use `/tglastmessages` for the last saved message, or `/tglastmessages 10` for the
-last ten. This command includes the same user and Codex messages but shows them
-oldest first within the recent page. Both commands accept counts from 1 to 50.
+last ten. Both commands include the same user and Codex messages and show each
+recent page oldest first. Both commands accept counts from 1 to 50.
 Reading history never submits prompts again, starts a turn, resumes a cold
 thread, or interrupts work already running. An unavailable history or an older
 worker produces an explanatory error.
@@ -235,7 +236,7 @@ contents are not read. Long messages are shortened with an explicit notice, and
 large pages may contain fewer entries to stay within message limits. Configured
 output redaction also applies to history. During a rolling upgrade, workers
 that already support `/tglastmessages` can supply the full conversation; the
-gateway also orders their history pages newest first. Exact message timestamps
+gateway also orders their history pages oldest first. Exact message timestamps
 require the updated worker.
 
 This is an on-demand view of stored conversation messages. CLI-only slash

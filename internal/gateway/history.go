@@ -61,10 +61,10 @@ func (s *Sender) renderHistory(ctx context.Context, row registry.Delivery, event
 		}
 		return []string{header + "\n\nNo saved Codex prompts to show in this older prompt-only history view. Run /tghistory again to include Telegram messages and Codex replies."}, nil, nil
 	}
-	parts := []string{header + "\n\nSaved prompts, newest first. This is an older prompt-only history view. Run /tghistory again to include Telegram messages and Codex replies."}
+	parts := []string{header + "\n\nSaved prompts in their original order, newest last. This is an older prompt-only history view. Run /tghistory again to include Telegram messages and Codex replies."}
 	for i := range page.Prompts {
 		index := i
-		if !page.NewestFirst {
+		if page.NewestFirst {
 			index = len(page.Prompts) - 1 - i
 		}
 		prompt := page.Prompts[index]

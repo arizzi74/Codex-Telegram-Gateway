@@ -72,9 +72,9 @@ func TestHistoryDisplaysSeparateUserPromptsAndRequesterScopedPaging(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(parts) != 3 || !strings.Contains(parts[0], "auth-fix") || !strings.Contains(parts[0], "newest first") ||
-		parts[2] != "👤 You · Codex\nTurn date/time unavailable\n\n/status is saved text" ||
-		!strings.HasPrefix(parts[1], "👤 You · Codex\nTurn time: 2026-09-20 12:05:06 UTC\n\n") || !strings.Contains(parts[1], "shortened") {
+	if len(parts) != 3 || !strings.Contains(parts[0], "auth-fix") || !strings.Contains(parts[0], "newest last") ||
+		parts[1] != "👤 You · Codex\nTurn date/time unavailable\n\n/status is saved text" ||
+		!strings.HasPrefix(parts[2], "👤 You · Codex\nTurn time: 2026-09-20 12:05:06 UTC\n\n") || !strings.Contains(parts[2], "shortened") {
 		t.Fatalf("unexpected history messages: %#v", parts)
 	}
 	if strings.Contains(strings.Join(parts, ""), "SECRET_HISTORY_VALUE") {
@@ -144,15 +144,15 @@ func TestHistoryEmptyPageAndInvalidPage(t *testing.T) {
 	}
 }
 
-func TestHistoryLegacyWorkerPageRendersNewestFirst(t *testing.T) {
+func TestHistoryLegacyWorkerPageKeepsOriginalOrder(t *testing.T) {
 	page := &protocol.HistoryPage{Limit: 2, Prompts: []protocol.HistoryPrompt{
 		{TurnID: "turn-1", ItemID: "old", Text: "Earlier input"},
 		{TurnID: "turn-2", ItemID: "new", Text: "Latest input"},
 	}}
 	store, row := historyRenderFixture(t, page)
 	parts, _, err := NewSender(store, nil, nil).renderDeliveryParts(t.Context(), row)
-	if err != nil || len(parts) != 3 || !strings.HasSuffix(parts[1], "Latest input") || !strings.HasSuffix(parts[2], "Earlier input") {
-		t.Fatalf("legacy worker page not rendered newest first: %#v, %v", parts, err)
+	if err != nil || len(parts) != 3 || !strings.HasSuffix(parts[1], "Earlier input") || !strings.HasSuffix(parts[2], "Latest input") {
+		t.Fatalf("legacy worker page not rendered in original order: %#v, %v", parts, err)
 	}
 }
 

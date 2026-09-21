@@ -132,10 +132,11 @@ commands explain how to use the attached CLI. The bot shows “typing…” whil
 Codex is preparing a response and stops when a reply or an input request arrives.
 See [Telegram commands](docs/telegram-commands.md) for syntax and supported actions.
 
-Use `/tghistory` to display the last two saved conversation messages, newest
-first, including your Telegram or CLI prompts and Codex replies. Set a count
-with `/tghistory 10` and use **Older messages** to continue backwards. Each
-message has its saved date and time, with a turn-time label when an exact message
+Use `/tghistory` to display the last two saved conversation messages in their
+original order, with the newest last, including your Telegram or CLI prompts
+and Codex replies. Set a count with `/tghistory 10` and use **Older messages**
+to continue backwards. Each message has its saved date and time, with a
+turn-time label when an exact message
 time is unavailable. Reading history does not run the prompts again.
 Use `/tglastmessages` for the last saved user or Codex message, or
 `/tglastmessages 10` for the last ten messages displayed oldest first within
