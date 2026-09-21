@@ -275,6 +275,9 @@ func (a *Agent) actorForThread(runtimeID, threadID string) *sessionActor {
 }
 
 func (a *Agent) onEvent(runtime protocol.Runtime, event codexadapter.Event) {
+	if event.Kind == "thread_deleted" {
+		a.manager.observeNativeThreadDeleted(runtime, event.ThreadID)
+	}
 	if event.Thread != nil && !event.Thread.UserSession() {
 		return
 	}

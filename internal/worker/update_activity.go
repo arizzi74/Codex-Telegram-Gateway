@@ -12,17 +12,21 @@ import (
 // serialize access with the attachment proxy lock, including observation before
 // forwarding a message. An attached but settled connection is not itself work.
 type nativeActivity struct {
-	uncertain bool
-	requests  map[string]*nativeRequest
-	approvals map[string]*nativeApproval
-	resolved  map[string]struct{}
-	turns     map[nativeTurn]struct{}
-	completed map[nativeTurn]struct{}
-	compact   map[string]struct{}
-	threads   map[string]struct{}
-	processes map[string]struct{}
-	exited    map[string]struct{}
-	hooks     map[nativeTurn]struct{}
+	uncertain         bool
+	uncertaintyReason string
+	observationGap    string
+	queueThreads      map[string]struct{}
+	deletedThread     string
+	requests          map[string]*nativeRequest
+	approvals         map[string]*nativeApproval
+	resolved          map[string]struct{}
+	turns             map[nativeTurn]struct{}
+	completed         map[nativeTurn]struct{}
+	compact           map[string]struct{}
+	threads           map[string]struct{}
+	processes         map[string]struct{}
+	exited            map[string]struct{}
+	hooks             map[nativeTurn]struct{}
 }
 
 type nativeTurn struct{ thread, turn string }
@@ -39,11 +43,44 @@ type nativeApproval struct {
 func (a *nativeActivity) idle() bool { return a.idleError() == nil }
 
 func (a *nativeActivity) idleError() error {
+	if a.uncertain || a.observationGap != "" || len(a.queueThreads) > 0 {
+		return errors.New("worker update: native CLI activity could not be verified")
+	}
+	return a.settledError()
+}
+
+// settledError distinguishes accepted work and irreversible ambiguity from a
+// missed thread-state observation. Only the proxy may clear an observation gap,
+// after fencing new requests and independently verifying the runtime is idle.
+func (a *nativeActivity) settledError() error {
 	switch {
 	case a.uncertain:
 		return errors.New("worker update: native CLI activity could not be verified")
 	case len(a.requests) > 0:
 		return errors.New("worker update: native CLI requests are still in flight")
+	default:
+		return a.acceptedWorkError()
+	}
+}
+
+// A lost metadata read cannot create background work. Dropping its unanswered
+// RPC after the transport closes is safe only when the proxy separately fences
+// admission and verifies fresh runtime state. Mutating requests, including
+// otherwise synchronous mutations, never receive this exception.
+func (a *nativeActivity) disconnectedError() error {
+	if a.uncertain {
+		return errors.New("worker update: native CLI activity could not be verified")
+	}
+	for _, request := range a.requests {
+		if !nativeReadOnlyRequest(request.method) {
+			return errors.New("worker update: native CLI requests are still in flight")
+		}
+	}
+	return a.acceptedWorkError()
+}
+
+func (a *nativeActivity) acceptedWorkError() error {
+	switch {
 	case len(a.approvals) > 0:
 		return errors.New("worker update: native CLI approvals or input are pending")
 	case len(a.turns) > 0 || len(a.compact) > 0 || len(a.threads) > 0 || len(a.processes) > 0 || len(a.hooks) > 0:
@@ -51,6 +88,55 @@ func (a *nativeActivity) idleError() error {
 	default:
 		return nil
 	}
+}
+
+func (a *nativeActivity) queueChanged(thread string) {
+	if thread == "" {
+		a.markUncertain("native queue activity has no thread ID")
+		return
+	}
+	if a.queueThreads == nil {
+		a.queueThreads = make(map[string]struct{})
+	}
+	a.queueThreads[thread] = struct{}{}
+	a.requireVerification("native queued inputs need fresh verification")
+}
+
+func (a *nativeActivity) requireVerification(reason string) {
+	if a.observationGap == "" {
+		a.observationGap = reason
+	}
+}
+
+func (a *nativeActivity) markUncertain(reason string) {
+	a.uncertain = true
+	if a.uncertaintyReason == "" {
+		a.uncertaintyReason = reason
+	}
+}
+
+// Protocol method names aid diagnostics without logging arbitrary message
+// content. Unexpected long names, whitespace, controls, or path syntax are
+// omitted; request IDs, parameters, and response bodies are never included.
+func nativeMethodReason(reason, method string) string {
+	if len(method) == 0 || len(method) > 96 || method[0] == '/' || method[len(method)-1] == '/' {
+		return reason
+	}
+	previousSlash := false
+	for _, c := range method {
+		if c == '/' {
+			if previousSlash {
+				return reason
+			}
+			previousSlash = true
+			continue
+		}
+		previousSlash = false
+		if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_') {
+			return reason
+		}
+	}
+	return reason + ": " + method
 }
 
 func (a *nativeActivity) clientMessage(raw []byte) {
@@ -62,13 +148,16 @@ func (a *nativeActivity) serverMessage(raw []byte) {
 }
 
 func (a *nativeActivity) message(raw []byte, client bool) {
+	// The proxy consumes this signal immediately under its observation lock.
+	// A later packet must never repeat an earlier successful deletion.
+	a.deletedThread = ""
 	object, ok := nativeObject(raw)
 	if !ok {
-		a.uncertain = true
+		a.markUncertain("malformed or ambiguous JSON-RPC object")
 		return
 	}
 	if version, present := object["jsonrpc"]; present && nativeString(version) != "2.0" {
-		a.uncertain = true
+		a.markUncertain("unsupported JSON-RPC version")
 		return
 	}
 	idRaw, hasID := object["id"]
@@ -77,20 +166,20 @@ func (a *nativeActivity) message(raw []byte, client bool) {
 	_, hasResult := object["result"]
 	_, hasError := object["error"]
 	if hasID && !validID {
-		a.uncertain = true
+		a.markUncertain("invalid JSON-RPC request ID")
 		return
 	}
 	if hasMethod {
 		method := nativeString(methodRaw)
 		if method == "" || hasResult || hasError {
-			a.uncertain = true
+			a.markUncertain("invalid or ambiguous JSON-RPC method message")
 			return
 		}
 		params := map[string]json.RawMessage{}
 		if raw, present := object["params"]; present {
 			params, ok = nativeObject(raw)
 			if !ok {
-				a.uncertain = true
+				a.markUncertain("malformed or ambiguous JSON-RPC parameters")
 				return
 			}
 		}
@@ -98,17 +187,17 @@ func (a *nativeActivity) message(raw []byte, client bool) {
 			if hasID {
 				a.clientRequest(id, method, params)
 			} else if method != "initialized" {
-				a.uncertain = true
+				a.markUncertain(nativeMethodReason("unrecognized native CLI notification", method))
 			}
 		} else if hasID {
 			if !nativeServerRequest(method) {
-				a.uncertain = true
+				a.markUncertain(nativeMethodReason("unrecognized native server request", method))
 			}
 			if a.approvals == nil {
 				a.approvals = make(map[string]*nativeApproval)
 			}
 			if _, duplicate := a.approvals[id]; duplicate {
-				a.uncertain = true
+				a.markUncertain("duplicate native server request ID")
 			}
 			a.approvals[id] = &nativeApproval{parent: nativeTurn{nativeString(params["threadId"]), nativeString(params["turnId"])}}
 			delete(a.resolved, id)
@@ -118,19 +207,19 @@ func (a *nativeActivity) message(raw []byte, client bool) {
 		return
 	}
 	if !hasID || hasResult == hasError {
-		a.uncertain = true
+		a.markUncertain("invalid or ambiguous JSON-RPC response")
 		return
 	}
 	if hasError {
 		if _, valid := nativeObject(object["error"]); !valid {
-			a.uncertain = true
+			a.markUncertain("malformed JSON-RPC error response")
 			return
 		}
 	}
 	if client {
 		if approval, pending := a.approvals[id]; pending {
 			if approval.answered {
-				a.uncertain = true
+				a.markUncertain("duplicate native CLI response")
 			}
 			// Writing an answer is not confirmation that Codex consumed it.
 			// Keep the approval until the server resolves it or its parent turn
@@ -138,7 +227,7 @@ func (a *nativeActivity) message(raw []byte, client bool) {
 			approval.answered = true
 		} else {
 			if _, wasResolved := a.resolved[id]; !wasResolved {
-				a.uncertain = true
+				a.markUncertain("unmatched native CLI response ID")
 			}
 			delete(a.resolved, id)
 		}
@@ -146,7 +235,7 @@ func (a *nativeActivity) message(raw []byte, client bool) {
 	}
 	request, pending := a.requests[id]
 	if !pending {
-		a.uncertain = true
+		a.markUncertain("unmatched native server response ID")
 		return
 	}
 	delete(a.requests, id)
@@ -160,36 +249,36 @@ func (a *nativeActivity) clientRequest(id, method string, params map[string]json
 		a.requests = make(map[string]*nativeRequest)
 	}
 	if _, duplicate := a.requests[id]; duplicate {
-		a.uncertain = true
+		a.markUncertain("duplicate native CLI request ID")
 		return
 	}
 	request := &nativeRequest{method: method, thread: nativeString(params["threadId"]), process: nativeString(params["processHandle"])}
 	a.requests[id] = request
 	switch method {
-	case "turn/start", "turn/steer", "review/start", "thread/compact/start":
+	case "turn/start", "turn/steer", "review/start", "thread/queue/start", "thread/queue/add", "thread/queue/update", "thread/queue/list", "thread/queue/delete", "thread/queue/reorder", "thread/compact/start":
 		if request.thread == "" {
-			a.uncertain = true
+			a.markUncertain("accepted turn or compaction request has no thread ID")
 		}
 		if method == "thread/compact/start" {
 			if _, waiting := a.compact[request.thread]; waiting {
-				a.uncertain = true
+				a.markUncertain("overlapping native CLI compactions")
 			}
 			for otherID, other := range a.requests {
 				if otherID != id && other.method == method && other.thread == request.thread {
-					a.uncertain = true
+					a.markUncertain("overlapping native CLI compaction requests")
 				}
 			}
 		}
 	case "process/spawn":
 		if request.process == "" {
-			a.uncertain = true
+			a.markUncertain("native process spawn has no handle")
 		}
 		if _, active := a.processes[request.process]; active {
-			a.uncertain = true
+			a.markUncertain("native process spawn reuses an active handle")
 		}
 		for otherID, other := range a.requests {
 			if otherID != id && other.method == method && other.process == request.process {
-				a.uncertain = true
+				a.markUncertain("overlapping native process spawn requests")
 			}
 		}
 		delete(a.exited, request.process)
@@ -198,10 +287,13 @@ func (a *nativeActivity) clientRequest(id, method string, params map[string]json
 
 func (a *nativeActivity) response(request *nativeRequest, raw json.RawMessage) {
 	switch request.method {
-	case "turn/start", "turn/steer", "review/start":
+	case "turn/start", "turn/steer", "review/start", "thread/queue/start":
+		if request.method == "thread/queue/start" {
+			a.queueChanged(request.thread)
+		}
 		result, ok := nativeObject(raw)
 		if !ok {
-			a.uncertain = true
+			a.markUncertain("malformed accepted turn response")
 			return
 		}
 		thread := request.thread
@@ -214,18 +306,18 @@ func (a *nativeActivity) response(request *nativeRequest, raw json.RawMessage) {
 		if turnRaw, present := result["turn"]; present {
 			turn, valid := nativeObject(turnRaw)
 			if !valid {
-				a.uncertain = true
+				a.markUncertain("malformed turn in accepted response")
 				return
 			}
 			if turnID != "" && turnID != nativeString(turn["id"]) {
-				a.uncertain = true
+				a.markUncertain("conflicting turn IDs in accepted response")
 				return
 			}
 			turnID, status = nativeString(turn["id"]), nativeString(turn["status"])
 		}
 		key := nativeTurn{thread, turnID}
 		if key.thread == "" || key.turn == "" {
-			a.uncertain = true
+			a.markUncertain("accepted turn response has no thread or turn ID")
 			return
 		}
 		if nativeTerminalStatus(status) {
@@ -233,6 +325,13 @@ func (a *nativeActivity) response(request *nativeRequest, raw json.RawMessage) {
 		} else if _, finished := a.completed[key]; !finished {
 			a.startTurn(key)
 		}
+	case "thread/queue/add", "thread/queue/update", "thread/queue/list", "thread/queue/delete", "thread/queue/reorder":
+		// These acknowledgements report acceptance, not drainage. Queue change
+		// notifications contain only threadId, so preparation must query the
+		// queue after fencing clients instead of inferring it from turn events.
+		// A list also discovers queues created before this client attached;
+		// deleting or reordering one entry does not prove the rest are gone.
+		a.queueChanged(request.thread)
 	case "thread/compact/start":
 		// Compaction may start and finish before its empty RPC reply arrives.
 		if request.observedTurn.turn == "" {
@@ -251,17 +350,23 @@ func (a *nativeActivity) response(request *nativeRequest, raw json.RawMessage) {
 	case "thread/start", "thread/resume", "thread/fork", "thread/read", "thread/rollback", "thread/revert":
 		result, ok := nativeObject(raw)
 		if !ok {
-			a.uncertain = true
+			a.markUncertain("malformed native thread response")
 			return
 		}
 		if threadRaw, present := result["thread"]; present {
 			a.threadSnapshot(threadRaw)
 		}
+	case "thread/delete":
+		if _, ok := nativeObject(raw); !ok || request.thread == "" {
+			a.markUncertain("native thread deletion response has no valid thread identity")
+			return
+		}
+		a.deletedThread = request.thread
 	default:
 		if !nativeSynchronousRequest(request.method) {
-			// In particular shellCommand, queued turns, realtime sessions, and
+			// In particular shellCommand, realtime sessions, and
 			// unknown future operations can outlive an acknowledgement.
-			a.uncertain = true
+			a.markUncertain(nativeMethodReason("unrecognized asynchronous native CLI request", request.method))
 		}
 	}
 }
@@ -272,7 +377,7 @@ func (a *nativeActivity) notification(method string, params map[string]json.RawM
 		turn, ok := nativeObject(params["turn"])
 		key := nativeTurn{nativeString(params["threadId"]), nativeString(turn["id"])}
 		if !ok || key.thread == "" || key.turn == "" {
-			a.uncertain = true
+			a.markUncertain("malformed native turn lifecycle notification")
 			return
 		}
 		if method == "turn/completed" {
@@ -282,7 +387,7 @@ func (a *nativeActivity) notification(method string, params map[string]json.RawM
 		for _, request := range a.requests {
 			if request.method == "thread/compact/start" && request.thread == key.thread {
 				if request.observedTurn.turn != "" && request.observedTurn != key {
-					a.uncertain = true
+					a.markUncertain("compaction observed conflicting turn identities")
 				}
 				request.observedTurn = key
 			}
@@ -292,19 +397,28 @@ func (a *nativeActivity) notification(method string, params map[string]json.RawM
 	case "serverRequest/resolved":
 		id, ok := nativeRequestID(params["requestId"])
 		if !ok {
-			a.uncertain = true
+			a.markUncertain("native server-request resolution has no valid request ID")
 			return
 		}
 		a.resolveApproval(id)
 	case "thread/status/changed":
 		a.threadStatus(nativeString(params["threadId"]), params["status"])
+	case "thread/queue/changed":
+		a.queueChanged(nativeString(params["threadId"]))
+	case "thread/deleted":
+		thread := nativeString(params["threadId"])
+		if thread == "" {
+			a.markUncertain("native thread deletion notification has no thread ID")
+			return
+		}
+		a.deletedThread = thread
 	case "thread/started":
 		a.threadSnapshot(params["thread"])
 	case "hook/started", "hook/completed":
 		run, ok := nativeObject(params["run"])
 		key := nativeTurn{nativeString(params["threadId"]), nativeString(run["id"])}
 		if !ok || key.thread == "" || key.turn == "" {
-			a.uncertain = true
+			a.markUncertain("malformed native hook lifecycle notification")
 			return
 		}
 		if method == "hook/completed" {
@@ -321,14 +435,14 @@ func (a *nativeActivity) notification(method string, params map[string]json.RawM
 		// received before the compact RPC reply usable as settling evidence.
 		key := nativeTurn{nativeString(params["threadId"]), nativeString(params["turnId"])}
 		if key.thread == "" || key.turn == "" {
-			a.uncertain = true
+			a.markUncertain("native compaction completion has no thread or turn ID")
 			return
 		}
 		delete(a.compact, key.thread)
 		for _, request := range a.requests {
 			if request.method == "thread/compact/start" && request.thread == key.thread {
 				if request.observedTurn.turn != "" && request.observedTurn != key {
-					a.uncertain = true
+					a.markUncertain("compaction completion has conflicting turn identity")
 				}
 				request.observedTurn = key
 			}
@@ -336,7 +450,7 @@ func (a *nativeActivity) notification(method string, params map[string]json.RawM
 	case "process/exited":
 		process := nativeString(params["processHandle"])
 		if process == "" {
-			a.uncertain = true
+			a.markUncertain("native process exit has no handle")
 			return
 		}
 		delete(a.processes, process)
@@ -346,7 +460,7 @@ func (a *nativeActivity) notification(method string, params map[string]json.RawM
 		a.exited[process] = struct{}{}
 	default:
 		if !nativeInformationalNotification(method) {
-			a.uncertain = true
+			a.markUncertain(nativeMethodReason("unrecognized native server notification", method))
 		}
 	}
 }
@@ -391,7 +505,7 @@ func (a *nativeActivity) threadSnapshot(raw json.RawMessage) {
 	thread, ok := nativeObject(raw)
 	id := nativeString(thread["id"])
 	if !ok || id == "" {
-		a.uncertain = true
+		a.markUncertain("native thread snapshot has no valid thread ID")
 		return
 	}
 	if status, present := thread["status"]; present {
@@ -400,7 +514,7 @@ func (a *nativeActivity) threadSnapshot(raw json.RawMessage) {
 	if turnsRaw, present := thread["turns"]; present && !bytes.Equal(bytes.TrimSpace(turnsRaw), []byte("null")) {
 		var turns []json.RawMessage
 		if json.Unmarshal(turnsRaw, &turns) != nil {
-			a.uncertain = true
+			a.markUncertain("native thread snapshot has malformed turns")
 			return
 		}
 		for _, raw := range turns {
@@ -408,7 +522,7 @@ func (a *nativeActivity) threadSnapshot(raw json.RawMessage) {
 			key := nativeTurn{id, nativeString(turn["id"])}
 			status := nativeString(turn["status"])
 			if !valid || key.turn == "" || (status != "inProgress" && !nativeTerminalStatus(status)) {
-				a.uncertain = true
+				a.markUncertain("native thread snapshot has an invalid turn")
 				return
 			}
 			if status == "inProgress" {
@@ -425,13 +539,13 @@ func (a *nativeActivity) threadStatus(thread string, raw json.RawMessage) {
 	if status == "" {
 		object, ok := nativeObject(raw)
 		if !ok {
-			a.uncertain = true
+			a.markUncertain("malformed native thread status")
 			return
 		}
 		status = nativeString(object["type"])
 	}
 	if thread == "" {
-		a.uncertain = true
+		a.markUncertain("native thread status has no thread ID")
 		return
 	}
 	switch status {
@@ -444,8 +558,14 @@ func (a *nativeActivity) threadStatus(thread string, raw json.RawMessage) {
 		// An idle snapshot never cancels an accepted turn that has not yet
 		// published its terminal notification, or pending compaction work.
 		delete(a.threads, thread)
+	case "systemError":
+		// Codex could not establish this thread's state. A subsequent idle
+		// notification alone is insufficient: update preparation must obtain a
+		// fresh snapshot after fencing native requests. Existing accepted turns,
+		// approvals, and active markers remain intact until explicitly settled.
+		a.requireVerification("native thread reported systemError status")
 	default:
-		a.uncertain = true
+		a.markUncertain("unrecognized native thread status")
 	}
 }
 
@@ -523,20 +643,40 @@ func nativeObject(raw []byte) (map[string]json.RawMessage, bool) {
 	return object, true
 }
 
+// Keep this narrower than nativeSynchronousRequest: a lost synchronous mutation
+// may still be executing, while a lost metadata read cannot enqueue user work.
+func nativeReadOnlyRequest(method string) bool {
+	switch method {
+	case "server/diagnostics", "thread/list", "thread/loaded/list", "thread/read", "thread/turns/list", "thread/items/list", "thread/search", "thread/searchOccurrences", "thread/timeline/list",
+		"thread/goal/get", "thread/attachment/list", "thread/queue/list", "thread/backgroundTerminals/list", "memory/status",
+		"model/list", "modelProvider/capabilities/read", "collaborationMode/list", "experimentalFeature/list", "permissionProfile/list",
+		"config/read", "configRequirements/read", "skills/list", "hooks/list", "plugin/list", "plugin/search", "plugin/installed", "plugin/read", "plugin/skill/read", "plugin/share/list",
+		"app/list", "app/read", "app/installed", "mcpServerStatus/list", "mcpServer/resource/read", "account/rateLimits/read", "account/usage/read", "account/workspaceMessages/read",
+		"project/list", "project/read", "threadSection/list", "fs/readFile", "fs/getMetadata", "fs/readDirectory", "environment/info", "environment/status",
+		"remoteControl/status/read", "remoteControl/pairing/status", "remoteControl/client/list", "userVerification/status", "externalAgentConfig/detect", "externalAgentConfig/import/readHistories",
+		"getConversationSummary", "gitDiffToRemote", "thread/realtime/listVoices", "windowsSandbox/readiness", "fuzzyFileSearch", "currentTime/read":
+		return true
+	default:
+		return false
+	}
+}
+
 func nativeSynchronousRequest(method string) bool {
 	switch method {
 	case "initialize", "server/diagnostics", "thread/list", "thread/loaded/list", "thread/turns/list", "thread/items/list", "thread/search", "thread/searchOccurrences", "thread/timeline/list",
-		"thread/name/set", "thread/metadata/update", "thread/section/move", "thread/settings/update", "thread/memoryMode/set", "thread/goal/get", "thread/goal/clear",
+		"thread/name/set", "thread/metadata/update", "thread/section/move", "thread/settings/update", "thread/memoryMode/set", "thread/goal/get", "thread/goal/clear", "thread/attachment/list", "memory/status",
 		"thread/archive", "thread/unarchive", "thread/delete", "thread/unsubscribe", "thread/inject_items", "thread/queue/list", "thread/queue/delete", "thread/queue/reorder",
 		"thread/backgroundTerminals/list", "thread/backgroundTerminals/clean", "thread/backgroundTerminals/terminate", "turn/interrupt", "turn/settings/update",
 		"model/list", "modelProvider/capabilities/read", "collaborationMode/list", "experimentalFeature/list", "permissionProfile/list", "experimentalFeature/enablement/set",
 		"config/read", "config/value/write", "config/batchWrite", "configRequirements/read", "config/mcpServer/reload", "skills/list", "skills/config/write", "skills/extraRoots/set", "hooks/list",
-		"plugin/list", "plugin/search", "plugin/installed", "plugin/read", "plugin/skill/read", "app/list", "app/read", "app/installed", "mcpServerStatus/list", "mcpServer/resource/read",
+		"plugin/list", "plugin/search", "plugin/installed", "plugin/read", "plugin/skill/read", "plugin/share/list", "app/list", "app/read", "app/installed", "mcpServerStatus/list", "mcpServer/resource/read",
 		"account/read", "account/rateLimits/read", "account/usage/read", "account/workspaceMessages/read", "account/login/cancel", "account/logout",
 		"project/list", "project/read", "project/create", "project/update", "project/move", "project/delete", "threadSection/list", "threadSection/create", "threadSection/update", "threadSection/delete",
 		"fs/readFile", "fs/writeFile", "fs/createDirectory", "fs/getMetadata", "fs/readDirectory", "fs/remove", "fs/copy", "fs/watch", "fs/unwatch",
 		"command/exec", "command/exec/write", "command/exec/resize", "command/exec/terminate", "process/writeStdin", "process/kill", "process/resizePty",
-		"environment/info", "environment/status", "remoteControl/status/read", "fuzzyFileSearch", "fuzzyFileSearch/sessionStop", "currentTime/read":
+		"environment/info", "environment/status", "remoteControl/status/read", "remoteControl/pairing/status", "remoteControl/client/list", "userVerification/status",
+		"externalAgentConfig/detect", "externalAgentConfig/import/readHistories", "getConversationSummary", "gitDiffToRemote", "getAuthStatus",
+		"thread/realtime/listVoices", "windowsSandbox/readiness", "fuzzyFileSearch", "fuzzyFileSearch/sessionStop", "currentTime/read":
 		return true
 	default:
 		return false
@@ -545,11 +685,12 @@ func nativeSynchronousRequest(method string) bool {
 
 func nativeInformationalNotification(method string) bool {
 	switch method {
-	case "error", "thread/archived", "thread/deleted", "thread/unarchived", "thread/closed", "thread/reverted", "skills/changed", "thread/name/updated", "thread/goal/updated", "thread/goal/cleared",
+	case "error", "thread/archived", "thread/deleted", "thread/unarchived", "thread/closed", "thread/reverted", "skills/changed", "thread/name/updated", "thread/attachment/updated", "thread/goal/updated", "thread/goal/cleared",
 		"project/changed", "thread/project/updated", "thread/environment/connected", "thread/environment/disconnected", "thread/settings/updated", "thread/tokenUsage/updated",
 		"turn/diff/updated", "turn/plan/updated", "item/started", "item/completed", "item/autoApprovalReview/started", "item/autoApprovalReview/completed", "autoApprovalReview/strictReviewRequired",
 		"item/agentMessage/delta", "item/plan/delta", "command/exec/outputDelta", "process/outputDelta", "item/commandExecution/outputDelta", "item/commandExecution/terminalInteraction", "item/fileChange/outputDelta", "item/fileChange/patchUpdated", "item/mcpToolCall/progress",
-		"mcpServer/startupStatus/updated", "account/updated", "account/rateLimits/updated", "app/list/updated", "remoteControl/status/changed", "fs/changed", "item/reasoning/summaryTextDelta", "item/reasoning/summaryPartAdded", "item/reasoning/textDelta",
+		"mcpServer/startupStatus/updated", "mcpServer/oauthLogin/completed", "mcpServer/event/stream/notification", "account/updated", "account/login/completed", "account/rateLimits/updated", "app/list/updated", "remoteControl/status/changed", "fs/changed", "item/reasoning/summaryTextDelta", "item/reasoning/summaryPartAdded", "item/reasoning/textDelta",
+		"rawResponseItem/completed", "rawResponse/completed", "fuzzyFileSearch/sessionUpdated", "fuzzyFileSearch/sessionCompleted", "externalAgentConfig/import/progress", "externalAgentConfig/import/completed", "windowsSandbox/setupCompleted",
 		"model/rerouted", "model/verification", "modelProvider/authRecoveryStarted", "modelProvider/authRecoveryCompleted", "turn/moderationMetadata", "model/safetyBuffering/updated",
 		"warning", "guardianWarning", "deprecationNotice", "configWarning", "windows/worldWritableWarning":
 		return true

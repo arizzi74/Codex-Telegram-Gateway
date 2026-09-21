@@ -286,7 +286,7 @@ func TestNativeActivityDuplicateInFlightRequestsCannotBeCleared(t *testing.T) {
 }
 
 func TestNativeActivityUnknownAsyncAcknowledgementsStayUncertain(t *testing.T) {
-	for _, method := range []string{"future/start", "thread/shellCommand", "thread/queue/start", "thread/realtime/start"} {
+	for _, method := range []string{"future/start", "thread/shellCommand", "thread/realtime/start"} {
 		t.Run(method, func(t *testing.T) {
 			var activity nativeActivity
 			activity.clientMessage([]byte(fmt.Sprintf(`{"id":1,"method":%q,"params":{"threadId":"thread"}}`, method)))

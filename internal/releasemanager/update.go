@@ -484,8 +484,12 @@ func workerPrepareFailure(output []byte) string {
 		return "worker update deferred: native CLI requests are still in flight"
 	case "worker update: native CLI approvals or input are pending":
 		return "worker update deferred: native CLI approvals or input are pending"
+	case "worker update: native CLI queued work is pending or cannot be verified":
+		return "worker update deferred: native CLI queued work is pending or cannot be verified"
 	case "worker update: native CLI activity could not be verified":
 		return "worker update deferred: native CLI activity could not be verified"
+	case "worker update: native CLI activity changed during idle verification; retry when settled":
+		return "worker update deferred: native CLI activity changed during idle verification; retrying at the next check"
 	case "worker update: native CLI connection is still initializing":
 		return "worker update deferred: native CLI connection is still initializing"
 	case "worker update: a native CLI thread is active or its idle state cannot be verified":
@@ -502,9 +506,19 @@ func workerPrepareFailure(output []byte) string {
 		return "worker update deferred: events are awaiting gateway acknowledgement"
 	case "worker update: too many loaded threads to verify", "worker update: repeated loaded-thread cursor":
 		return "worker update deferred: loaded threads could not be verified"
+	case "worker update: too many native queues to verify":
+		return "worker update deferred: too many native queues to verify"
 	case "worker update coordination unavailable; the running worker must support update prepare":
 		return "worker update deferred: the running worker does not provide update coordination"
 	default:
+		if strings.HasPrefix(reason, "worker update: native CLI activity could not be verified: ") {
+			// The worker logs its own classified protocol reason. Never forward
+			// arbitrary subprocess output or protocol method names here.
+			return "worker update deferred: native CLI activity could not be verified; see worker service log for the protocol reason"
+		}
+		if strings.HasPrefix(reason, "worker update: native CLI activity needs fresh verification: ") {
+			return "worker update deferred: native CLI activity needs fresh verification"
+		}
 		return workerPrepareUnknownReason
 	}
 }

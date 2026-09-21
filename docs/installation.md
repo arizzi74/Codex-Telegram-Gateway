@@ -435,6 +435,19 @@ CLI during this interval receives an explicit retry error and is not executed.
 Busy workers defer the update and log the specific reason. Unknown protocol
 activity and requests whose completion cannot be verified still defer updates.
 
+Routine Codex notifications do not permanently block updates. After a temporary
+thread `systemError` or loss of an otherwise settled native connection, the next
+attempt fences new requests and rechecks live thread state, worker sessions, and
+queued work. It clears the observation gap only if those checks succeed without
+new native activity arriving. A lost connection with only known read-only requests
+can also recover this way. Native prompt queues are checked explicitly, including
+queues observed on threads outside the gateway's workspace list. These checks
+run when preparing an update, without extra history polling.
+Active turns, pending questions, unconfirmed modifying RPCs,
+and unsupported asynchronous operations still block a restart; an idle snapshot
+alone cannot prove those operations finished. Deferred-update logs include the
+kind of protocol problem without recording prompts or RPC payloads.
+
 The worker publishes a stable private attachment socket across restarts. Compatible
 Codex TUIs can use their native reconnect/resume handling at that address; the
 gateway never replays prompts or RPCs. If the terminal cannot reconnect, attach
@@ -445,6 +458,9 @@ upgrade. Finish active turns, exit the attached CLI, stop the old worker service
 and run the worker update command below. Then attach again so the CLI uses the new
 stable socket. The same first-upgrade procedure applies to workers predating the
 update coordination protocol. Subsequent idle CLI updates can run automatically.
+Workers already stuck on `native CLI activity could not be verified` from an
+older version also need this one-time upgrade: the running process must load the
+new guard before it can recover automatically.
 
 On Linux, run these commands in a separate terminal after finishing worker tasks:
 

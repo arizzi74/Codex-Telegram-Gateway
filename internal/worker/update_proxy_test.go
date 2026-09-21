@@ -237,7 +237,7 @@ func TestNativeApprovalAndLateNotificationPreventUpdate(t *testing.T) {
 func TestNativeUnconfirmedRPCPreventsUpdateAfterServerDisconnect(t *testing.T) {
 	proxy, path, requests := newNativeProxyTest(t)
 	client := dialNativeProxy(t, path)
-	nativeWrite(t, client, `{"id":1,"method":"config/read","params":{}}`)
+	nativeWrite(t, client, `{"id":1,"method":"turn/start","params":{"threadId":"thread-pending"}}`)
 	request := nextNativeRequest(t, requests)
 	_ = request.connection.CloseNow()
 	waitFor(t, func() bool { proxy.mu.Lock(); defer proxy.mu.Unlock(); return len(proxy.sessions) == 0 })

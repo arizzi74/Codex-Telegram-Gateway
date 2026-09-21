@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"os"
@@ -20,18 +21,24 @@ const nativeMessageLimit = 32 << 20
 // Keeping the backend reader alive after a frontend disconnect lets accepted
 // requests settle without assuming that socket closure cancels server work.
 type attachmentProxy struct {
-	mu        sync.Mutex
-	listener  *net.UnixListener
-	server    *http.Server
-	backend   string
-	paused    bool
-	resumed   chan struct{}
-	closed    bool
-	uncertain bool
-	sessions  map[*attachmentSession]struct{}
-	group     sync.WaitGroup
-	done      chan struct{}
-	closeOnce sync.Once
+	mu                sync.Mutex
+	listener          *net.UnixListener
+	server            *http.Server
+	backend           string
+	paused            bool
+	resumed           chan struct{}
+	closed            bool
+	uncertain         bool
+	uncertaintyReason string
+	observationGap    string
+	observationEpoch  uint64
+	pausedEpoch       uint64
+	queueThreads      map[string]struct{}
+	deletedThreads    map[string]struct{}
+	sessions          map[*attachmentSession]struct{}
+	group             sync.WaitGroup
+	done              chan struct{}
+	closeOnce         sync.Once
 }
 
 type attachmentSession struct {
@@ -81,6 +88,7 @@ func (p *attachmentProxy) accept(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithCancel(context.Background())
 	s := &attachmentSession{proxy: p, ctx: ctx, cancel: cancel, frontRaw: r.Context().Value(attachmentConnectionKey{}).(net.Conn), initializing: true}
 	p.sessions[s] = struct{}{}
+	p.observationEpoch++
 	p.group.Add(1)
 	p.mu.Unlock()
 	defer p.group.Done()
@@ -89,8 +97,37 @@ func (p *attachmentProxy) accept(w http.ResponseWriter, r *http.Request) {
 		p.mu.Lock()
 		// Losing the server before accepted work settles is an unknown outcome,
 		// not evidence that an update may safely interrupt it.
-		if !s.activity.idle() {
+		p.observationEpoch++
+		for thread := range s.activity.queueThreads {
+			if p.queueThreads == nil {
+				p.queueThreads = make(map[string]struct{})
+			}
+			p.queueThreads[thread] = struct{}{}
+		}
+		// A lost queue read cannot create work, but it may have been the
+		// terminal's first observation of already queued prompts.
+		for _, request := range s.activity.requests {
+			if request.method == "thread/queue/list" && request.thread != "" {
+				if p.queueThreads == nil {
+					p.queueThreads = make(map[string]struct{})
+				}
+				p.queueThreads[request.thread] = struct{}{}
+			}
+		}
+		if s.activity.disconnectedError() != nil {
 			p.uncertain = true
+			if p.uncertaintyReason == "" {
+				p.uncertaintyReason = s.activity.uncertaintyReason
+				if p.uncertaintyReason == "" {
+					p.uncertaintyReason = "backend disconnected before native work was confirmed complete"
+				}
+			}
+		} else if p.observationGap == "" {
+			if s.activity.observationGap != "" {
+				p.observationGap = s.activity.observationGap
+			} else if len(s.activity.requests) > 0 {
+				p.observationGap = "native connection ended with only read-only requests outstanding"
+			}
 		}
 		delete(p.sessions, s)
 		p.mu.Unlock()
@@ -148,6 +185,7 @@ func (p *attachmentProxy) accept(w http.ResponseWriter, r *http.Request) {
 	back.SetReadLimit(nativeMessageLimit)
 	p.mu.Lock()
 	s.front, s.back, s.initializing = front, back, false
+	p.observationEpoch++
 	p.mu.Unlock()
 	backendDone := make(chan struct{})
 	go func() { defer close(backendDone); s.fromBackend() }()
@@ -175,6 +213,7 @@ func (s *attachmentSession) fromFrontend() {
 	defer func() {
 		p.mu.Lock()
 		s.frontGone = true
+		p.observationEpoch++
 		settled := s.activity.idle() && s.forwarding == 0
 		p.mu.Unlock()
 		_ = s.frontRaw.Close()
@@ -221,6 +260,7 @@ func (s *attachmentSession) forwardClient(payload []byte) bool {
 			return s.rejectDuringUpdate(payload)
 		}
 		s.forwarding++
+		p.observationEpoch++
 		s.activity.clientMessage(payload)
 		p.mu.Unlock()
 		err := s.back.Write(s.ctx, websocket.MessageText, payload)
@@ -274,7 +314,13 @@ func (s *attachmentSession) fromBackend() {
 		if err != nil {
 			p.mu.Lock()
 			if s.ctx.Err() == nil && websocket.CloseStatus(err) != websocket.StatusNormalClosure {
-				p.uncertain = true
+				// A settled connection loss is an observation gap, not evidence
+				// of unfinished work. The final session cleanup separately keeps
+				// unconfirmed accepted operations as a hard blocker.
+				p.observationEpoch++
+				if p.observationGap == "" {
+					p.observationGap = "native backend connection ended unexpectedly"
+				}
 			}
 			p.mu.Unlock()
 			return
@@ -282,12 +328,20 @@ func (s *attachmentSession) fromBackend() {
 		if kind != websocket.MessageText {
 			p.mu.Lock()
 			p.uncertain = true
+			p.observationEpoch++
+			if p.uncertaintyReason == "" {
+				p.uncertaintyReason = "native backend sent a non-JSON-RPC frame"
+			}
 			p.mu.Unlock()
 			return
 		}
 		p.mu.Lock()
 		s.forwarding++
+		p.observationEpoch++
 		s.activity.serverMessage(payload)
+		if s.activity.deletedThread != "" {
+			p.forgetQueuedThreadLocked(s.activity.deletedThread)
+		}
 		frontGone := s.frontGone
 		p.mu.Unlock()
 		if !frontGone {
@@ -307,10 +361,30 @@ func (s *attachmentSession) fromBackend() {
 }
 
 func (p *attachmentProxy) idleLocked() error {
+	if err := p.settledLocked(); err != nil {
+		return err
+	}
+	if p.observationGap != "" {
+		return fmt.Errorf("worker update: native CLI activity needs fresh verification: %s", p.observationGap)
+	}
+	for session := range p.sessions {
+		if session.activity.observationGap != "" {
+			return fmt.Errorf("worker update: native CLI activity needs fresh verification: %s", session.activity.observationGap)
+		}
+	}
+	return nil
+}
+
+// settledLocked permits only recoverable observation gaps. Accepted work with
+// unknown outcomes cannot be cleared by a snapshot of currently idle threads.
+func (p *attachmentProxy) settledLocked() error {
 	if p.closed {
 		return errors.New("worker update: attachment proxy is closed")
 	}
 	if p.uncertain {
+		if p.uncertaintyReason != "" {
+			return fmt.Errorf("worker update: native CLI activity could not be verified: %s", p.uncertaintyReason)
+		}
 		return errors.New("worker update: native CLI activity could not be verified")
 	}
 	for session := range p.sessions {
@@ -320,7 +394,10 @@ func (p *attachmentProxy) idleLocked() error {
 		if session.forwarding > 0 {
 			return errors.New("worker update: native CLI requests are still in flight")
 		}
-		if err := session.activity.idleError(); err != nil {
+		if err := session.activity.settledError(); err != nil {
+			if session.activity.uncertain && session.activity.uncertaintyReason != "" {
+				return fmt.Errorf("%w: %s", err, session.activity.uncertaintyReason)
+			}
 			return err
 		}
 	}
@@ -330,14 +407,91 @@ func (p *attachmentProxy) idleLocked() error {
 func (p *attachmentProxy) pause() error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if err := p.idleLocked(); err != nil {
+	if err := p.settledLocked(); err != nil {
 		return err
 	}
 	if !p.paused {
 		p.resumed = make(chan struct{})
 		p.paused = true
+		p.pausedEpoch = p.observationEpoch
 	}
 	return nil
+}
+
+// confirmIdle is called only after live runtime, actor, and durable state checks
+// succeed behind the admission fence. A notification arriving during those
+// checks invalidates that evidence; retry instead of erasing new activity.
+func (p *attachmentProxy) confirmIdle() error {
+	p.mu.Lock()
+	if !p.paused || p.pausedEpoch != p.observationEpoch {
+		p.mu.Unlock()
+		return errors.New("worker update: native CLI activity changed during idle verification; retry when settled")
+	}
+	if err := p.settledLocked(); err != nil {
+		p.mu.Unlock()
+		return err
+	}
+	p.observationGap = ""
+	p.queueThreads = nil
+	var detached []*attachmentSession
+	for session := range p.sessions {
+		session.activity.observationGap = ""
+		session.activity.queueThreads = nil
+		if session.frontGone {
+			detached = append(detached, session)
+		}
+	}
+	p.mu.Unlock()
+	for _, session := range detached {
+		session.stop()
+	}
+	return nil
+}
+
+func (p *attachmentProxy) queuesToVerify() []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	threads := make(map[string]struct{}, len(p.queueThreads))
+	for thread := range p.queueThreads {
+		threads[thread] = struct{}{}
+	}
+	for session := range p.sessions {
+		for thread := range session.activity.queueThreads {
+			threads[thread] = struct{}{}
+		}
+	}
+	result := make([]string, 0, len(threads))
+	for thread := range threads {
+		if _, deleted := p.deletedThreads[thread]; !deleted {
+			result = append(result, thread)
+		}
+	}
+	return result
+}
+
+// Confirmed permanent deletion removes the queue, not accepted operations that
+// still require their own completion. Thread IDs are not reused; remember this
+// evidence until the proxy/runtime is replaced so a late queue-read reply cannot
+// restore a verification obligation for a thread that no longer exists.
+func (p *attachmentProxy) forgetQueuedThread(thread string) {
+	if thread == "" {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.forgetQueuedThreadLocked(thread)
+}
+
+func (p *attachmentProxy) forgetQueuedThreadLocked(thread string) {
+	if p.deletedThreads == nil {
+		p.deletedThreads = make(map[string]struct{})
+	}
+	p.deletedThreads[thread] = struct{}{}
+	delete(p.queueThreads, thread)
+	for session := range p.sessions {
+		delete(session.activity.queueThreads, thread)
+	}
+	p.observationEpoch++
 }
 
 func (p *attachmentProxy) checkIdle() error {

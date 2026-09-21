@@ -203,6 +203,7 @@ func (a *Agent) prepareUpdate(ctx context.Context, ttl time.Duration) (UpdateLea
 	}
 	held := true
 	var proxies []*attachmentProxy
+	nativeQueues := make(map[string][]string)
 	defer func() {
 		if held {
 			for _, proxy := range proxies {
@@ -225,15 +226,17 @@ func (a *Agent) prepareUpdate(ctx context.Context, ttl time.Duration) (UpdateLea
 			}
 			if err := proxy.pause(); err != nil {
 				a.manager.mu.RUnlock()
+				a.log.Info("worker update blocked by native activity", "reason", err.Error())
 				return UpdateLease{}, err
 			}
 			proxies = append(proxies, proxy)
+			nativeQueues[runtime.runtime.ID] = proxy.queuesToVerify()
 		}
 	}
 	a.manager.mu.RUnlock()
 	// Ask live app servers as well as worker actors. Native CLI turns may belong
 	// to loaded threads outside the gateway's workspace discovery allowlist.
-	if err := a.manager.verifyUpdateIdle(ctx); err != nil {
+	if err := a.manager.verifyUpdateIdleWithQueues(ctx, nativeQueues); err != nil {
 		return UpdateLease{}, err
 	}
 	a.mu.RLock()
@@ -261,11 +264,18 @@ func (a *Agent) prepareUpdate(ctx context.Context, ttl time.Duration) (UpdateLea
 	if err := a.store.checkUpdateIdle(); err != nil {
 		return UpdateLease{}, err
 	}
+	for _, proxy := range proxies {
+		if err := proxy.confirmIdle(); err != nil {
+			a.log.Info("worker update idle verification postponed", "reason", err.Error())
+			return UpdateLease{}, err
+		}
+	}
 	// A server notification or approval can arrive while the other runtime and
 	// actor checks are in progress. Recheck native activity behind the admission
 	// fence before handing the updater a restart lease.
 	for _, proxy := range proxies {
 		if err := proxy.checkIdle(); err != nil {
+			a.log.Info("worker update blocked by native activity", "reason", err.Error())
 			return UpdateLease{}, err
 		}
 	}
@@ -342,7 +352,24 @@ func updateSessionIdle(session protocol.Session) bool {
 		return false
 	}
 }
+
+func (m *RuntimeManager) observeNativeThreadDeleted(runtime protocol.Runtime, threadID string) {
+	m.mu.RLock()
+	current := m.runtimes[runtime.ID]
+	proxy := m.attachments[runtime.ID]
+	if current == nil || current.runtime.Generation != runtime.Generation || proxy == nil {
+		m.mu.RUnlock()
+		return
+	}
+	proxy.forgetQueuedThread(threadID)
+	m.mu.RUnlock()
+}
+
 func (m *RuntimeManager) verifyUpdateIdle(ctx context.Context) error {
+	return m.verifyUpdateIdleWithQueues(ctx, nil)
+}
+
+func (m *RuntimeManager) verifyUpdateIdleWithQueues(ctx context.Context, nativeQueues map[string][]string) error {
 	m.mu.RLock()
 	runtimes := make([]*managedRuntime, 0, len(m.runtimes))
 	for _, runtime := range m.runtimes {
@@ -355,6 +382,24 @@ func (m *RuntimeManager) verifyUpdateIdle(ctx context.Context) error {
 		}
 		if !runtime.client.UpdateQuiescent() {
 			return errors.New("worker update: runtime has pending or unconfirmed RPCs; finish work and stop the worker service before updating")
+		}
+		queues := nativeQueues[runtime.runtime.ID]
+		if len(queues) > discoveryLimit {
+			return errors.New("worker update: too many native queues to verify")
+		}
+		// Check queued work before thread state: consuming a queue entry can
+		// start a turn. Include observed queues outside workspace discovery and
+		// retain them across detached native connections until verified empty.
+		for _, threadID := range queues {
+			if err := runtime.client.VerifyThreadQueueIdle(ctx, threadID); err != nil {
+				return errors.New("worker update: native CLI queued work is pending or cannot be verified")
+			}
+		}
+		for _, threadID := range queues {
+			thread, err := runtime.client.ReadThreadState(ctx, threadID)
+			if err != nil || thread.ActiveTurnID != "" || (thread.Status != "idle" && thread.Status != "notLoaded" && thread.Status != "not_loaded") {
+				return errors.New("worker update: a native CLI thread is active or its idle state cannot be verified")
+			}
 		}
 		cursor := ""
 		seen := map[string]bool{}
