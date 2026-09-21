@@ -31,6 +31,35 @@ type DeliveryChunk struct {
 // ErrDeliveryLeaseChanged tells a sender to leave a newer claim untouched.
 var ErrDeliveryLeaseChanged = errors.New("registry: delivery lease changed")
 
+// Empty polling must not scan completed history or acquire the writer lock.
+// Pending/failed rows remain candidates even during backoff: revoked or
+// superseded progress must still be cancelled before its next send attempt.
+const deliveryQueueReadySQL = `SELECT EXISTS (
+    SELECT 1 FROM telegram_deliveries
+    WHERE status IN ('pending','failed','sending')
+      AND (status IN ('pending','failed') OR next_attempt_at<=` + sqliteNow + `)
+)`
+
+const claimDeliveriesSQL = `WITH claimed AS (
+ SELECT delivery.delivery_id FROM telegram_deliveries delivery
+ WHERE delivery.status IN ('pending','failed','sending') AND delivery.visibility_revoked=0 AND delivery.next_attempt_at <= ` + sqliteNow + `
+   AND (delivery.kind NOT IN ('agent_progress_message','tool_progress_message') OR (NOT ` + pendingSelectionConfirmationSQL + ` AND NOT ` + pendingProgressRepositionSQL + ` AND NOT ` + newerProgressDeliverySQL + ` AND NOT EXISTS (
+     SELECT 1 FROM events progress
+     JOIN events active_event ON active_event.runtime_id=progress.runtime_id
+       AND active_event.runtime_generation=progress.runtime_generation AND active_event.session_id=progress.session_id
+       AND json_extract(active_event.payload, '$.turn_id')=json_extract(progress.payload, '$.turn_id')
+     JOIN telegram_deliveries active ON active.event_id=active_event.event_id
+     WHERE progress.event_id=delivery.event_id AND active.kind=delivery.kind
+       AND active.delivery_id<>delivery.delivery_id AND active.status='sending' AND active.next_attempt_at>` + sqliteNow + `
+       AND active.bot_id=delivery.bot_id AND active.chat_id=delivery.chat_id
+       AND active.message_thread_id=delivery.message_thread_id
+   )))
+ ORDER BY delivery.created_at LIMIT $1
+)
+UPDATE telegram_deliveries SET status='sending', attempt_count=attempt_count+1, next_attempt_at=(strftime('%Y-%m-%dT%H:%M:%f','now','+30 seconds') || '000000Z')
+WHERE delivery_id IN (SELECT delivery_id FROM claimed)
+RETURNING delivery_id,bot_id,chat_id,message_thread_id,kind,payload,attempt_count`
+
 // ClaimDeliveries atomically leases due rows in one UPDATE statement. SQLite
 // serializes concurrent writers, so senders cannot claim the same live lease.
 // A crashed sender's lease becomes eligible again after 30 seconds.
@@ -41,39 +70,30 @@ func (s *Store) ClaimDeliveries(ctx context.Context, limit int) ([]Delivery, err
 	if limit < 1 || limit > 100 {
 		return nil, errors.New("registry: invalid delivery claim limit")
 	}
+	var ready bool
+	if err := s.pool.QueryRow(ctx, deliveryQueueReadySQL).Scan(&ready); err != nil {
+		return nil, err
+	}
+	if !ready {
+		return nil, nil
+	}
+	// New work arriving after the read above is picked up on the next poll.
+	// The transaction and UPDATE below remain the authority for live leases.
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return nil, err
 	}
 	defer tx.Rollback(ctx)
-	if _, err := tx.Exec(ctx, `UPDATE telegram_deliveries SET status='cancelled' WHERE visibility_revoked=1 AND (status IN ('pending','failed') OR (status='sending' AND next_attempt_at<=`+sqliteNow+`))`); err != nil {
+	if _, err := tx.Exec(ctx, `UPDATE telegram_deliveries SET status='cancelled' WHERE status IN ('pending','failed','sending') AND visibility_revoked=1 AND (status IN ('pending','failed') OR (status='sending' AND next_attempt_at<=`+sqliteNow+`))`); err != nil {
 		return nil, err
 	}
 	if _, err := tx.Exec(ctx, `UPDATE telegram_deliveries AS delivery SET status='cancelled',last_error=NULL
-        WHERE kind IN ('agent_progress_message','tool_progress_message')
+        WHERE status IN ('pending','failed','sending') AND kind IN ('agent_progress_message','tool_progress_message')
           AND (status IN ('pending','failed') OR (status='sending' AND next_attempt_at<=`+sqliteNow+`))
           AND `+newerProgressDeliverySQL); err != nil {
 		return nil, err
 	}
-	rows, err := tx.Query(ctx, `WITH claimed AS (
- SELECT delivery.delivery_id FROM telegram_deliveries delivery
- WHERE delivery.status IN ('pending','failed','sending') AND delivery.visibility_revoked=0 AND delivery.next_attempt_at <= `+sqliteNow+`
-   AND (delivery.kind NOT IN ('agent_progress_message','tool_progress_message') OR (NOT `+pendingSelectionConfirmationSQL+` AND NOT `+pendingProgressRepositionSQL+` AND NOT `+newerProgressDeliverySQL+` AND NOT EXISTS (
-     SELECT 1 FROM events progress
-     JOIN events active_event ON active_event.runtime_id=progress.runtime_id
-       AND active_event.runtime_generation=progress.runtime_generation AND active_event.session_id=progress.session_id
-       AND json_extract(active_event.payload, '$.turn_id')=json_extract(progress.payload, '$.turn_id')
-     JOIN telegram_deliveries active ON active.event_id=active_event.event_id
-     WHERE progress.event_id=delivery.event_id AND active.kind=delivery.kind
-       AND active.delivery_id<>delivery.delivery_id AND active.status='sending' AND active.next_attempt_at>`+sqliteNow+`
-       AND active.bot_id=delivery.bot_id AND active.chat_id=delivery.chat_id
-       AND active.message_thread_id=delivery.message_thread_id
-   )))
- ORDER BY delivery.created_at LIMIT $1
-)
-UPDATE telegram_deliveries SET status='sending', attempt_count=attempt_count+1, next_attempt_at=(strftime('%Y-%m-%dT%H:%M:%f','now','+30 seconds') || '000000Z')
-WHERE delivery_id IN (SELECT delivery_id FROM claimed)
-RETURNING delivery_id,bot_id,chat_id,message_thread_id,kind,payload,attempt_count`, limit)
+	rows, err := tx.Query(ctx, claimDeliveriesSQL, limit)
 	if err != nil {
 		return nil, err
 	}

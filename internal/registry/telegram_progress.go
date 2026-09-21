@@ -162,21 +162,43 @@ func checkpointTelegramProgress(ctx context.Context, tx *dbTx, deliveryID uuid.U
 	return nil
 }
 
-// ClaimTelegramDeletions removes older distinct messages once a newer update of
-// the same kind is visible. The surviving tool and commentary messages are due
-// after the final response was fully sent to the same bot/chat/topic. A stopped
-// or replaced runtime with no queued terminal notification permits cleanup as
-// a fallback. Chunk ordering also retires legacy multipart progress messages.
-// The joins are evaluated on every claim, covering restarts and progress sends
-// that completed just after the terminal response was delivered.
-func (s *Store) ClaimTelegramDeletions(ctx context.Context, limit int) ([]TelegramDeletion, error) {
-	if limit < 1 || limit > 100 {
-		return nil, errors.New("registry: invalid deletion claim limit")
-	}
-	rows, err := s.pool.Query(ctx, `WITH due AS (
+// Separate turn terminals from runtime failures so SQLite can use the narrow
+// terminal-turn and runtime-lifecycle indexes. Starting from the matching event
+// also avoids visiting every historical delivery at the destination.
+// Lifecycle branches keep the index's full IN predicate alongside the selected
+// kind because SQLite does not infer that the equality implies that predicate.
+// Turn IDs are JSON strings. Unary + keeps progress.turn_id's stored string
+// value while removing its column affinity, allowing SQLite to use the JSON
+// expression as the last equality key instead of scanning the session's turns.
+const progressTurnTerminalDeliverySQL = `SELECT 1 FROM events terminal
+    CROSS JOIN telegram_deliveries delivery ON delivery.event_id=terminal.event_id
+    WHERE terminal.runtime_id=progress.runtime_id
+      AND terminal.runtime_generation=progress.runtime_generation
+      AND terminal.session_id=progress.session_id
+      AND json_extract(terminal.payload, '$.turn_id')=+progress.turn_id
+      AND terminal.kind IN ('turn_completed','turn_failed','turn_interrupted')
+      AND delivery.bot_id=progress.bot_id AND delivery.chat_id=progress.chat_id
+      AND delivery.message_thread_id=progress.message_thread_id`
+
+const progressRuntimeFailureDeliverySQL = `SELECT 1 FROM events terminal
+    CROSS JOIN telegram_deliveries delivery ON delivery.event_id=terminal.event_id
+    WHERE terminal.runtime_id=progress.runtime_id
+      AND terminal.runtime_generation=progress.runtime_generation
+      AND terminal.kind IN ('runtime_failed','runtime_stopped','runtime_started')
+      AND terminal.kind='runtime_failed'
+      AND delivery.bot_id=progress.bot_id AND delivery.chat_id=progress.chat_id
+      AND delivery.message_thread_id=progress.message_thread_id`
+
+const telegramDeletionsDueSQL = `SELECT EXISTS (
+    SELECT 1 FROM telegram_progress_messages
+    WHERE status IN ('pending','deleting')
+      AND next_attempt_at<=(strftime('%Y-%m-%dT%H:%M:%f','now') || '000000Z')
+)`
+
+var claimTelegramDeletionsSQL = `WITH due AS (
         SELECT progress.cleanup_id FROM telegram_progress_messages progress
         WHERE progress.status IN ('pending','deleting') AND progress.next_attempt_at<=(strftime('%Y-%m-%dT%H:%M:%f','now') || '000000Z')
-          AND (progress.retire_requested=1 OR EXISTS(SELECT 1 FROM telegram_deliveries revoked WHERE revoked.delivery_id=progress.delivery_id AND revoked.visibility_revoked=1) OR NOT `+sessionVisibleSQL("progress.bot_id", "progress.chat_id", "progress.message_thread_id", "progress.session_id")+` OR EXISTS (
+          AND (progress.retire_requested=1 OR EXISTS(SELECT 1 FROM telegram_deliveries revoked WHERE revoked.delivery_id=progress.delivery_id AND revoked.visibility_revoked=1) OR NOT ` + sessionVisibleSQL("progress.bot_id", "progress.chat_id", "progress.message_thread_id", "progress.session_id") + ` OR EXISTS (
             SELECT 1 FROM telegram_progress_messages replacement
             JOIN telegram_deliveries newer_delivery ON newer_delivery.delivery_id=replacement.delivery_id
             JOIN events newer ON newer.event_id=newer_delivery.event_id
@@ -190,26 +212,18 @@ func (s *Store) ClaimTelegramDeletions(ctx context.Context, limit int) ([]Telegr
               AND replacement.runtime_id=progress.runtime_id AND replacement.runtime_generation=progress.runtime_generation
               AND replacement.session_id=progress.session_id AND replacement.turn_id=progress.turn_id
               AND replacement.telegram_message_id<>progress.telegram_message_id
-          ) OR EXISTS (
-            SELECT 1 FROM telegram_deliveries delivery JOIN events terminal ON terminal.event_id=delivery.event_id
-            WHERE delivery.status='sent' AND delivery.bot_id=progress.bot_id AND delivery.chat_id=progress.chat_id
-              AND delivery.message_thread_id=progress.message_thread_id AND terminal.runtime_id=progress.runtime_id
-              AND terminal.runtime_generation=progress.runtime_generation
-              AND ((terminal.session_id=progress.session_id AND json_extract(terminal.payload, '$.turn_id')=progress.turn_id
-                    AND terminal.kind IN ('turn_completed','turn_failed','turn_interrupted'))
-                   OR terminal.kind='runtime_failed')
-          ) OR (NOT EXISTS (
-            SELECT 1 FROM telegram_deliveries delivery JOIN events terminal ON terminal.event_id=delivery.event_id
-            WHERE delivery.bot_id=progress.bot_id AND delivery.chat_id=progress.chat_id
-              AND delivery.message_thread_id=progress.message_thread_id AND terminal.runtime_id=progress.runtime_id
-              AND terminal.runtime_generation=progress.runtime_generation
-              AND ((terminal.session_id=progress.session_id AND json_extract(terminal.payload, '$.turn_id')=progress.turn_id
-                    AND terminal.kind IN ('turn_completed','turn_failed','turn_interrupted'))
-                   OR terminal.kind='runtime_failed')
+          ) OR EXISTS (` + progressTurnTerminalDeliverySQL + ` AND delivery.status='sent'
+          ) OR EXISTS (` + progressRuntimeFailureDeliverySQL + ` AND delivery.status='sent'
+          ) OR (NOT EXISTS (` + progressTurnTerminalDeliverySQL + `
+          ) AND NOT EXISTS (` + progressRuntimeFailureDeliverySQL + `
           ) AND (EXISTS (
             SELECT 1 FROM events lifecycle WHERE lifecycle.runtime_id=progress.runtime_id
-              AND ((lifecycle.kind='runtime_stopped' AND lifecycle.runtime_generation=progress.runtime_generation)
-                   OR (lifecycle.kind='runtime_started' AND lifecycle.runtime_generation>progress.runtime_generation))
+              AND lifecycle.kind IN ('runtime_failed','runtime_stopped','runtime_started')
+              AND lifecycle.kind='runtime_stopped' AND lifecycle.runtime_generation=progress.runtime_generation
+          ) OR EXISTS (
+            SELECT 1 FROM events lifecycle WHERE lifecycle.runtime_id=progress.runtime_id
+              AND lifecycle.kind IN ('runtime_failed','runtime_stopped','runtime_started')
+              AND lifecycle.kind='runtime_started' AND lifecycle.runtime_generation>progress.runtime_generation
           ) OR EXISTS (
             SELECT 1 FROM runtimes runtime WHERE runtime.runtime_id=progress.runtime_id
               AND (runtime.generation>progress.runtime_generation
@@ -220,7 +234,31 @@ func (s *Store) ClaimTelegramDeletions(ctx context.Context, limit int) ([]Telegr
       SET status='deleting',attempt_count=attempt_count+1,next_attempt_at=(strftime('%Y-%m-%dT%H:%M:%f','now','+30 seconds') || '000000Z')
       WHERE cleanup_id IN (SELECT cleanup_id FROM due)
       RETURNING cleanup_id,bot_id,chat_id,message_thread_id,
-                telegram_message_id,attempt_count`, limit)
+                telegram_message_id,attempt_count`
+
+// ClaimTelegramDeletions removes older distinct messages once a newer update of
+// the same kind is visible. The surviving tool and commentary messages are due
+// after the final response was fully sent to the same bot/chat/topic. A stopped
+// or replaced runtime with no queued terminal notification permits cleanup as
+// a fallback. Chunk ordering also retires legacy multipart progress messages.
+// The joins are evaluated on every claim, covering restarts and progress sends
+// that completed just after the terminal response was delivered.
+func (s *Store) ClaimTelegramDeletions(ctx context.Context, limit int) ([]TelegramDeletion, error) {
+	if limit < 1 || limit > 100 {
+		return nil, errors.New("registry: invalid deletion claim limit")
+	}
+	// The common idle case needs only the ready-queue index. Avoid taking a
+	// write lock or evaluating the cleanup joins when no retry lease is due.
+	// A row becoming due after this read is picked up by the next poll; the
+	// actual claim rechecks eligibility and acquires its lease atomically.
+	var due bool
+	if err := s.pool.QueryRow(ctx, telegramDeletionsDueSQL).Scan(&due); err != nil {
+		return nil, fmt.Errorf("registry: check temporary-message deletions: %w", err)
+	}
+	if !due {
+		return nil, nil
+	}
+	rows, err := s.pool.Query(ctx, claimTelegramDeletionsSQL, limit)
 	if err != nil {
 		return nil, fmt.Errorf("registry: claim temporary-message deletions: %w", err)
 	}

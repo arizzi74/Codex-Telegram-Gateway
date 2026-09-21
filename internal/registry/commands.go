@@ -921,7 +921,8 @@ func (s *Store) pendingCommands(ctx context.Context, workerID *uuid.UUID, limit 
 		return nil, errors.New("registry: invalid command limit")
 	}
 	query := `SELECT payload FROM commands WHERE
-        (status='pending' OR (status='dispatched' AND dispatched_at <= $1))
+        status IN ('pending','dispatched','acknowledged')
+        AND (status='pending' OR (status='dispatched' AND dispatched_at <= $1))
         AND (expires_at IS NULL OR expires_at > (strftime('%Y-%m-%dT%H:%M:%f','now') || '000000Z'))`
 	args := []any{time.Now().UTC().Add(-dispatchedCommandRetryAfter)}
 	if workerID != nil {
