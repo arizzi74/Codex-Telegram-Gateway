@@ -439,6 +439,19 @@ func (s *Store) applyEvent(ctx context.Context, tx *dbTx, workerID uuid.UUID, ev
 		return false, nil, nil
 	}
 
+	if event.Kind == "user_input_answered" {
+		// Exact approval ownership/generation below also permits a saved native
+		// answer recovered after restart, without modifying current session state.
+		if target.runtimeID == nil || target.sessionID == nil {
+			return false, nil, nil
+		}
+		var approval protocol.Approval
+		if err := json.Unmarshal(event.Data, &approval); err != nil {
+			return false, nil, fmt.Errorf("registry: decode answered input: %w", err)
+		}
+		return false, nil, applyInputAnswered(ctx, tx, workerID, *target.runtimeID, *target.sessionID, int64(event.RuntimeGeneration), approval)
+	}
+
 	if event.Kind == "approval_requested" || event.Kind == "approval_resolved" || event.Kind == "user_input_requested" {
 		if !target.runtimeCurrent || target.runtimeID == nil || target.sessionID == nil {
 			return false, nil, nil
@@ -815,6 +828,9 @@ func applyApproval(ctx context.Context, tx *dbTx, workerID, runtimeID, sessionID
 		}
 		if ct.RowsAffected() == 0 {
 			return ErrEventTarget
+		}
+		if len(approval.Questions) > 0 {
+			return preserveInputQuestions(ctx, tx, id, approval.Questions)
 		}
 		return nil
 	}

@@ -281,6 +281,29 @@ not send inferred answers. Environment and instruction metadata do not clear
 questions. Records imported by v0.5.25 are reconciled against later replies on
 the next worker restart.
 
+Answering a question edits its original Telegram message in place:
+
+```text
+Question: Does the pointer disappear when captured?
+
+Answer: The pointer disappears when captured.
+```
+
+The answer replaces the pending instructions and buttons. A separate **Reply
+with text** prompt for that question is updated too. Each answered field in a
+multi-question request is updated separately, while the remaining questions
+stay answerable. Edits keep working when another session is selected and are
+retried after a temporary Telegram failure.
+
+For tracked asynchronous questions, the worker recognizes answers submitted
+through the terminal's native question UI and preserves their response text.
+It also reconciles answers from saved history when recovering a pending
+request. An ordinary prompt or a dismissal is not treated as an answer.
+Blocking prompts answered by another client may only emit
+`serverRequest/resolved`, which contains request identifiers but no answer
+text; those cannot receive a question-and-answer edit from that notification
+alone. See the [official App Server documentation](https://learn.chatgpt.com/docs/app-server#toolrequestuserinput).
+
 Asynchronous questions also have a **Dismiss question** button. This clears the
 gateway's pending request without sending an answer or changing your selection.
 

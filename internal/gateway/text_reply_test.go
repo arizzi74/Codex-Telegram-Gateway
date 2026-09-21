@@ -69,6 +69,35 @@ func TestTextReplyGroupAndExpiredRequestDoNotForceComposer(t *testing.T) {
 	}
 }
 
+func TestQueuedQuestionAnsweredInTerminalDoesNotRetryOrRestoreControls(t *testing.T) {
+	for _, view := range []string{"input_pending", "input_prompt"} {
+		t.Run(view, func(t *testing.T) {
+			store, row := textReplyFixture(t)
+			// The equipment answer arrived after this UI delivery was queued;
+			// only another question remains in the same pending request.
+			store.approval.Questions = []protocol.Question{{ID: "display", Prompt: "Which display?", Options: []string{"One", "Two"}}}
+			var response registry.AcceptResult
+			if err := json.Unmarshal(row.Payload, &response); err != nil {
+				t.Fatal(err)
+			}
+			response.View, response.TextReply = view, view == "input_prompt"
+			row.Payload, _ = json.Marshal(response)
+			sender := testSender(store, nil)
+			messages, err := sender.renderDeliveryMessages(t.Context(), row)
+			if err != nil || len(messages) != 1 {
+				t.Fatalf("obsolete field cannot finish delivery: messages=%d err=%v", len(messages), err)
+			}
+			message, err := sender.deliveryMessageForSend(t.Context(), row, messages[0])
+			if err != nil || message.Text != "This input request is no longer pending." || message.Keyboard != nil || len(store.callbacks) != 0 {
+				t.Fatalf("obsolete field restored question controls: %+v, %v", message, err)
+			}
+			if session, _, approval := deliveryRoute(row); session != testSessionID.String() || approval != testApproval.String() || deliveryQuestion(row) != "equipment" {
+				t.Fatal("obsolete question lost the original route needed by its answer edit")
+			}
+		})
+	}
+}
+
 func TestLongTextReplyForcesOnlyLastChunkAndSurvivesSessionFormatting(t *testing.T) {
 	store, row := textReplyFixture(t)
 	store.approval.Questions[0].Prompt = strings.Repeat("Long question text. ", 500)

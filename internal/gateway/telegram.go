@@ -173,7 +173,7 @@ func (t *TelegramClient) Edit(ctx context.Context, chatID, messageID int64, text
 	}
 	payload := map[string]any{"chat_id": chatID, "message_id": messageID, "text": text}
 	if keyboard != nil {
-		payload["reply_markup"] = keyboard
+		payload["reply_markup"] = telegramEditReplyMarkup(keyboard)
 	}
 	return t.call(ctx, "editMessageText", payload, nil)
 }
@@ -183,12 +183,27 @@ func (t *TelegramClient) EditFormatted(ctx context.Context, messageID int64, mes
 		return err
 	}
 	return t.call(ctx, "editMessageText", struct {
-		ChatID    int64             `json:"chat_id"`
-		MessageID int64             `json:"message_id"`
-		Text      string            `json:"text"`
-		Entities  []TelegramEntity  `json:"entities"`
-		Keyboard  *TelegramKeyboard `json:"reply_markup,omitempty"`
-	}{message.ChatID, messageID, message.Text, message.Entities, message.Keyboard}, nil)
+		ChatID    int64            `json:"chat_id"`
+		MessageID int64            `json:"message_id"`
+		Text      string           `json:"text"`
+		Entities  []TelegramEntity `json:"entities"`
+		Keyboard  any              `json:"reply_markup,omitempty"`
+	}{message.ChatID, messageID, message.Text, message.Entities, telegramEditReplyMarkup(message.Keyboard)}, nil)
+}
+
+func telegramEditReplyMarkup(keyboard *TelegramKeyboard) any {
+	if keyboard == nil {
+		return nil
+	}
+	if len(keyboard.Rows) == 0 && !keyboard.ForceReply {
+		// Telegram requires the empty array to remove an existing keyboard.
+		// TelegramKeyboard's omitempty is also used by standalone ForceReply,
+		// so an empty keyboard cannot be marshaled through that type here.
+		return struct {
+			Rows [][]TelegramButton `json:"inline_keyboard"`
+		}{Rows: [][]TelegramButton{}}
+	}
+	return keyboard
 }
 
 func validateTelegramKeyboard(keyboard *TelegramKeyboard, allowForceReply bool) error {

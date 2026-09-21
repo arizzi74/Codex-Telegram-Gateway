@@ -43,7 +43,30 @@ func answerProgressQuestion(t *testing.T, env eventTestEnv, count int) uuid.UUID
 
 func answerProgressUI(t *testing.T, store *Store) Delivery {
 	t.Helper()
-	row := claimProgress(t, store, 1)[0]
+	rows, err := store.ClaimDeliveries(t.Context(), 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var acknowledgements []Delivery
+	for _, row := range rows {
+		if row.Kind != "question_answered" {
+			acknowledgements = append(acknowledgements, row)
+			continue
+		}
+		var edit QuestionAnswerEdit
+		if json.Unmarshal(row.Payload, &edit) != nil || edit.MessageID <= 0 || edit.Question == "" || edit.Answer == "" {
+			t.Fatalf("invalid answered question edit: %+v", row)
+		}
+		// Editing the old question is independent of the acknowledgement that
+		// gates progress reposting. It must not create or retire a message.
+		if err := store.MarkDeliverySent(t.Context(), row.ID, edit.MessageID, "", "", ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(acknowledgements) != 1 {
+		t.Fatalf("answer acknowledgement did not fence progress: %+v", acknowledgements)
+	}
+	row := acknowledgements[0]
 	var result AcceptResult
 	if row.Kind != "ui_response" || json.Unmarshal(row.Payload, &result) != nil || !result.ProgressReposition {
 		t.Fatalf("answer acknowledgement did not precede progress: %+v %+v", row, result)

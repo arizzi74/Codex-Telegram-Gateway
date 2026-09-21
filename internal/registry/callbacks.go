@@ -462,7 +462,12 @@ func (s *Store) recordBotMessageRoute(ctx context.Context, botID string, chatID,
 	if approvalID != uuid.Nil {
 		approval = approvalID
 	}
-	_, err := s.pool.Exec(ctx, `INSERT INTO bot_message_routes
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	_, err = tx.Exec(ctx, `INSERT INTO bot_message_routes
         (bot_id,chat_id,message_id,session_id,turn_id,approval_id,question_id)
         VALUES ($1,$2,$3,$4,NULLIF($5,''),$6,NULLIF($7,''))
         ON CONFLICT (bot_id,chat_id,message_id) DO UPDATE SET
@@ -470,5 +475,10 @@ func (s *Store) recordBotMessageRoute(ctx context.Context, botID string, chatID,
 	if err != nil {
 		return fmt.Errorf("registry: record bot message route: %w", err)
 	}
-	return nil
+	if approvalID != uuid.Nil && questionID != "" {
+		if err := enqueueQuestionAnswerEdits(ctx, tx, approvalID, botID, chatID, messageID); err != nil {
+			return err
+		}
+	}
+	return tx.Commit(ctx)
 }

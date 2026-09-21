@@ -757,6 +757,15 @@ func (s *sessionActor) command(req actorCommand) {
 		return
 	}
 	if c.Operation == protocol.ApprovalResponse || c.Operation == protocol.InputResponse {
+		if pending, ok := s.pending[c.Arguments.RequestID]; ok && c.Operation == protocol.InputResponse && len(c.Arguments.Answers) > 0 {
+			answered := pending.approval
+			answered.Answers = s.redactQuestionAnswers(answered, c.Arguments.Answers)
+			answered.State = "answered"
+			if err := s.agent.emit(s.runtime, s.session.ID, "user_input_answered", answered); err != nil {
+				s.agent.report(err)
+				return
+			}
+		}
 		state := "approved"
 		if c.Arguments.Decision == "decline" {
 			state = "declined"

@@ -134,6 +134,13 @@ func ResolveHistoryQuestions(prior []AsyncQuestion, turns []HistoryTurn) []Async
 	for i, question := range prior {
 		question.AnsweredIDs = append([]string(nil), question.AnsweredIDs...)
 		question.SupersededIDs = append([]string(nil), question.SupersededIDs...)
+		if question.Answers != nil {
+			answers := make(map[string][]string, len(question.Answers))
+			for id, values := range question.Answers {
+				answers[id] = append([]string(nil), values...)
+			}
+			question.Answers = answers
+		}
 		result[i] = question
 		seen[[2]string{question.TurnID, question.ItemID}] = true
 	}
@@ -148,6 +155,12 @@ func ResolveHistoryQuestions(prior []AsyncQuestion, turns []HistoryTurn) []Async
 					result = append(result, AsyncQuestion{TurnID: turn.ID, ItemID: event.ItemID, Text: event.Text, Questions: event.Questions})
 				}
 				continue
+			}
+			var titles []string
+			for _, question := range result {
+				for _, field := range question.Questions {
+					titles = append(titles, field.Prompt)
+				}
 			}
 			for index := range result {
 				question := &result[index]
@@ -167,8 +180,12 @@ func ResolveHistoryQuestions(prior []AsyncQuestion, turns []HistoryTurn) []Async
 					}
 					if AsyncQuestionInputSupersedes(event.Text) {
 						question.SupersededIDs = append(question.SupersededIDs, field.ID)
-					} else if AsyncQuestionAnswerMatches(field.Prompt, event.Text) {
+					} else if answer, ok := AsyncQuestionAnswer(field.Prompt, event.Text, titles...); ok {
 						question.AnsweredIDs = append(question.AnsweredIDs, field.ID)
+						if question.Answers == nil {
+							question.Answers = make(map[string][]string)
+						}
+						question.Answers[field.ID] = []string{answer}
 					}
 				}
 			}

@@ -304,6 +304,15 @@ func (s *Store) MarkDeliveryChunkSent(ctx context.Context, id string, index int,
 		if _, err = tx.Exec(ctx, `INSERT INTO bot_message_routes(bot_id,chat_id,message_id,session_id,turn_id,approval_id,question_id) VALUES($1,$2,$3,$4,NULLIF($5,''),NULLIF($6,''),NULLIF($7,'')) ON CONFLICT DO NOTHING`, bot, chat, messageID, sid, turnID, approvalID, questionID); err != nil {
 			return err
 		}
+		if approvalID != "" && questionID != "" {
+			id, err := uuid.Parse(approvalID)
+			if err != nil {
+				return err
+			}
+			if err := enqueueQuestionAnswerEdits(ctx, tx, id, bot, chat, messageID); err != nil {
+				return err
+			}
+		}
 	}
 	var pending bool
 	if err = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM telegram_delivery_chunks WHERE delivery_id=$1 AND status='pending')`, deliveryID).Scan(&pending); err != nil {

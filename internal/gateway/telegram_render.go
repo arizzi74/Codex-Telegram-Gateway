@@ -440,7 +440,11 @@ func (s *Sender) renderPendingInput(ctx context.Context, row registry.Delivery, 
 	}
 	question, ok := findQuestion(approval.Questions, response.QuestionID)
 	if !ok {
-		return "", nil, errors.New("render pending input: question is unavailable")
+		// A terminal answer can remove one field while the rest of this
+		// request remains pending. Do not retry its already-queued prompt or
+		// restore obsolete controls; checkpointing retains the question route
+		// so an available answer summary can replace this message in place.
+		return "This input request is no longer pending.", nil, nil
 	}
 	_, session, runtime, worker, err := s.selectedIdentity(ctx, response.SessionID, response.RuntimeID)
 	if err != nil {

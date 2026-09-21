@@ -159,6 +159,10 @@ labelled with its name; answering them does not change your selection.
 Use `/tgquestions` (or `/tginput` without arguments) to reopen pending questions
 and approvals from any session that the worker received while running.
 Choose **Open** and then select an option or reply to the question with text.
+After an answer, the original Telegram question is edited to show `Question:`
+and `Answer:`, with its buttons and instructions removed. Native terminal
+answers to tracked asynchronous questions produce the same edit when their
+answer text is available to the worker.
 Old conversations are not imported as new pending questions. An ordinary new
 prompt clears earlier pending questions in that session; a reply to a specific
 question preserves the others. Official Codex 0.155.1 keeps a separate TUI

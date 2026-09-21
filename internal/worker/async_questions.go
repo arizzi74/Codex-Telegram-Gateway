@@ -76,6 +76,10 @@ func (s *sessionActor) recoverAsyncQuestions() {
 			if !exists {
 				continue
 			}
+			if err := s.recordAsyncAnswers(record.Approval, item.Answers); err != nil {
+				s.agent.report(err)
+				return
+			}
 			// Intersect history with the saved remaining fields. History must
 			// never restore a field answered or dismissed through Telegram.
 			remaining := make([]protocol.Question, 0, len(record.Approval.Questions))
@@ -118,15 +122,29 @@ func (s *sessionActor) recoverAsyncQuestions() {
 
 func (s *sessionActor) observeAsyncAnswer(text string) {
 	supersedes := codexadapter.AsyncQuestionInputSupersedes(text)
+	var titles []string
+	for _, approval := range s.asyncQuestions {
+		for _, question := range approval.Questions {
+			titles = append(titles, question.Prompt)
+		}
+	}
 	for requestID, approval := range s.asyncQuestions {
 		remaining := make([]protocol.Question, 0, len(approval.Questions))
+		answers := make(map[string][]string)
 		for _, question := range approval.Questions {
-			if !supersedes && !codexadapter.AsyncQuestionAnswerMatches(question.Prompt, text) {
+			answer, answered := codexadapter.AsyncQuestionAnswer(question.Prompt, text, titles...)
+			if !supersedes && !answered {
 				remaining = append(remaining, question)
+			} else if !supersedes && answered {
+				answers[question.ID] = []string{answer}
 			}
 		}
 		if len(remaining) == len(approval.Questions) {
 			continue
+		}
+		if err := s.recordAsyncAnswers(approval, answers); err != nil {
+			s.agent.report(err)
+			return
 		}
 		if len(remaining) == 0 {
 			state := "resolved"
@@ -201,6 +219,16 @@ func (s *sessionActor) answerAsyncQuestion(command protocol.Command, client *cod
 		s.agent.report(s.agent.executionError(command, err))
 		return
 	}
+	// FormatAsyncQuestionAnswer trims boundary whitespace before submission.
+	// Report that actual input, retaining newlines inside each answer.
+	answers := make(map[string][]string, len(approval.Questions))
+	for _, question := range approval.Questions {
+		answers[question.ID] = []string{strings.TrimSpace(command.Arguments.Answers[question.ID][0])}
+	}
+	if err := s.recordAsyncAnswers(approval, answers); err != nil {
+		s.agent.report(err)
+		return
+	}
 	if err := s.agent.store.setAsyncQuestionState(s.runtime, s.session.ID, approval.RequestID, "resolved", true); err != nil {
 		s.agent.report(err)
 		return
@@ -217,4 +245,23 @@ func (s *sessionActor) answerAsyncQuestion(command protocol.Command, client *cod
 	}
 	_, err = s.agent.record(command, CommandCompleted, result, kind)
 	s.agent.report(err)
+}
+
+func (s *sessionActor) recordAsyncAnswers(approval protocol.Approval, answers map[string][]string) error {
+	return s.agent.store.recordAsyncQuestionAnswers(s.runtime, s.session.ID, approval.RequestID, s.redactQuestionAnswers(approval, answers))
+}
+
+func (s *sessionActor) redactQuestionAnswers(approval protocol.Approval, answers map[string][]string) map[string][]string {
+	result := make(map[string][]string)
+	for _, question := range approval.Questions {
+		for _, answer := range answers[question.ID] {
+			if question.Secret {
+				answer = "[REDACTED]"
+			} else {
+				answer = s.agent.redactor.Redact(answer)
+			}
+			result[question.ID] = append(result[question.ID], answer)
+		}
+	}
+	return result
 }

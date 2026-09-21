@@ -113,9 +113,13 @@ func TestAnsweredQuestionRepostsProgressBelowNextQuestionAndKeepsLaterEdits(t *t
 		t.Fatalf("answer was not accepted: %+v %v", accepted, err)
 	}
 	flush()
+	flush() // The answered question is edited as a separate durable delivery.
 	nextQuestionID := int64(len(api.messages))
 	if nextQuestionID <= questionID || !strings.Contains(api.live[nextQuestionID].Text, "Which equipment?") {
 		t.Fatalf("next question missing: %+v", api.live[nextQuestionID])
+	}
+	if answered := api.live[questionID]; answered.Text != "Question: Which system?\n\nAnswer: Linux" || answered.Keyboard == nil || len(answered.Keyboard.Rows) != 0 {
+		t.Fatalf("answered question was not simplified in place: %+v", answered)
 	}
 	flush()
 	if int64(len(api.messages)) != nextQuestionID {
@@ -133,7 +137,7 @@ func TestAnsweredQuestionRepostsProgressBelowNextQuestionAndKeepsLaterEdits(t *t
 	sender = NewSender(store, api, nil, options)
 	flush()
 	flush()
-	if len(api.messages) != int(nextQuestionID)+2 || len(api.edits) != 0 {
+	if len(api.messages) != int(nextQuestionID)+2 || len(api.edits) != 1 || api.editIDs[0] != questionID {
 		t.Fatalf("progress was edited above the question instead of reposted: sends=%d edits=%d", len(api.messages), len(api.edits))
 	}
 	newIDs := map[string]int64{}
@@ -167,7 +171,7 @@ func TestAnsweredQuestionRepostsProgressBelowNextQuestionAndKeepsLaterEdits(t *t
 			t.Fatalf("%s edited message %d, want reposted %d", kind, got, newIDs[kind])
 		}
 	}
-	if len(api.messages) != int(nextQuestionID)+2 || len(api.edits) != 2 {
+	if len(api.messages) != int(nextQuestionID)+2 || len(api.edits) != 3 {
 		t.Fatal("live progress updates created more temporary messages")
 	}
 }

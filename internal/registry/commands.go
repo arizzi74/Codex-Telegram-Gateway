@@ -549,6 +549,12 @@ func acceptInputApproval(ctx context.Context, tx *dbTx, in IncomingUpdate, id uu
 	if err != nil {
 		return AcceptResult{}, fmt.Errorf("registry: encode input answers: %w", err)
 	}
+	if err := preserveInputQuestions(ctx, tx, id, approval.Questions); err != nil {
+		return AcceptResult{}, err
+	}
+	if err := recordInputAnswerSummaries(ctx, tx, id, answers, true); err != nil {
+		return AcceptResult{}, err
+	}
 	target.threadID = threadID
 	if !complete {
 		if _, err := tx.Exec(ctx, "UPDATE approvals SET input_answers=$2 WHERE approval_id=$1", id, string(answersJSON)); err != nil {

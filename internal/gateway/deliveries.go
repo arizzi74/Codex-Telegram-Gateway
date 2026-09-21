@@ -163,7 +163,9 @@ func (s *Sender) sendDelivery(ctx context.Context, row registry.Delivery) error 
 		}
 		sendCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 		var id int64
-		if isProgressDelivery(row.Kind) {
+		if row.Kind == "question_answered" {
+			id, err = s.sendQuestionAnswer(sendCtx, row, message)
+		} else if isProgressDelivery(row.Kind) {
 			id, err = s.sendProgress(sendCtx, row, message)
 		} else {
 			id, err = s.api.Send(sendCtx, message)
@@ -186,6 +188,9 @@ func (s *Sender) sendDelivery(ctx context.Context, row registry.Delivery) error 
 }
 
 func (s *Sender) renderDeliveryMessages(ctx context.Context, row registry.Delivery) ([]json.RawMessage, error) {
+	if row.Kind == "question_answered" {
+		return s.renderQuestionAnswer(row)
+	}
 	renderCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	parts, keyboard, err := s.renderDeliveryParts(renderCtx, row)
@@ -288,6 +293,11 @@ func telegramRetryDelay(attempt int, err error) time.Duration {
 }
 
 func deliveryRoute(row registry.Delivery) (sessionID, turnID, approvalID string) {
+	if row.Kind == "question_answered" {
+		// This edits an already-routed question; it must not replace its route
+		// or acquire the currently selected session's presentation.
+		return "", "", ""
+	}
 	if row.Kind == "ui_response" {
 		var v struct {
 			SessionID  string `json:"session_id"`

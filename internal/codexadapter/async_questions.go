@@ -22,6 +22,9 @@ type AsyncQuestion struct {
 	// AnsweredIDs records matching later native answer markers without
 	// removing questions, so a caller can reconcile persisted pending state.
 	AnsweredIDs []string
+	// Answers preserves the text following each native quoted-title marker.
+	// Superseded fields never receive invented answers.
+	Answers map[string][]string
 	// SupersededIDs records fields cleared by a later ordinary user prompt.
 	// This follows the native input lifecycle without claiming they were answered.
 	SupersededIDs []string
@@ -71,26 +74,51 @@ func asyncQuestionAnswerPrefix(title string) string {
 // An unrelated prompt or an answer that predates a question does not resolve
 // it. Multiple quoted answers may be sent together in a Telegram response.
 func AsyncQuestionAnswerMatches(title, text string) bool {
+	_, ok := extractAsyncQuestionAnswer(title, text, nil, true)
+	return ok
+}
+
+// AsyncQuestionAnswer returns the explicit native answer, preserving its
+// multiline body. Only the quoted-title framing and inter-answer separator
+// are removed. Callers supply known titles when a submission can contain
+// several answers. Other quoted paragraphs belong to the answer itself.
+// An ordinary subsequent prompt is not evidence of an answer.
+func AsyncQuestionAnswer(title, text string, knownTitles ...string) (string, bool) {
+	return extractAsyncQuestionAnswer(title, text, knownTitles, false)
+}
+
+func extractAsyncQuestionAnswer(title, text string, knownTitles []string, matchOnly bool) (string, bool) {
 	text = asyncQuestionPromptText(text)
 	prefix := asyncQuestionAnswerPrefix(title)
 	for offset := 0; offset < len(text); {
 		index := strings.Index(text[offset:], prefix)
 		if index < 0 {
-			return false
+			return "", false
 		}
 		index += offset
 		if index == 0 || strings.HasSuffix(text[:index], "\n\n") {
 			answer := text[index+len(prefix):]
-			if next := strings.Index(answer, "\n\n> "); next >= 0 {
-				answer = answer[:next]
+			end := len(answer)
+			for _, known := range knownTitles {
+				if next := strings.Index(answer, "\n\n"+asyncQuestionAnswerPrefix(known)); next >= 0 && next < end {
+					end = next
+				}
 			}
+			// Keep the legacy boolean marker recognizer conservative for an
+			// empty answer followed by a separate, unknown quoted question.
+			if matchOnly {
+				if next := strings.Index(answer, "\n\n> "); next >= 0 && next < end {
+					end = next
+				}
+			}
+			answer = answer[:end]
 			if strings.TrimSpace(answer) != "" {
-				return true
+				return answer, true
 			}
 		}
 		offset = index + len(prefix)
 	}
-	return false
+	return "", false
 }
 
 // AsyncQuestionInputSupersedes follows the native TUI's ordinary-prompt
@@ -246,6 +274,12 @@ func (c *Client) asyncQuestions(ctx context.Context, threadID string, maxPages i
 // it. Earlier-turn questions precede every item in the current turn; a
 // current-turn question becomes eligible only after its item is encountered.
 func resolveAsyncQuestionHistory(questions []AsyncQuestion, raw json.RawMessage) ([]AsyncQuestion, error) {
+	var titles []string
+	for _, question := range questions {
+		for _, field := range question.Questions {
+			titles = append(titles, field.Prompt)
+		}
+	}
 	var turn struct {
 		ID    string            `json:"id"`
 		Items []json.RawMessage `json:"items"`
@@ -290,8 +324,12 @@ func resolveAsyncQuestionHistory(questions []AsyncQuestion, raw json.RawMessage)
 				}
 				if supersedes {
 					question.SupersededIDs = append(question.SupersededIDs, field.ID)
-				} else if AsyncQuestionAnswerMatches(field.Prompt, text) {
+				} else if answer, ok := AsyncQuestionAnswer(field.Prompt, text, titles...); ok {
 					question.AnsweredIDs = append(question.AnsweredIDs, field.ID)
+					if question.Answers == nil {
+						question.Answers = make(map[string][]string)
+					}
+					question.Answers[field.ID] = []string{answer}
 				}
 			}
 		}

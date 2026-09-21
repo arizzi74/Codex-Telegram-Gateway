@@ -359,7 +359,10 @@ type Approval struct {
 	Summary   string     `json:"summary"`
 	Decisions []string   `json:"decisions,omitempty"`
 	Questions []Question `json:"questions,omitempty"`
-	State     string     `json:"state,omitempty"`
+	// Answers is present on confirmed user_input_answered events. Values are
+	// the submitted answers, with secret fields and configured secrets redacted.
+	Answers map[string][]string `json:"answers,omitempty"`
+	State   string              `json:"state,omitempty"`
 }
 
 type Question struct {
