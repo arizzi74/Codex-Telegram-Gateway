@@ -43,7 +43,7 @@ func (s *Store) ListTelegramTypingTargets(ctx context.Context, limit int) ([]Tel
         WHERE session.archived=FALSE AND session.state='running' AND session.active_turn_id IS NOT NULL
           AND worker.enabled=TRUE AND worker.connectivity='online'
           AND `+sessionVisibleSQL("destination.bot_id", "destination.chat_id", "destination.message_thread_id", "session.session_id")+`
-    ) SELECT bot_id,chat_id,topic_id FROM waiting GROUP BY bot_id,chat_id,topic_id ORDER BY min(waiting_since),bot_id,chat_id,topic_id LIMIT $1`, limit)
+    ) SELECT bot_id,chat_id,topic_id FROM waiting WHERE `+telegramChatAllowedSQL("waiting.bot_id", "waiting.chat_id")+` GROUP BY bot_id,chat_id,topic_id ORDER BY min(waiting_since),bot_id,chat_id,topic_id LIMIT $1`, limit)
 	if err != nil {
 		return nil, fmt.Errorf("registry: list Telegram typing targets: %w", err)
 	}

@@ -62,7 +62,7 @@ func (s *Store) announceAsyncQuestion(runtime protocol.Runtime, sessionID string
 		if err != nil {
 			return err
 		}
-		_, err = appendEvent(tx, protocol.Event{RuntimeID: runtime.ID, RuntimeGeneration: runtime.Generation, SessionID: sessionID, Kind: "user_input_requested", Data: data})
+		_, err = s.appendEvent(tx, protocol.Event{RuntimeID: runtime.ID, RuntimeGeneration: runtime.Generation, SessionID: sessionID, Kind: "user_input_requested", Data: data})
 		pending = err == nil
 		return err
 	})
@@ -112,7 +112,7 @@ func (s *Store) recordAsyncQuestionAnswers(runtime protocol.Runtime, sessionID, 
 		// History can recover an answer after a runtime restart. Keep the
 		// original generation and approval identity so the gateway edits only
 		// that historical question, never a current request with reused IDs.
-		if _, err := appendEvent(tx, protocol.Event{RuntimeID: runtime.ID, RuntimeGeneration: saved.Generation, SessionID: sessionID, Kind: "user_input_answered", Data: data}); err != nil {
+		if _, err := s.appendEvent(tx, protocol.Event{RuntimeID: runtime.ID, RuntimeGeneration: saved.Generation, SessionID: sessionID, Kind: "user_input_answered", Data: data}); err != nil {
 			return err
 		}
 		encoded, err := json.Marshal(saved)
@@ -169,7 +169,7 @@ func (s *Store) setAsyncQuestionState(runtime protocol.Runtime, sessionID, reque
 			if err != nil {
 				return err
 			}
-			_, err = appendEvent(tx, protocol.Event{RuntimeID: runtime.ID, RuntimeGeneration: runtime.Generation, SessionID: sessionID, Kind: "approval_resolved", Data: data})
+			_, err = s.appendEvent(tx, protocol.Event{RuntimeID: runtime.ID, RuntimeGeneration: runtime.Generation, SessionID: sessionID, Kind: "approval_resolved", Data: data})
 			return err
 		}
 		return nil

@@ -37,6 +37,12 @@ type sessionDeliveryMessage struct {
 }
 
 func (s *Sender) skipInvisibleDelivery(ctx context.Context, row registry.Delivery) (bool, error) {
+	if err := s.authorizeDeliveryDestination(ctx, row, row.ChatID); err != nil {
+		if errors.Is(err, errSessionDeliverySuppressed) {
+			return true, nil
+		}
+		return false, err
+	}
 	if store, ok := s.store.(telegramSessionVisibilityStore); ok {
 		skip, err := store.SuppressTelegramDelivery(ctx, row.ID)
 		if err != nil || !skip {

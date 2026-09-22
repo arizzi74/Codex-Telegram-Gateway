@@ -215,7 +215,7 @@ func (s *Store) DeleteSession(runtime protocol.Runtime, expected protocol.Sessio
 		if err := bucket.Put(key, encoded); err != nil {
 			return err
 		}
-		_, err = appendEvent(tx, protocol.Event{WorkerID: s.workerID, RuntimeID: runtime.ID, RuntimeGeneration: runtime.Generation, SessionID: saved.ID, Kind: "session_state_changed", Data: encoded})
+		_, err = s.appendEvent(tx, protocol.Event{WorkerID: s.workerID, RuntimeID: runtime.ID, RuntimeGeneration: runtime.Generation, SessionID: saved.ID, Kind: "session_state_changed", Data: encoded})
 		return err
 	})
 	return saved, err

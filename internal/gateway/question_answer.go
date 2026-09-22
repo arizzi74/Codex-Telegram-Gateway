@@ -67,6 +67,9 @@ func (s *Sender) sendQuestionAnswer(ctx context.Context, row registry.Delivery, 
 	// Force removal of all question controls and formatting, including when
 	// retrying a previously prepared checkpoint.
 	message.Keyboard, message.Entities = &TelegramKeyboard{}, []TelegramEntity{}
+	if err := s.authorizeDeliveryDestination(ctx, row, message.ChatID); err != nil {
+		return 0, err
+	}
 	var err error
 	if api, ok := s.api.(TelegramFormattedEditAPI); ok {
 		err = api.EditFormatted(ctx, edit.MessageID, message)

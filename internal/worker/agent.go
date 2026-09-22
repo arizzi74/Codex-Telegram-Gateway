@@ -44,7 +44,7 @@ func NewAgent(cfg config.WorkerConfig, store *Store, logger *slog.Logger) (*Agen
 	if logger == nil {
 		logger = slog.Default()
 	}
-	redactor, err := auth.NewRedactor(append([]string{`cwk_[a-fA-F0-9]{64}`, `sk-[A-Za-z0-9_-]{20,}`, `[0-9]{6,12}:[A-Za-z0-9_-]{30,}`}, cfg.RedactPatterns...), "")
+	redactor, err := newWorkerRedactor(cfg.RedactPatterns)
 	if err != nil {
 		return nil, err
 	}
@@ -747,6 +747,7 @@ func (s *sessionActor) command(req actorCommand) {
 	case protocol.ApprovalResponse:
 		err = client.ReplyApproval(s.agent.ctx, c.Arguments.RequestID, codexadapter.ApprovalResponse{Decision: c.Arguments.Decision})
 	case protocol.InputResponse:
+		c.Arguments.Answers = originalQuestionAnswers(s.agent.redactor, s.pending[c.Arguments.RequestID].approval, c.Arguments.Answers)
 		err = client.ReplyAnswers(s.agent.ctx, c.Arguments.RequestID, c.Arguments.Answers)
 	default:
 		err = fmt.Errorf("unsupported control operation")

@@ -85,7 +85,10 @@ func (s *Sender) sendProgress(ctx context.Context, row registry.Delivery, messag
 		return 0, errSessionDeliverySuppressed
 	}
 	if id == 0 {
-		return s.api.Send(ctx, message)
+		return s.sendAuthorizedMessage(ctx, row, message)
+	}
+	if err := s.authorizeDeliveryDestination(ctx, row, message.ChatID); err != nil {
+		return 0, err
 	}
 	err = api.EditFormatted(ctx, id, message)
 	var telegram *TelegramError
@@ -104,7 +107,7 @@ func (s *Sender) sendProgress(ctx context.Context, row registry.Delivery, messag
 			} else if skip {
 				return 0, errSessionDeliverySuppressed
 			}
-			return s.api.Send(ctx, message)
+			return s.sendAuthorizedMessage(ctx, row, message)
 		}
 	}
 	return id, err

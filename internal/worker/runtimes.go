@@ -97,8 +97,11 @@ func NewRuntimeManager(cfg config.WorkerConfig, store *Store, logger *slog.Logge
 		}
 	}
 	m := &RuntimeManager{cfg: cfg, store: store, log: logger, hooks: hooks, runtimes: make(map[string]*managedRuntime), attachments: make(map[string]*attachmentProxy), ready: make(chan struct{})}
-	redactor, err := auth.NewRedactor(append([]string{`cwk_[a-fA-F0-9]{64}`, `sk-[A-Za-z0-9_-]{20,}`, `[0-9]{6,12}:[A-Za-z0-9_-]{30,}`}, cfg.RedactPatterns...), "")
+	redactor, err := newWorkerRedactor(cfg.RedactPatterns)
 	if err != nil {
+		return nil, err
+	}
+	if err := store.configureRedactor(redactor); err != nil {
 		return nil, err
 	}
 	m.statsRedactor = redactor

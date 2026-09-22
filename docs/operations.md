@@ -18,6 +18,18 @@ administrator setup. For a manually managed nginx deployment, the sample
 the admin interface, HTTP APIs, and WebSocket upgrades with bounded body and
 timeout settings. Check it with `nginx -t` before a reload.
 
+The proxy must overwrite `X-Real-IP` with its socket peer address: nginx uses
+`proxy_set_header X-Real-IP $remote_addr;` and Caddy uses
+`header_up X-Real-IP {remote_host}` inside `reverse_proxy`. Include this setting
+on every worker and admin API route when updating existing proxy configurations.
+The gateway accepts this single IP only from a loopback peer and ignores
+`Forwarded` and `X-Forwarded-For`; direct non-loopback requests use the socket
+address. Local callers share the proxy's trust boundary. Admin login initiation
+and completion have separate per-client and global limits in the gateway, so
+generated proxy snippets require no global nginx rate-limit zones. Valid worker
+tokens bypass anonymous failure limits, preserving reconnects even behind a
+shared NAT or a proxy missing the client header.
+
 ## Gateway host
 
 Create a dedicated unprivileged service account and data directories, then
@@ -51,7 +63,35 @@ Apply a gateway update by stop/start or `systemctl restart codex-gateway` only
 after the replacement binary and matching migrations are present. Workers
 remain running and reconnect after the gateway returns.
 
+After changing `allowed_chat_ids`, restart the gateway to load the new policy.
+At startup it disables remembered destinations outside that list and permanently
+suppresses their queued messages, including partially delivered replies and
+approval requests. Every outbound message, edit, session menu and typing request
+also checks the active policy before sending. Readding a chat permits new
+notifications without replaying the suppressed backlog. Sessions, pending
+approvals and saved selections remain intact; deletion of old progress messages
+and scoped menus can still complete. An empty `allowed_chat_ids` list allows
+every chat for the authorized user, so use a nonempty list to restrict chats.
+
 ## Worker service
+
+Worker `redact_patterns` apply to outbound display text before it enters the
+durable event outbox, including session names/previews, question prompts,
+headers/options, errors, and runtime metadata. Pending outbox events are
+sanitized on startup without changing their replay identities. Raw question
+values remain in the worker's private local records so selecting a redacted
+option still submits the original answer; colliding visible labels are numbered.
+Previously delivered gateway history is not retroactively removed.
+
+Routing data is deliberately preserved: workspace paths (`cwd`, `default_cwd`,
+workspace browser paths), opaque IDs, and model/permission command arguments
+must round-trip unchanged. Do not embed secrets in these routing values;
+redaction rules protect display fields, not identifiers or filesystem locations.
+
+`/diff` disables executable Git hooks (including `core.fsmonitor`), clean/process
+filters, external diff and textconv, and ignores inherited Git overrides and
+user/system Git configuration. Repositories using content filters are displayed
+without those filters, so this view can differ from a local configured Git diff.
 
 On Linux, as the developer who owns the repositories and Codex credentials:
 

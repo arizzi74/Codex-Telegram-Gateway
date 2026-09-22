@@ -76,7 +76,7 @@ func (l *Layout) RequireUser() error {
 		if os.Geteuid() != 0 {
 			return errors.New("gateway installation and updates require sudo")
 		}
-		for _, path := range []string{l.State, l.Config, filepath.Dir(l.Config), filepath.Dir(l.Manager)} {
+		for _, path := range []string{l.State, l.Config, filepath.Dir(l.Config), filepath.Dir(l.Manager), l.Binary, l.Manager} {
 			info, err := os.Lstat(path)
 			if errors.Is(err, os.ErrNotExist) {
 				continue
@@ -84,13 +84,23 @@ func (l *Layout) RequireUser() error {
 			if err != nil {
 				return err
 			}
-			stat, ok := info.Sys().(*syscall.Stat_t)
-			if !ok || info.Mode()&os.ModeSymlink != 0 || stat.Uid != 0 || info.Mode().Perm()&0022 != 0 {
-				return errors.New("gateway installer paths must be root-owned and not group/world writable")
+			if err := validateGatewayInstallerPath(info, path == l.Binary || path == l.Manager); err != nil {
+				return err
 			}
 		}
 	} else if os.Geteuid() == 0 {
 		return errors.New("run worker installation and updates as the worker account, without sudo")
+	}
+	return nil
+}
+
+func validateGatewayInstallerPath(info os.FileInfo, executable bool) error {
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok || info.Mode()&os.ModeSymlink != 0 || stat.Uid != 0 || info.Mode().Perm()&0022 != 0 {
+		return errors.New("gateway installer paths must be root-owned and not group/world writable")
+	}
+	if executable && !info.Mode().IsRegular() {
+		return errors.New("gateway executables must be regular root-owned files")
 	}
 	return nil
 }

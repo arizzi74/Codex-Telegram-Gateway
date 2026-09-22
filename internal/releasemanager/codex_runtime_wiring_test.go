@@ -56,6 +56,9 @@ func codexWiringArchive(t *testing.T) []byte {
 func newCodexWiringFixture(t *testing.T) *codexWiringFixture {
 	t.Helper()
 	m, l := coreWorkerHome(t)
+	// This fixture exercises update scheduling; cryptographic verification has
+	// separate signed-bundle tests in releaseauth and fail-closed download tests.
+	m.verifyManifest = func(string, string, []byte, []byte) error { return nil }
 	_, binary, _, _ := codexDistributionFixture(t)
 	f := &codexWiringFixture{m: m, l: l, projectTag: "v1.2.3", runtimeTag: "0.155.0"}
 	now := time.Date(2026, 9, 18, 12, 0, 0, 0, time.UTC)
@@ -92,13 +95,15 @@ func newCodexWiringFixture(t *testing.T) *codexWiringFixture {
 				return response, nil
 			}
 			assets := make([]map[string]string, 0, 3)
-			for _, name := range []string{"SHA256SUMS", workerAsset, localAsset} {
+			for _, name := range []string{"SHA256SUMS", "SHA256SUMS.sigstore.json", workerAsset, localAsset} {
 				assets = append(assets, map[string]string{"name": name, "browser_download_url": prefix + name})
 			}
 			metadata, _ := json.Marshal(map[string]any{"tag_name": f.projectTag, "draft": false, "prerelease": false, "assets": assets})
 			return coreResponse(request, metadata), nil
 		case prefix + "SHA256SUMS":
 			return coreResponse(request, []byte(coreHash(archive)+"  "+workerAsset+"\n"+coreHash(archive)+"  "+localAsset+"\n")), nil
+		case prefix + "SHA256SUMS.sigstore.json":
+			return coreResponse(request, []byte("fixture bundle")), nil
 		case prefix + workerAsset, prefix + localAsset:
 			f.assets++
 			return coreResponse(request, archive), nil

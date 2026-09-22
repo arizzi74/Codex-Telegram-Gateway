@@ -716,7 +716,7 @@ func TestAgentApprovalRequiresExactPendingRequestAndClears(t *testing.T) {
 	waitFor(t, func() bool { return responseID(server.Responses(), "43") })
 }
 
-func testAgent(t *testing.T) (*Agent, protocol.Runtime, *codextest.Server, func()) {
+func testAgent(t *testing.T, redactPatterns ...string) (*Agent, protocol.Runtime, *codextest.Server, func()) {
 	t.Helper()
 	root := t.TempDir()
 	workerID := uuid.NewString()
@@ -725,6 +725,7 @@ func testAgent(t *testing.T) (*Agent, protocol.Runtime, *codextest.Server, func(
 		t.Fatal(err)
 	}
 	cfg := config.WorkerConfig{WorkerID: workerID, AllowedWorkspaceRoots: []string{root}, MaxQueuedTurns: 20, Runtimes: []config.RuntimeProfile{{ID: "profile", WorkingDirectory: root}}}
+	cfg.RedactPatterns = redactPatterns
 	a, err := NewAgent(cfg, store, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err != nil {
 		t.Fatal(err)

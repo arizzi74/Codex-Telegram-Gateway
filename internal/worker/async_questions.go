@@ -174,6 +174,7 @@ func (s *sessionActor) answerAsyncQuestion(command protocol.Command, client *cod
 		s.agent.report(err)
 		return
 	}
+	command.Arguments.Answers = originalQuestionAnswers(s.agent.redactor, approval, command.Arguments.Answers)
 	var parts []string
 	for _, question := range approval.Questions {
 		values := command.Arguments.Answers[question.ID]

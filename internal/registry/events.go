@@ -884,8 +884,8 @@ func enqueueEventDeliveries(ctx context.Context, tx *dbTx, eventID uuid.UUID, ev
           AND ($1 IS NULL OR ($3 IN ('command_completed','command_failed') AND command.operation NOT IN ('start_turn','steer','interrupt'))
                OR $3 IN ('approval_requested','user_input_requested') OR `+sessionVisibleSQL("command.telegram_bot_id", "command.telegram_chat_id", "COALESCE(command.telegram_message_thread_id,0)", "$1")+`)
     ) SELECT bot_id, chat_id, message_thread_id FROM targets
-      WHERE $1 IS NULL OR EXISTS(SELECT 1 FROM sessions session WHERE session.session_id=$1 AND session.archived=FALSE)
-        OR ($3 IN ('command_completed','command_failed') AND EXISTS(SELECT 1 FROM commands command WHERE command.command_id=$4 AND command.operation NOT IN ('start_turn','steer','interrupt')))`, sessionID, runtimeID, event.Kind, commandID)
+      WHERE `+telegramChatAllowedSQL("targets.bot_id", "targets.chat_id")+` AND ($1 IS NULL OR EXISTS(SELECT 1 FROM sessions session WHERE session.session_id=$1 AND session.archived=FALSE)
+        OR ($3 IN ('command_completed','command_failed') AND EXISTS(SELECT 1 FROM commands command WHERE command.command_id=$4 AND command.operation NOT IN ('start_turn','steer','interrupt'))))`, sessionID, runtimeID, event.Kind, commandID)
 	if err != nil {
 		return fmt.Errorf("registry: find notification targets: %w", err)
 	}

@@ -293,9 +293,10 @@ func (m *Manager) reloadGatewayNginx(ctx context.Context) error {
 
 func gatewayNginxSnippet(cfg config.GatewayConfig) string {
 	upstream := "http://" + cfg.Listen
-	const headers = "    proxy_set_header Host $http_host;\n    proxy_set_header X-Real-IP $remote_addr;\n    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;\n    proxy_set_header X-Forwarded-Proto $scheme;\n"
+	const headers = "    proxy_set_header Host $http_host;\n    proxy_set_header X-Real-IP $remote_addr;\n    proxy_set_header X-Forwarded-For $remote_addr;\n    proxy_set_header X-Forwarded-Proto $scheme;\n"
 	var out strings.Builder
 	out.WriteString("# Managed by codex-telegramgw setup; gateway routes only.\n")
+	out.WriteString("# Gateway authentication limits use this overwritten X-Real-IP from loopback only.\n")
 	out.WriteString("location = /tgadmin { return 308 /tgadmin/; }\n")
 	for _, location := range []string{"^~ /tgadmin/", "= /tgapi/v1/workers/connect", "^~ /tgapi/", "= /tghealthz", "= /tgreadyz"} {
 		fmt.Fprintf(&out, "location %s {\n    proxy_pass %s;\n    proxy_http_version 1.1;\n", location, upstream)

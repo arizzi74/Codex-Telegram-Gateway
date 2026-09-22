@@ -11,9 +11,11 @@ import (
 	"path/filepath"
 	"reflect"
 	"sort"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/iaia/telegramgw/internal/auth"
 	"github.com/iaia/telegramgw/internal/protocol"
 	"github.com/iaia/telegramgw/internal/workerdb"
 )
@@ -62,6 +64,7 @@ type ReceiveResult struct {
 type Store struct {
 	db       *workerdb.DB
 	workerID string
+	redactor atomic.Pointer[auth.Redactor]
 }
 
 // OpenStore opens a 0600 SQLite database and binds it permanently to workerID.
@@ -238,7 +241,7 @@ func (s *Store) AppendEvent(event protocol.Event) (protocol.Event, error) {
 	var persisted protocol.Event
 	err := s.db.Update(func(tx *workerdb.Tx) error {
 		var err error
-		persisted, err = appendEvent(tx, event)
+		persisted, err = s.appendEvent(tx, event)
 		return err
 	})
 	return persisted, err
@@ -309,7 +312,7 @@ func (s *Store) RecordResult(commandID string, state CommandState, result *proto
 		if err = b.Put([]byte(commandID), data); err != nil {
 			return err
 		}
-		saved, err = appendEvent(tx, event)
+		saved, err = s.appendEvent(tx, event)
 		return err
 	})
 	return saved, err
@@ -495,7 +498,7 @@ func (s *Store) changeDiscoveredSessionVisibility(runtime protocol.Runtime, expe
 		if err := bucket.Put(key, encoded); err != nil {
 			return err
 		}
-		if _, err := appendEvent(tx, protocol.Event{
+		if _, err := s.appendEvent(tx, protocol.Event{
 			WorkerID: s.workerID, RuntimeID: runtime.ID, RuntimeGeneration: runtime.Generation,
 			SessionID: saved.ID, Kind: "session_state_changed", Data: encoded,
 		}); err != nil {

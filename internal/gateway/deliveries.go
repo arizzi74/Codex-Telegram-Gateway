@@ -29,9 +29,10 @@ type DeliveryStore interface {
 	PendingApproval(context.Context, uuid.UUID) (protocol.Approval, error)
 }
 type SenderOptions struct {
-	BotID    string
-	OwnerID  int64
-	Redactor *auth.Redactor
+	BotID          string
+	OwnerID        int64
+	AllowedChatIDs []int64
+	Redactor       *auth.Redactor
 }
 
 // SessionDeliveryRepairStore supports upgrading oversized, previously frozen
@@ -170,7 +171,7 @@ func (s *Sender) sendDelivery(ctx context.Context, row registry.Delivery) error 
 		} else if isProgressDelivery(row.Kind) {
 			id, err = s.sendProgress(sendCtx, row, message)
 		} else {
-			id, err = s.api.Send(sendCtx, message)
+			id, err = s.sendAuthorizedMessage(sendCtx, row, message)
 		}
 		cancel()
 		if err != nil {

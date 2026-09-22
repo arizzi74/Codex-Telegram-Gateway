@@ -173,6 +173,7 @@ func TestReleaseMetadataPinnedAndScoped(t *testing.T) {
 			metadata := map[string]any{"tag_name": "v1.2.3", "draft": false, "prerelease": false}
 			asset := map[string]any{"name": "SHA256SUMS", "browser_download_url": "https://github.com/" + DefaultRepo + "/releases/download/v1.2.3/SHA256SUMS"}
 			assets := []map[string]any{asset}
+			assets = append(assets, map[string]any{"name": "SHA256SUMS.sigstore.json", "browser_download_url": "https://github.com/" + DefaultRepo + "/releases/download/v1.2.3/SHA256SUMS.sigstore.json"})
 			pin := "v1.2.3"
 			switch tc {
 			case "draft":
@@ -191,6 +192,12 @@ func TestReleaseMetadataPinnedAndScoped(t *testing.T) {
 			metadata["assets"] = assets
 			encoded, _ := json.Marshal(metadata)
 			m := New(nil)
+			m.verifyManifest = func(repo, tag string, manifest, bundle []byte) error {
+				if repo != DefaultRepo || tag != "v1.2.3" || len(manifest) == 0 || len(bundle) == 0 {
+					t.Fatal("incorrect provenance verifier inputs")
+				}
+				return nil
+			}
 			calls := 0
 			m.HTTP.Transport = coreRoundTripper(func(r *http.Request) (*http.Response, error) {
 				calls++
@@ -202,7 +209,7 @@ func TestReleaseMetadataPinnedAndScoped(t *testing.T) {
 			})
 			release, e := m.FetchRelease(context.Background(), DefaultRepo, pin)
 			if tc == "valid" {
-				if e != nil || release.Tag != "v1.2.3" || calls != 2 {
+				if e != nil || release.Tag != "v1.2.3" || calls != 3 {
 					t.Fatal(release, e, calls)
 				}
 			} else if e == nil {

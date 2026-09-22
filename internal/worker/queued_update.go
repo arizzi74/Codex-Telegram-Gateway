@@ -102,7 +102,7 @@ func (s *Store) recordWorkerUpdateResult(result protocol.WorkerUpdateResult) err
 		if meta.Get(key) != nil {
 			return nil
 		}
-		if _, err := appendEvent(tx, protocol.Event{Kind: "worker_update_result", Data: data}); err != nil {
+		if _, err := s.appendEvent(tx, protocol.Event{Kind: "worker_update_result", Data: data}); err != nil {
 			return err
 		}
 		return meta.Put(key, data)

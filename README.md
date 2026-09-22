@@ -239,7 +239,7 @@ socket. No Codex listener is exposed over the network.
 
 ## Build and test
 
-Requires Go 1.26+ and Codex CLI **0.154.0** for live workers.
+Requires Go 1.26.8+ and Codex CLI **0.154.0** for live workers.
 Unit and integration tests use a fake Codex server and need no model credentials.
 All database integration tests run automatically using isolated temporary SQLite
 files. The pure-Go SQLite driver also works with `CGO_ENABLED=0`.

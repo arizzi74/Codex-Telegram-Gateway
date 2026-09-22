@@ -78,6 +78,13 @@ func NewConnection(cfg config.WorkerConfig, store *Store, logger *slog.Logger, s
 	if onCommand == nil {
 		return nil, errors.New("worker connection: command handler is required")
 	}
+	redactor, err := newWorkerRedactor(cfg.RedactPatterns)
+	if err != nil {
+		return nil, err
+	}
+	if err := store.configureRedactor(redactor); err != nil {
+		return nil, err
+	}
 	c := &Connection{cfg: cfg, store: store, log: logger, snapshot: snapshot, onCommand: onCommand, startedAt: time.Now(), dial: websocket.Dial, updateWake: make(chan struct{}, 1), updateRun: workerupdate.Run}
 	if workerupdate.Supported() {
 		c.updateManager = workerupdate.ManagerPath()
@@ -146,7 +153,7 @@ func (c *Connection) connect(ctx context.Context) error {
 	hostname, _ := os.Hostname()
 	hello := protocol.Hello{WorkerID: c.cfg.WorkerID, WorkerName: c.cfg.Name, Hostname: hostname, OS: runtime.GOOS, Arch: runtime.GOARCH, WorkerVersion: buildinfo.Version, ProtocolMin: protocol.Version, ProtocolMax: protocol.Version, LastAckedEventSeq: lastAcked, SupportsImageInput: true, SupportsSessionWorkspaces: true, SupportsSessionDeletion: true, SupportsConversationHistory: true, SupportsWorkerUpdate: c.updateManager != "", Runtimes: c.snapshot()}
 	handshakeCtx, stopHandshake := context.WithTimeout(connectionCtx, 10*time.Second)
-	if err := sendEnvelope(handshakeCtx, writes, "hello", hello); err != nil {
+	if err := c.sendRedactedEnvelope(handshakeCtx, writes, "hello", hello); err != nil {
 		stopHandshake()
 		return err
 	}
@@ -191,7 +198,7 @@ func (c *Connection) connect(ctx context.Context) error {
 		case err := <-readErr:
 			return err
 		case <-heartbeat.C:
-			if err := sendEnvelope(connectionCtx, writes, "heartbeat", protocol.Heartbeat{WorkerID: c.cfg.WorkerID, UptimeSeconds: int64(time.Since(c.startedAt).Seconds()), SupportsImageInput: true, SupportsSessionWorkspaces: true, SupportsSessionDeletion: true, SupportsConversationHistory: true, SupportsWorkerUpdate: c.updateManager != "", Runtimes: c.snapshot()}); err != nil {
+			if err := c.sendRedactedEnvelope(connectionCtx, writes, "heartbeat", protocol.Heartbeat{WorkerID: c.cfg.WorkerID, UptimeSeconds: int64(time.Since(c.startedAt).Seconds()), SupportsImageInput: true, SupportsSessionWorkspaces: true, SupportsSessionDeletion: true, SupportsConversationHistory: true, SupportsWorkerUpdate: c.updateManager != "", Runtimes: c.snapshot()}); err != nil {
 				return err
 			}
 		case <-poll.C:
@@ -243,7 +250,7 @@ func (c *Connection) readLoop(ctx context.Context, conn *websocket.Conn, writes 
 					// implement. Reject that command without dropping the healthy
 					// connection and causing endless replay on every reconnect.
 					ack := protocol.CommandAck{CommandID: command.ID, Status: "rejected", Error: unsupported}
-					if err := sendEnvelope(ctx, writes, "command_ack", ack); err != nil {
+					if err := c.sendRedactedEnvelope(ctx, writes, "command_ack", ack); err != nil {
 						return err
 					}
 					continue
@@ -270,7 +277,7 @@ func (c *Connection) handleCommand(ctx context.Context, writes chan<- outbound, 
 	if ack.CommandID == "" {
 		ack.CommandID = command.ID
 	}
-	if err := sendEnvelope(ctx, writes, "command_ack", ack); err != nil && ctx.Err() == nil {
+	if err := c.sendRedactedEnvelope(ctx, writes, "command_ack", ack); err != nil && ctx.Err() == nil {
 		c.log.Warn("send command acknowledgement", "command_id", command.ID, "error", err)
 	}
 }

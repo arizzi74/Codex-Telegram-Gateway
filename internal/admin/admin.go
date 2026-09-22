@@ -18,6 +18,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/iaia/telegramgw/internal/auth"
 	"github.com/iaia/telegramgw/internal/config"
+	"github.com/iaia/telegramgw/internal/httpguard"
 	"github.com/iaia/telegramgw/internal/registry"
 )
 
@@ -42,12 +43,14 @@ type Config struct {
 }
 
 type Server struct {
-	store    *registry.Store
-	origin   string
-	webauthn *wa.WebAuthn
-	mux      *http.ServeMux
-	bot      *botMonitor
-	redactor *auth.Redactor
+	store         *registry.Store
+	origin        string
+	webauthn      *wa.WebAuthn
+	mux           *http.ServeMux
+	bot           *botMonitor
+	redactor      *auth.Redactor
+	loginBegins   *httpguard.Limiter
+	loginFinishes *httpguard.Limiter
 }
 
 // New builds an isolated admin handler. Origin must be the configured public
@@ -66,6 +69,8 @@ func New(store *registry.Store, cfg Config) (*Server, error) {
 		return nil, fmt.Errorf("admin: configure webauthn: %w", err)
 	}
 	s := &Server{store: store, origin: origin, webauthn: w, mux: http.NewServeMux()}
+	s.loginBegins = httpguard.NewLimiter(10, 120, time.Minute)
+	s.loginFinishes = httpguard.NewLimiter(20, 240, time.Minute)
 	s.bot = newBotMonitor(cfg)
 	s.redactor = cfg.Redactor
 	s.routes()
@@ -203,6 +208,10 @@ func (s *Server) registrationBegin(w http.ResponseWriter, r *http.Request) {
 	raw, _ := json.Marshal(sd)
 	c, err := s.store.NewAdminCeremony(r.Context(), "registration", handle, raw)
 	if err != nil {
+		if errors.Is(err, registry.ErrAdminCeremonyLimit) {
+			tooManyRequests(w)
+			return
+		}
 		fail(w, err)
 		return
 	}
@@ -276,6 +285,9 @@ func (s *Server) loginBegin(w http.ResponseWriter, r *http.Request) {
 	if !s.csrfOK(w, r) {
 		return
 	}
+	if !s.allowLogin(w, r, s.loginBegins) {
+		return
+	}
 	assertion, sd, err := s.webauthn.BeginDiscoverableLogin(wa.WithLoginOrigin(s.origin), wa.WithUserVerification(protocol.VerificationRequired))
 	if err != nil {
 		fail(w, err)
@@ -284,6 +296,10 @@ func (s *Server) loginBegin(w http.ResponseWriter, r *http.Request) {
 	raw, _ := json.Marshal(sd)
 	c, err := s.store.NewAdminCeremony(r.Context(), "authentication", nil, raw)
 	if err != nil {
+		if errors.Is(err, registry.ErrAdminCeremonyLimit) {
+			tooManyRequests(w)
+			return
+		}
 		fail(w, err)
 		return
 	}
@@ -296,6 +312,9 @@ func (s *Server) loginFinish(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !s.csrfOK(w, r) {
+		return
+	}
+	if !s.allowLogin(w, r, s.loginFinishes) {
 		return
 	}
 	var in struct {
@@ -350,6 +369,19 @@ func (s *Server) loginFinish(w http.ResponseWriter, r *http.Request) {
 	s.setSession(w, token)
 	clearCeremony(w)
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+}
+
+func (s *Server) allowLogin(w http.ResponseWriter, r *http.Request, limiter *httpguard.Limiter) bool {
+	if !limiter.Allow(httpguard.ClientIP(r), time.Now()) {
+		tooManyRequests(w)
+		return false
+	}
+	return true
+}
+
+func tooManyRequests(w http.ResponseWriter) {
+	w.Header().Set("Retry-After", "60")
+	http.Error(w, "try again later", http.StatusTooManyRequests)
 }
 
 func (s *Server) session(w http.ResponseWriter, r *http.Request) {

@@ -16,6 +16,8 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+
+	"github.com/iaia/telegramgw/internal/releaseauth"
 )
 
 const MaxArchive = 128 * 1024 * 1024
@@ -283,7 +285,24 @@ func (m *Manager) FetchRelease(ctx context.Context, repo, version string) (*Rele
 		return nil, err
 	}
 	release.Hashes, err = Manifest(data, false)
-	return release, err
+	if err != nil {
+		return nil, err
+	}
+	if release.Assets[releaseauth.BundleName] == "" {
+		return nil, errors.New("release is missing signed build provenance; unsigned legacy releases cannot be installed by this updater")
+	}
+	attestation, err := m.Download(ctx, release.Assets[releaseauth.BundleName], 4*1024*1024)
+	if err != nil {
+		return nil, err
+	}
+	verify := releaseauth.Verify
+	if m.verifyManifest != nil {
+		verify = m.verifyManifest
+	}
+	if err = verify(repo, release.Tag, data, attestation); err != nil {
+		return nil, err
+	}
+	return release, nil
 }
 
 func (m *Manager) Package(ctx context.Context, release *Release, l *Layout, binary, stage string) (string, error) {

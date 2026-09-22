@@ -145,6 +145,14 @@ func run(args []string, logger *slog.Logger) error {
 		if err != nil {
 			return err
 		}
+		// Apply revocation before webhooks, workers or background senders can
+		// queue or deliver content using remembered Telegram destinations.
+		policyCtx, cancelPolicy := context.WithTimeout(ctx, 10*time.Second)
+		err = store.ApplyTelegramChatAllowlist(policyCtx, cfg.Secrets.BotName, cfg.AllowedChatIDs)
+		cancelPolicy()
+		if err != nil {
+			return err
+		}
 		hub := gateway.NewHub(store, logger, cfg.HeartbeatInterval, cfg.UnreachableAfter)
 		hub.EventHandler = store.IngestEvent
 		hub.AckHandler = store.AcknowledgeCommand
@@ -163,7 +171,7 @@ func run(args []string, logger *slog.Logger) error {
 		}
 		mux.Handle("/tgadmin/", console)
 		mux.Handle("/tgapi/v1/admin/", console)
-		sender := gateway.NewSender(store, api, logger, gateway.SenderOptions{BotID: cfg.Secrets.BotName, OwnerID: cfg.Secrets.WLID, Redactor: redactor})
+		sender := gateway.NewSender(store, api, logger, gateway.SenderOptions{BotID: cfg.Secrets.BotName, OwnerID: cfg.Secrets.WLID, AllowedChatIDs: cfg.AllowedChatIDs, Redactor: redactor})
 		dispatcher := gateway.NewDispatcher(store, hub, logger)
 		server := &http.Server{Addr: cfg.Listen, Handler: mux, ReadHeaderTimeout: cfg.ReadHeaderTimeout, ReadTimeout: 15 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 16 << 10}
 		serviceCtx, stopService := context.WithCancel(ctx)
@@ -189,7 +197,26 @@ func run(args []string, logger *slog.Logger) error {
 		services.Go(func() { hub.Run(serviceCtx) })
 		services.Go(func() { _ = sender.Run(serviceCtx) })
 		services.Go(func() { _ = dispatcher.Run(serviceCtx) })
-		services.Go(func() { _ = gateway.NewPresence(store, api, logger).Run(serviceCtx) })
+		services.Go(func() {
+			ticker := time.NewTicker(time.Minute)
+			defer ticker.Stop()
+			for {
+				pruneCtx, cancel := context.WithTimeout(serviceCtx, 5*time.Second)
+				_, err := store.PruneAdminCeremonies(pruneCtx)
+				cancel()
+				if err != nil && serviceCtx.Err() == nil {
+					logger.Warn("Admin ceremony cleanup deferred", "error", err)
+				}
+				select {
+				case <-serviceCtx.Done():
+					return
+				case <-ticker.C:
+				}
+			}
+		})
+		services.Go(func() {
+			_ = gateway.NewPresence(store, api, logger, gateway.PresenceOptions{AllowedChatIDs: cfg.AllowedChatIDs}).Run(serviceCtx)
+		})
 		services.Go(func() {
 			_ = gateway.NewSessionMenus(store, api, logger, gateway.SessionMenuOptions{BotID: cfg.Secrets.BotName, AllowedUserIDs: cfg.AllowedUserIDs, AllowedChatIDs: cfg.AllowedChatIDs, Redactor: redactor}).Run(serviceCtx)
 		})

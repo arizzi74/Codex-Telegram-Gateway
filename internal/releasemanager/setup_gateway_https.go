@@ -328,7 +328,7 @@ func gatewayStandaloneHTTPSOrigin(origin string) bool {
 }
 
 func gatewayCaddySite(cfg config.GatewayConfig) string {
-	return fmt.Sprintf("%s {\n    @gateway path /tgadmin /tgadmin/* /tgapi/* /tghealthz /tgreadyz\n    handle @gateway {\n        reverse_proxy %s\n    }\n    handle {\n        respond 404\n    }\n}\n", strconv.Quote(cfg.PublicBaseURL), strconv.Quote(cfg.Listen))
+	return fmt.Sprintf("%s {\n    @gateway path /tgadmin /tgadmin/* /tgapi/* /tghealthz /tgreadyz\n    handle @gateway {\n        reverse_proxy %s {\n            header_up X-Real-IP {remote_host}\n        }\n    }\n    handle {\n        respond 404\n    }\n}\n", strconv.Quote(cfg.PublicBaseURL), strconv.Quote(cfg.Listen))
 }
 
 func gatewayCaddyUnit(configuration string) string {

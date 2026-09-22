@@ -18,13 +18,16 @@ import (
 var (
 	ErrAdminBootstrapInvalid = errors.New("registry: invalid or expired admin bootstrap token")
 	ErrAdminCeremonyInvalid  = errors.New("registry: invalid or expired admin ceremony")
+	ErrAdminCeremonyLimit    = errors.New("registry: too many outstanding admin ceremonies")
 	ErrAdminSessionInvalid   = errors.New("registry: invalid or expired admin session")
 	ErrAdminCredentialGone   = errors.New("registry: admin credential not found or revoked")
 )
 
 const (
-	adminBootstrapTTL = 15 * time.Minute
-	adminSessionTTL   = 8 * time.Hour
+	adminBootstrapTTL       = 15 * time.Minute
+	adminSessionTTL         = 8 * time.Hour
+	maxAdminCeremonies      = 1024
+	adminCeremonyPruneBatch = 256
 )
 
 // AdminCredential is the non-secret record needed to verify a WebAuthn
@@ -99,13 +102,72 @@ func (s *Store) NewAdminCeremony(ctx context.Context, purpose string, userHandle
 		return AdminCeremony{}, ErrAdminCeremonyInvalid
 	}
 	id := uuid.New()
-	_, err = s.pool.Exec(ctx, `INSERT INTO admin_challenges
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return AdminCeremony{}, err
+	}
+	defer tx.Rollback(ctx)
+	if _, err := pruneAdminCeremonies(ctx, tx); err != nil {
+		return AdminCeremony{}, err
+	}
+	// Limit the index walk as well as the number of live ceremonies. The
+	// IMMEDIATE transaction serializes admission across database connections.
+	var count int
+	if err := tx.QueryRow(ctx, `SELECT count(*) FROM (
+        SELECT 1 FROM admin_challenges WHERE consumed_at IS NULL AND expires_at > `+sqliteNow+` LIMIT $1
+    )`, maxAdminCeremonies).Scan(&count); err != nil {
+		return AdminCeremony{}, err
+	}
+	if count >= maxAdminCeremonies {
+		if err := tx.Commit(ctx); err != nil {
+			return AdminCeremony{}, err
+		}
+		return AdminCeremony{}, ErrAdminCeremonyLimit
+	}
+	_, err = tx.Exec(ctx, `INSERT INTO admin_challenges
         (challenge_id, purpose, challenge_hash, user_handle, expires_at, session_data, ceremony_binding_hash)
         VALUES ($1, $2, $3, $4, (strftime('%Y-%m-%dT%H:%M:%f','now','+5 minutes') || '000000Z'), $5, $6)`, id, purpose, sha256Bytes(challenge), nullableBytes(userHandle), sessionData, hashSecret(binding))
 	if err != nil {
 		return AdminCeremony{}, fmt.Errorf("registry: save admin ceremony: %w", err)
 	}
+	if err := tx.Commit(ctx); err != nil {
+		return AdminCeremony{}, err
+	}
 	return AdminCeremony{ID: id, Purpose: purpose, UserHandle: userHandle, SessionData: sessionData, Binding: binding}, nil
+}
+
+// PruneAdminCeremonies removes a bounded batch of expired and legacy consumed
+// challenges. Periodic maintenance drains old backlogs without long write
+// transactions; new admissions also prune, so ordinary use stays bounded.
+func (s *Store) PruneAdminCeremonies(ctx context.Context) (int64, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback(ctx)
+	count, err := pruneAdminCeremonies(ctx, tx)
+	if err != nil {
+		return 0, err
+	}
+	return count, tx.Commit(ctx)
+}
+
+func pruneAdminCeremonies(ctx context.Context, tx *dbTx) (int64, error) {
+	// Separate partial indexes avoid a full table scan or an OR query that
+	// repeatedly sorts all historical challenges on every login request.
+	expired, err := tx.Exec(ctx, `DELETE FROM admin_challenges WHERE challenge_id IN (
+        SELECT challenge_id FROM admin_challenges
+        WHERE consumed_at IS NULL AND expires_at <= `+sqliteNow+`
+        ORDER BY expires_at LIMIT $1
+    )`, adminCeremonyPruneBatch)
+	if err != nil {
+		return 0, err
+	}
+	consumed, err := tx.Exec(ctx, `DELETE FROM admin_challenges WHERE challenge_id IN (
+        SELECT challenge_id FROM admin_challenges WHERE consumed_at IS NOT NULL
+        ORDER BY consumed_at LIMIT $1
+    )`, adminCeremonyPruneBatch)
+	return expired.RowsAffected() + consumed.RowsAffected(), err
 }
 
 // ReadAdminCeremony reads a still-live ceremony. The completion methods below
@@ -250,7 +312,9 @@ func claimAdminCeremony(ctx context.Context, tx *dbTx, id uuid.UUID, purpose, bi
 	if err != nil || got != purpose || subtle.ConstantTimeCompare(hash, hashSecret(binding)) != 1 {
 		return ErrAdminCeremonyInvalid
 	}
-	ct, err := tx.Exec(ctx, `UPDATE admin_challenges SET consumed_at=(strftime('%Y-%m-%dT%H:%M:%f','now') || '000000Z') WHERE challenge_id=$1 AND consumed_at IS NULL`, id)
+	// Deletion is the one-use claim, in the same transaction as the credential
+	// or session change. A rollback restores it; a commit cannot be replayed.
+	ct, err := tx.Exec(ctx, `DELETE FROM admin_challenges WHERE challenge_id=$1 AND consumed_at IS NULL`, id)
 	if err != nil || ct.RowsAffected() != 1 {
 		return ErrAdminCeremonyInvalid
 	}

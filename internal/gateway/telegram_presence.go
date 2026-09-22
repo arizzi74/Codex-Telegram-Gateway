@@ -29,21 +29,30 @@ type TelegramChatActionAPI interface {
 	SendChatAction(context.Context, ChatAction) error
 }
 
+type PresenceOptions struct {
+	AllowedChatIDs []int64
+}
+
 // Presence periodically renews Telegram's short-lived typing indicator from
 // durable registry state. API failures are best effort and never affect the
 // underlying command or delivery lifecycle.
 type Presence struct {
-	store TelegramPresenceStore
-	api   TelegramChatActionAPI
-	log   *slog.Logger
-	last  map[registry.TelegramTypingTarget]time.Time
+	store   TelegramPresenceStore
+	api     TelegramChatActionAPI
+	log     *slog.Logger
+	last    map[registry.TelegramTypingTarget]time.Time
+	options PresenceOptions
 }
 
-func NewPresence(store TelegramPresenceStore, api TelegramChatActionAPI, logger *slog.Logger) *Presence {
+func NewPresence(store TelegramPresenceStore, api TelegramChatActionAPI, logger *slog.Logger, options ...PresenceOptions) *Presence {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &Presence{store: store, api: api, log: logger, last: make(map[registry.TelegramTypingTarget]time.Time)}
+	var option PresenceOptions
+	if len(options) > 0 {
+		option = options[0]
+	}
+	return &Presence{store: store, api: api, log: logger, last: make(map[registry.TelegramTypingTarget]time.Time), options: option}
 }
 
 func (p *Presence) Run(ctx context.Context) error {
@@ -69,6 +78,9 @@ func (p *Presence) flush(ctx context.Context, now time.Time) error {
 	active := make(map[registry.TelegramTypingTarget]struct{}, len(targets))
 	due := make([]registry.TelegramTypingTarget, 0, len(targets))
 	for _, target := range targets {
+		if !telegramChatAllowed(p.options.AllowedChatIDs, target.ChatID) {
+			continue
+		}
 		active[target] = struct{}{}
 		if sent, ok := p.last[target]; !ok || now.Sub(sent) >= typingRefreshInterval {
 			// Record attempts as well as successes so a failing Telegram endpoint
@@ -106,6 +118,16 @@ func (p *Presence) flush(ctx context.Context, now time.Time) error {
 			if store, ok := p.store.(telegramPresenceVisibilityStore); ok {
 				active, err := store.IsTelegramTypingTargetActive(requestCtx, target)
 				if err != nil || !active {
+					return
+				}
+			}
+			// Recheck after queueing and visibility reads, at the actual request.
+			if !telegramChatAllowed(p.options.AllowedChatIDs, target.ChatID) {
+				return
+			}
+			if store, ok := p.store.(telegramChatAuthorizationStore); ok {
+				allowed, err := store.TelegramChatAllowed(requestCtx, target.BotID, target.ChatID)
+				if err != nil || !allowed {
 					return
 				}
 			}

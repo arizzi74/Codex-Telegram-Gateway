@@ -131,7 +131,24 @@ scopes:
 		if key.chat == key.user {
 			scope.Type, scope.UserID = "chat", 0
 		}
-		if len(groups[key]) == 0 {
+		commands := sessionMenuCommands(aliases, m.options.Redactor)
+		raw, _ := json.Marshal(commands)
+		hash := sha256.Sum256(raw)
+		digest := string(hash[:])
+		// Scope rendering can block on registry reads. Recheck authorization
+		// before publishing session names, including restored scoped menus.
+		allowed := auth.AuthorizedTelegramUser(key.user, m.options.AllowedUserIDs) && telegramChatAllowed(m.options.AllowedChatIDs, key.chat)
+		if allowed {
+			if store, ok := m.store.(telegramChatAuthorizationStore); ok {
+				var err error
+				allowed, err = store.TelegramChatAllowed(ctx, m.options.BotID, key.chat)
+				if err != nil {
+					scopeErrors = append(scopeErrors, err)
+					continue
+				}
+			}
+		}
+		if len(groups[key]) == 0 || !allowed {
 			if m.applied[key] != "off" {
 				if err := m.api.DeleteScopedCommands(ctx, scope); err != nil {
 					scopeErrors = append(scopeErrors, err)
@@ -141,10 +158,6 @@ scopes:
 			}
 			continue
 		}
-		commands := sessionMenuCommands(aliases, m.options.Redactor)
-		raw, _ := json.Marshal(commands)
-		hash := sha256.Sum256(raw)
-		digest := string(hash[:])
 		if m.applied[key] == digest {
 			continue
 		}

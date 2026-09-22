@@ -800,7 +800,7 @@ func (m *Manager) ApplyUpdate(ctx context.Context, l *Layout, packages map[strin
 			if err := database.validateSourcePaths(); err != nil {
 				return err
 			}
-			if err := sqliteBackup(ctx, database.path, filepath.Join(backup, "gateway.db")); err != nil {
+			if err := backupSQLiteFromRoot(ctx, database, filepath.Join(backup, "gateway.db")); err != nil {
 				return err
 			}
 		}

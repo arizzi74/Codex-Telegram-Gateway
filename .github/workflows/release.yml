@@ -16,11 +16,16 @@ concurrency:
 jobs:
   test-and-build:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
-          go-version-file: go.mod
+          go-version: '1.26.x'
+          check-latest: true
       - name: Validate tag and run all checks
         env:
           RELEASE_TAG: ${{ github.ref_name }}
@@ -30,13 +35,27 @@ jobs:
             exit 1
           }
           VERSION="${RELEASE_TAG#v}" ./scripts/ci.sh
-      - uses: actions/upload-artifact@v4
+      - name: Attest the release checksum manifest
+        id: provenance
+        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3
+        with:
+          subject-path: dist/SHA256SUMS
+      - name: Verify provenance with the native updater policy
+        env:
+          BUNDLE_PATH: ${{ steps.provenance.outputs.bundle-path }}
+          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_REPO: ${{ github.repository }}
+        run: |
+          cp -- "$BUNDLE_PATH" dist/SHA256SUMS.sigstore.json
+          go run ./cmd/release-tool verify-provenance --repo "$RELEASE_REPO" --tag "$RELEASE_TAG"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: release-files
           if-no-files-found: error
           path: |
             dist/*.tar.gz
             dist/SHA256SUMS
+            dist/SHA256SUMS.sigstore.json
             dist/codex-telegramgw-linux-*
             dist/codex-telegramgw-darwin-*
             dist/install.sh
@@ -51,17 +70,19 @@ jobs:
       GH_REPO: ${{ github.repository }}
       RELEASE_TAG: ${{ github.ref_name }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
-          go-version-file: go.mod
-      - uses: actions/download-artifact@v4
+          go-version: '1.26.x'
+          check-latest: true
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: release-files
           path: dist
       - name: Verify release files and tag
         run: |
           ./scripts/verify-release.sh
+          go run ./cmd/release-tool verify-provenance --repo "$GH_REPO" --tag "$RELEASE_TAG"
           test "$(gh api "repos/$GH_REPO/commits/$RELEASE_TAG" --jq .sha)" = "$GITHUB_SHA"
           if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
             echo 'A release already exists for this tag; refusing to replace its assets.' >&2
@@ -70,11 +91,13 @@ jobs:
       - name: Upload and verify draft before publishing
         run: |
           gh release create "$RELEASE_TAG" --draft --verify-tag --title "$RELEASE_TAG" --generate-notes
-          gh release upload "$RELEASE_TAG" dist/*.tar.gz dist/SHA256SUMS dist/codex-telegramgw-linux-* dist/codex-telegramgw-darwin-* dist/install.sh
+          gh release upload "$RELEASE_TAG" dist/*.tar.gz dist/SHA256SUMS dist/SHA256SUMS.sigstore.json dist/codex-telegramgw-linux-* dist/codex-telegramgw-darwin-* dist/install.sh
           verify_dir=$(mktemp -d)
           trap 'rm -rf -- "$verify_dir"' EXIT
           gh release download "$RELEASE_TAG" --dir "$verify_dir"
-          test "$(find "$verify_dir" -type f | wc -l)" -eq 16
+          test "$(find "$verify_dir" -type f | wc -l)" -eq 17
           cmp dist/SHA256SUMS "$verify_dir/SHA256SUMS"
+          cmp dist/SHA256SUMS.sigstore.json "$verify_dir/SHA256SUMS.sigstore.json"
+          go run ./cmd/release-tool verify-provenance --dist "$verify_dir" --repo "$GH_REPO" --tag "$RELEASE_TAG"
           (cd "$verify_dir" && sha256sum -c SHA256SUMS)
           gh release edit "$RELEASE_TAG" --draft=false --latest

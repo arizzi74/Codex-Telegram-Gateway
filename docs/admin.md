@@ -36,6 +36,15 @@ are opaque hashed random tokens, expire after eight hours, and can be revoked.
 Worker tokens are only included in the create/rotate response and are never
 logged or returned later.
 
+Login initiation allows 10 attempts per client per minute and 120 globally;
+completion allows 20 per client and 240 globally. Each phase has a separate
+budget, so repeated initiations do not consume an existing ceremony's finish
+budget. Throttled requests return HTTP 429 with `Retry-After: 60`. The registry
+atomically caps live ceremonies at 1,024, removes successful ceremonies in the
+credential/session transaction, and prunes expired and old consumed rows in
+indexed batches during admission and once per minute. Existing accumulated
+rows are drained gradually, without a large blocking cleanup transaction.
+
 ## Session and bot information
 
 The session count and searchable list use the same non-archived inventory as

@@ -105,10 +105,12 @@ func TestWorkerHelloCannotClaimAnotherIdentity(t *testing.T) {
 }
 
 func TestFailureLimiterWindow(t *testing.T) {
-	l := &failureLimiter{entries: map[string]failureWindow{}}
+	l := NewHub(nil, nil, time.Second, time.Second).limiter
 	now := time.Now()
 	for range 20 {
-		l.Fail("ip", now)
+		if !l.Allow("ip", now) {
+			t.Fatal("authentication failure burst rejected early")
+		}
 	}
 	if l.Allow("ip", now) {
 		t.Fatal("authentication failures not limited")

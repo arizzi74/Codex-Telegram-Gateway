@@ -5,8 +5,10 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"path/filepath"
 
 	"github.com/iaia/telegramgw/internal/distribution"
+	"github.com/iaia/telegramgw/internal/releaseauth"
 )
 
 func run(args []string) error {
@@ -19,6 +21,8 @@ func run(args []string) error {
 	binary := options.String("binary", "", "component executable")
 	targetOS := options.String("os", "", "target OS")
 	arch := options.String("arch", "", "target architecture")
+	repo := options.String("repo", "", "release repository")
+	tag := options.String("tag", "", "release tag")
 	if err := options.Parse(args[1:]); err != nil {
 		return err
 	}
@@ -26,6 +30,16 @@ func run(args []string) error {
 		return fmt.Errorf("unexpected arguments: %v", options.Args())
 	}
 	switch args[0] {
+	case "verify-provenance":
+		manifest, err := os.ReadFile(filepath.Join(*dist, "SHA256SUMS"))
+		if err != nil {
+			return err
+		}
+		bundle, err := os.ReadFile(filepath.Join(*dist, releaseauth.BundleName))
+		if err != nil {
+			return err
+		}
+		return releaseauth.Verify(*repo, *tag, manifest, bundle)
 	case "package":
 		return distribution.Package(*root, *dist, *binary, distribution.Target{OS: *targetOS, Arch: *arch})
 	case "manifest":

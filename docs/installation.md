@@ -352,8 +352,9 @@ codex-telegramgw update codex --check
 codex-telegramgw update codex
 ```
 
-Checks fetch release metadata and checksums to show whether a newer stable
-release is available; they do not download or verify the component archives.
+Checks fetch release metadata, the checksum manifest, and its signed build
+provenance to show whether a newer stable release is available. They verify the
+manifest signature but do not download the component archives.
 When applying an update, the native manager downloads and verifies all required
 archives before stopping the service. A download or verification failure leaves
 a running service online and its installed binaries in place.
@@ -563,19 +564,42 @@ git tag vMAJOR.MINOR.PATCH
 git push origin vMAJOR.MINOR.PATCH
 ```
 
-The release workflow runs formatting, vet, migration and race tests, all platform
-builds, and archive verification. Only after those checks pass does it publish
+The release workflow runs formatting, vet, govulncheck, migration and race tests,
+all platform builds, and archive verification. CI uses the latest Go 1.26 patch
+(at least 1.26.8); a daily scheduled CI run checks for newly published advisories. Only after those checks pass does it publish
 the version's binaries, installer, update manager, and checksum manifest. It
 uploads a draft first so automatic updaters never select a partially uploaded
 release. Published releases are not overwritten; corrections use a new version.
 
 Each release publishes ten component archives, four native manager executables
-(`codex-telegramgw-{linux,darwin}-{amd64,arm64}`), `install.sh`, and `SHA256SUMS`.
+(`codex-telegramgw-{linux,darwin}-{amd64,arm64}`), `install.sh`, `SHA256SUMS`, and
+`SHA256SUMS.sigstore.json` (17 files total).
 Every component archive contains the matching native manager and inner checksums.
 Packaging and verification use the Go release tool. Python remains only in the
 repository's historical PostgreSQL migration tools and their CI tests; those
 tools are not shipped in the release archives.
 
-The source of trust is this GitHub repository and its release publishing access.
-Checksums detect mismatched or damaged downloads; protect the repository's write
-permissions as carefully as deployment access.
+The native manager verifies the manifest's Sigstore build attestation before
+accepting its hashes or executing downloaded programs. It requires GitHub's OIDC
+issuer and this repository's exact `.github/workflows/release.yml` identity at
+the selected version tag, plus certificate, transparency-log, timestamp, and
+artifact-digest verification. Trust roots are compiled into the manager; release
+assets cannot substitute them. Verification uses Go and needs no `gh`, Python,
+OpenSSL, or external verifier on the installed machine. The release workflow is
+pinned to immutable Action commits and verifies the same policy before publishing.
+
+New managers reject unsigned legacy releases, including explicit version pins.
+Previously installed managers can adopt the first signed release using their
+existing checksum verification; subsequent updates require provenance. The initial
+curl bootstrap still trusts GitHub HTTPS and the installer/manager it retrieves.
+For a separately trusted first install, review and build the manager from a trusted
+source checkout. Signatures do not protect against an authorized change to the
+trusted release workflow: repository write access remains deployment access.
+Trust-root rotations require a reviewed manager update before old roots expire.
+
+Privileged gateway updates reject non-root-owned or group/world-writable existing
+executables. After stopping the gateway, the manager copies SQLite and any WAL or
+rollback journal through a retained, confined directory descriptor into a private
+staging directory before creating a verified backup. It rejects symlinks, hard
+links, and files changed during copying; working database paths are never reopened
+by privileged SQLite backup code.

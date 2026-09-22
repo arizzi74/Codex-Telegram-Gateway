@@ -23,6 +23,9 @@ func (m *Manager) FinishGateway(ctx context.Context) error {
 	if os.Geteuid() != 0 {
 		return errors.New("gateway setup requires sudo")
 	}
+	if err := l.RequireUser(); err != nil {
+		return err
+	}
 	prompt, err := openWorkerSetupTerminal()
 	if err != nil {
 		return errors.New("finishing gateway setup needs an interactive terminal; run sudo codex-telegramgw finish gateway")

@@ -68,7 +68,9 @@ func applySessionWizardEvent(ctx context.Context, tx *dbTx, workerID uuid.UUID, 
 	}
 	if managedNew && success {
 		folder, err := protocol.SessionDirectoryName(command.Arguments.SessionName)
-		if err != nil || result.Session == nil || result.Session.Name != command.Arguments.SessionName || result.Session.CWD != filepath.Join(command.Arguments.CWD, folder) || result.Session.Archived || result.Session.ActiveTurnID != "" {
+		// The display name can be redacted by the worker's private rules. The
+		// exact workspace still proves creation under the requested parent/name.
+		if err != nil || result.Session == nil || result.Session.CWD != filepath.Join(command.Arguments.CWD, folder) || result.Session.Archived || result.Session.ActiveTurnID != "" {
 			return true, ErrEventTarget
 		}
 	}

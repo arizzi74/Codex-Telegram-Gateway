@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 	"sort"
 	"strconv"
@@ -861,20 +862,50 @@ func (s *sessionActor) workspaceDiff(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	// Ignore inherited Git command/config overrides and user/system config.
+	// Repository fsmonitor hooks, external diff drivers, textconv, and clean
+	// filters must not execute as a side effect of this inspection command.
+	env := workspaceGitEnvironment()
+	prefix := []string{"--no-pager", "--no-optional-locks", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=" + os.DevNull, "-c", "core.attributesFile=" + os.DevNull}
 	run := func(args ...string) (string, error) {
-		cmd := exec.CommandContext(ctx, "git", args...)
+		cmd := exec.CommandContext(ctx, "git", append(append([]string(nil), prefix...), args...)...)
 		cmd.Dir = cwd
+		cmd.Env = env
 		output, err := cmd.CombinedOutput()
 		if err != nil {
 			return "", fmt.Errorf("git %s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(string(output)))
 		}
 		return string(output), nil
 	}
-	unstaged, err := run("--no-pager", "diff", "--no-ext-diff", "--no-textconv")
+	// Reading config does not inspect files or run filters. Use config's NUL
+	// framing and environment key/value pairs so arbitrary subsection names
+	// cannot inject additional options or alter the trusted overrides above.
+	filters, err := run("config", "--null", "--name-only", "--get-regexp", `^filter\..*\.(clean|process|smudge|required)$`)
+	if err != nil {
+		var exit *exec.ExitError
+		if !errors.As(err, &exit) || exit.ExitCode() != 1 {
+			return "", err
+		}
+	}
+	keys := strings.Split(strings.TrimSuffix(filters, "\x00"), "\x00")
+	count := 0
+	for _, key := range keys {
+		if key == "" {
+			continue
+		}
+		value := ""
+		if strings.HasSuffix(key, ".required") {
+			value = "false"
+		}
+		env = append(env, fmt.Sprintf("GIT_CONFIG_KEY_%d=%s", count, key), fmt.Sprintf("GIT_CONFIG_VALUE_%d=%s", count, value))
+		count++
+	}
+	env = append(env, "GIT_CONFIG_COUNT="+strconv.Itoa(count))
+	unstaged, err := run("diff", "--no-ext-diff", "--no-textconv")
 	if err != nil {
 		return "", err
 	}
-	staged, err := run("--no-pager", "diff", "--cached", "--no-ext-diff", "--no-textconv")
+	staged, err := run("diff", "--cached", "--no-ext-diff", "--no-textconv")
 	if err != nil {
 		return "", err
 	}
@@ -900,6 +931,17 @@ func (s *sessionActor) workspaceDiff(ctx context.Context) (string, error) {
 		text = text[:40000] + "\n… diff truncated; run /diff in a local Codex terminal for the full output."
 	}
 	return text, nil
+}
+
+func workspaceGitEnvironment() []string {
+	var env []string
+	for _, entry := range os.Environ() {
+		name, _, _ := strings.Cut(entry, "=")
+		if !strings.HasPrefix(name, "GIT_") {
+			env = append(env, entry)
+		}
+	}
+	return append(env, "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL="+os.DevNull, "GIT_ATTR_NOSYSTEM=1", "GIT_TERMINAL_PROMPT=0", "GIT_NO_LAZY_FETCH=1")
 }
 
 func codexLastResponse(ctx context.Context, client *codexadapter.Client, threadID, args string) (string, error) {

@@ -36,6 +36,11 @@ type sessionModeControl struct {
 
 func newSessionModeControl(t *testing.T, wrap ...func(*telegramRecorder) gateway.TelegramAPI) sessionModeControl {
 	t.Helper()
+	return newSessionModeControlConfig(t, nil, wrap...)
+}
+
+func newSessionModeControlConfig(t *testing.T, configure func(*config.WorkerConfig), wrap ...func(*telegramRecorder) gateway.TelegramAPI) sessionModeControl {
+	t.Helper()
 	registryStore, probe := controlPlaneRegistry(t)
 	ctx, stop := context.WithCancel(context.Background())
 	t.Cleanup(stop)
@@ -62,6 +67,9 @@ func newSessionModeControl(t *testing.T, wrap ...func(*telegramRecorder) gateway
 		t.Fatal(err)
 	}
 	cfg := config.WorkerConfig{WorkerID: workerID.String(), Name: "sessions-worker", GatewayURL: "wss://gateway.example.com/tgapi/v1/workers/connect", TokenFile: tokenFile, StateFile: stateFile, AllowedWorkspaceRoots: []string{root}, Runtimes: []config.RuntimeProfile{{ID: "main", Name: "Main", CodexBinary: "/bin/true", WorkingDirectory: root, Autostart: true, RestartPolicy: "on-failure"}}}
+	if configure != nil {
+		configure(&cfg)
+	}
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	agent, err := NewAgent(cfg, local, log)
 	if err != nil {

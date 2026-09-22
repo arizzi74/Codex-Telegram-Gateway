@@ -6,7 +6,6 @@ import (
 	"errors"
 	"log/slog"
 	"math"
-	"net"
 	"net/http"
 	"strings"
 	"sync"
@@ -14,6 +13,7 @@ import (
 
 	"github.com/coder/websocket"
 	"github.com/google/uuid"
+	"github.com/iaia/telegramgw/internal/httpguard"
 	"github.com/iaia/telegramgw/internal/protocol"
 	"github.com/iaia/telegramgw/internal/registry"
 )
@@ -34,7 +34,7 @@ type Hub struct {
 	heartbeat, unreachable time.Duration
 	mu                     sync.RWMutex
 	peers                  map[string]*peer
-	limiter                *failureLimiter
+	limiter                *httpguard.Limiter
 	// EventHandler must durably commit before returning nil. Without a handler,
 	// events are deliberately not ACKed, so the worker retains its outbox.
 	EventHandler func(context.Context, uuid.UUID, uuid.UUID, protocol.Event) error
@@ -60,7 +60,7 @@ type writeRequest struct {
 }
 
 func NewHub(store WorkerRegistry, logger *slog.Logger, heartbeat, unreachable time.Duration) *Hub {
-	return &Hub{store: store, log: logger, heartbeat: heartbeat, unreachable: unreachable, peers: map[string]*peer{}, limiter: &failureLimiter{entries: map[string]failureWindow{}}}
+	return &Hub{store: store, log: logger, heartbeat: heartbeat, unreachable: unreachable, peers: map[string]*peer{}, limiter: httpguard.NewLimiter(20, 4096, time.Minute)}
 }
 
 func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -68,17 +68,10 @@ func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	// Forwarding headers are ignored here. The listener is loopback-only; nginx
-	// adds its own independent public-IP rate limit in the deployment config.
-	ip, _, _ := net.SplitHostPort(r.RemoteAddr)
-	if !h.limiter.Allow(ip, time.Now()) {
-		http.Error(w, "try again later", http.StatusTooManyRequests)
-		return
-	}
+	ip := httpguard.ClientIP(r)
 	auth := r.Header.Get("Authorization")
 	if !strings.HasPrefix(auth, "Bearer ") || len(auth) > 512 {
-		h.limiter.Fail(ip, time.Now())
-		http.Error(w, "unauthorized", 401)
+		h.rejectAuthentication(w, ip)
 		return
 	}
 	token := strings.TrimPrefix(auth, "Bearer ")
@@ -87,13 +80,14 @@ func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	cancel()
 	if err != nil {
 		if errors.Is(err, registry.ErrInvalidToken) {
-			h.limiter.Fail(ip, time.Now())
-			http.Error(w, "unauthorized", 401)
+			h.rejectAuthentication(w, ip)
 		} else {
 			http.Error(w, "registry unavailable", 503)
 		}
 		return
 	}
+	// A verified token bypasses anonymous failure budgets, including when
+	// workers share a NAT address or an older proxy omits the client header.
 	conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{CompressionMode: websocket.CompressionDisabled})
 	if err != nil {
 		return
@@ -368,38 +362,12 @@ func (h *Hub) Run(ctx context.Context) {
 	}
 }
 
-type failureWindow struct {
-	since time.Time
-	count int
-}
-type failureLimiter struct {
-	mu      sync.Mutex
-	entries map[string]failureWindow
-}
-
-func (l *failureLimiter) Allow(key string, now time.Time) bool {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	entry := l.entries[key]
-	return now.Sub(entry.since) >= time.Minute || entry.count < 20
-}
-func (l *failureLimiter) Fail(key string, now time.Time) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	if len(l.entries) >= 4096 {
-		for k, v := range l.entries {
-			if now.Sub(v.since) >= time.Minute {
-				delete(l.entries, k)
-			}
-		}
-		if len(l.entries) >= 4096 {
-			return
-		}
+func (h *Hub) rejectAuthentication(w http.ResponseWriter, ip string) {
+	now := time.Now()
+	if !h.limiter.Allow(ip, now) {
+		w.Header().Set("Retry-After", "60")
+		http.Error(w, "try again later", http.StatusTooManyRequests)
+		return
 	}
-	e := l.entries[key]
-	if now.Sub(e.since) >= time.Minute {
-		e = failureWindow{since: now}
-	}
-	e.count++
-	l.entries[key] = e
+	http.Error(w, "unauthorized", http.StatusUnauthorized)
 }
