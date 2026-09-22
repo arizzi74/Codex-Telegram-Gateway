@@ -95,6 +95,7 @@ func (h *Webhook) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		in.CallbackToken = strings.TrimPrefix(update.Callback.Data, "cb:")
+		in.CallbackMessageID = message.ID
 	} else if message.hasMedia() {
 		// Captions are prompt text, including any leading slash. Never execute
 		// a caption as a gateway command while discarding its attachment.

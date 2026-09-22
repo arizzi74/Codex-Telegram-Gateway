@@ -17,6 +17,7 @@ import (
 // Callback is a compact server-side callback descriptor. Telegram receives
 // only the returned opaque token; all authorization context remains in SQL.
 type Callback struct {
+	OriginDeliveryID                            string
 	Action, BotID, Decision, QuestionID, Answer string
 	WizardID                                    string
 	WizardRevision                              int64
@@ -31,19 +32,20 @@ type Callback struct {
 }
 
 type callbackPayload struct {
-	WizardID        string `json:"wizard_id,omitempty"`
-	WizardRevision  int64  `json:"wizard_revision,omitempty"`
-	Path            string `json:"path,omitempty"`
-	Offset          int    `json:"offset,omitempty"`
-	BotID           string `json:"bot_id"`
-	ChatID, TopicID int64
-	RuntimeID       string                   `json:"runtime_id,omitempty"`
-	Generation      int64                    `json:"generation,omitempty"`
-	SessionPage     int                      `json:"session_page,omitempty"`
-	Decision        string                   `json:"decision,omitempty"`
-	QuestionID      string                   `json:"question_id,omitempty"`
-	Answer          string                   `json:"answer,omitempty"`
-	History         *protocol.HistoryRequest `json:"history,omitempty"`
+	OriginDeliveryID string `json:"origin_delivery_id,omitempty"`
+	WizardID         string `json:"wizard_id,omitempty"`
+	WizardRevision   int64  `json:"wizard_revision,omitempty"`
+	Path             string `json:"path,omitempty"`
+	Offset           int    `json:"offset,omitempty"`
+	BotID            string `json:"bot_id"`
+	ChatID, TopicID  int64
+	RuntimeID        string                   `json:"runtime_id,omitempty"`
+	Generation       int64                    `json:"generation,omitempty"`
+	SessionPage      int                      `json:"session_page,omitempty"`
+	Decision         string                   `json:"decision,omitempty"`
+	QuestionID       string                   `json:"question_id,omitempty"`
+	Answer           string                   `json:"answer,omitempty"`
+	History          *protocol.HistoryRequest `json:"history,omitempty"`
 }
 
 func (s *Store) CreateCallback(ctx context.Context, callback Callback) (string, error) {
@@ -78,7 +80,7 @@ func (s *Store) CreateCallback(ctx context.Context, callback Callback) (string, 
 	if isWizardCallback(callback.Action) && (callback.WizardID == "" || callback.WizardRevision <= 0 || callback.Offset < 0 || callback.Offset > 1_000_000 || len(callback.Path) > 4096) {
 		return "", errors.New("registry: invalid wizard callback")
 	}
-	payload, err := json.Marshal(callbackPayload{WizardID: callback.WizardID, WizardRevision: callback.WizardRevision, Path: callback.Path, Offset: callback.Offset, BotID: callback.BotID, ChatID: callback.ChatID, TopicID: callback.TopicID, RuntimeID: uuidText(callback.RuntimeID), Generation: callback.Generation, SessionPage: callback.SessionPage, Decision: callback.Decision, QuestionID: callback.QuestionID, Answer: callback.Answer, History: callback.History})
+	payload, err := json.Marshal(callbackPayload{OriginDeliveryID: callback.OriginDeliveryID, WizardID: callback.WizardID, WizardRevision: callback.WizardRevision, Path: callback.Path, Offset: callback.Offset, BotID: callback.BotID, ChatID: callback.ChatID, TopicID: callback.TopicID, RuntimeID: uuidText(callback.RuntimeID), Generation: callback.Generation, SessionPage: callback.SessionPage, Decision: callback.Decision, QuestionID: callback.QuestionID, Answer: callback.Answer, History: callback.History})
 	if err != nil {
 		return "", err
 	}
@@ -148,6 +150,9 @@ func (s *Store) consumeCallback(ctx context.Context, tx *dbTx, in IncomingUpdate
 	var context callbackPayload
 	if err := json.Unmarshal(payload, &context); err != nil || context.BotID != in.BotID || context.ChatID != in.ChatID || context.TopicID != in.TopicID || !validSessionPage(action, context.SessionPage) {
 		return AcceptResult{}, ErrCallbackInvalid
+	}
+	if err := validatePickerCallback(ctx, tx, in, context, action); err != nil {
+		return AcceptResult{}, err
 	}
 	markUsed := func() error {
 		ct, err := tx.Exec(ctx, "UPDATE telegram_callbacks SET used_at=(strftime('%Y-%m-%dT%H:%M:%f','now') || '000000Z') WHERE token=$1 AND used_at IS NULL", in.CallbackToken)
@@ -235,7 +240,7 @@ func (s *Store) consumeCallback(ctx context.Context, tx *dbTx, in IncomingUpdate
 		if err := markUsed(); err != nil {
 			return AcceptResult{}, err
 		}
-		return AcceptResult{View: "selected", SessionID: target.sessionID.String(), RuntimeID: target.runtimeID.String()}, nil
+		return retirePickerForCallback(ctx, tx, in, context, action, AcceptResult{View: "selected", SessionID: target.sessionID.String(), RuntimeID: target.runtimeID.String()})
 	case "status":
 		if sessionID == nil {
 			return AcceptResult{}, ErrCallbackInvalid
@@ -265,7 +270,7 @@ func (s *Store) consumeCallback(ctx context.Context, tx *dbTx, in IncomingUpdate
 		if err := markUsed(); err != nil {
 			return AcceptResult{}, err
 		}
-		return AcceptResult{View: "sessions", RuntimeID: runtime.runtimeID.String(), SessionPage: context.SessionPage}, nil
+		return retirePickerForCallback(ctx, tx, in, context, action, AcceptResult{View: "sessions", RuntimeID: runtime.runtimeID.String(), SessionPage: context.SessionPage})
 	case "new":
 		if context.RuntimeID == "" {
 			return AcceptResult{}, ErrCallbackInvalid
@@ -285,7 +290,7 @@ func (s *Store) consumeCallback(ctx context.Context, tx *dbTx, in IncomingUpdate
 		if err := markUsed(); err != nil {
 			return AcceptResult{}, err
 		}
-		return result, nil
+		return retirePickerForCallback(ctx, tx, in, context, action, result)
 	case "approval", "input", "input_prompt", "dismiss_input":
 	default:
 		return AcceptResult{}, ErrCallbackInvalid

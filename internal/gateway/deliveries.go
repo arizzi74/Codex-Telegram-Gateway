@@ -163,7 +163,9 @@ func (s *Sender) sendDelivery(ctx context.Context, row registry.Delivery) error 
 		}
 		sendCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 		var id int64
-		if row.Kind == "question_answered" {
+		if row.Kind == "picker_cleanup" {
+			id, err = s.sendPickerCleanup(sendCtx, row)
+		} else if row.Kind == "question_answered" {
 			id, err = s.sendQuestionAnswer(sendCtx, row, message)
 		} else if isProgressDelivery(row.Kind) {
 			id, err = s.sendProgress(sendCtx, row, message)
@@ -188,6 +190,9 @@ func (s *Sender) sendDelivery(ctx context.Context, row registry.Delivery) error 
 }
 
 func (s *Sender) renderDeliveryMessages(ctx context.Context, row registry.Delivery) ([]json.RawMessage, error) {
+	if row.Kind == "picker_cleanup" {
+		return renderPickerCleanup(row)
+	}
 	if row.Kind == "question_answered" {
 		return s.renderQuestionAnswer(row)
 	}
@@ -293,8 +298,8 @@ func telegramRetryDelay(attempt int, err error) time.Duration {
 }
 
 func deliveryRoute(row registry.Delivery) (sessionID, turnID, approvalID string) {
-	if row.Kind == "question_answered" {
-		// This edits an already-routed question; it must not replace its route
+	if row.Kind == "question_answered" || row.Kind == "picker_cleanup" {
+		// Editing or deleting an existing message must not replace its route
 		// or acquire the currently selected session's presentation.
 		return "", "", ""
 	}

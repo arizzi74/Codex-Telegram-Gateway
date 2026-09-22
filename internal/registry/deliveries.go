@@ -43,6 +43,7 @@ const deliveryQueueReadySQL = `SELECT EXISTS (
 const claimDeliveriesSQL = `WITH claimed AS (
  SELECT delivery.delivery_id FROM telegram_deliveries delivery
  WHERE delivery.status IN ('pending','failed','sending') AND delivery.visibility_revoked=0 AND delivery.next_attempt_at <= ` + sqliteNow + `
+   AND NOT (` + pendingPickerCleanupSQL + `)
    AND (delivery.kind NOT IN ('agent_progress_message','tool_progress_message') OR (NOT ` + pendingSelectionConfirmationSQL + ` AND NOT ` + pendingProgressRepositionSQL + ` AND NOT ` + newerProgressDeliverySQL + ` AND NOT EXISTS (
      SELECT 1 FROM events progress
      JOIN events active_event ON active_event.runtime_id=progress.runtime_id
@@ -136,6 +137,9 @@ func (s *Store) MarkDeliverySent(ctx context.Context, id string, messageID int64
 		return err
 	}
 	if err := checkpointTelegramProgress(ctx, tx, deliveryID, -1, messageID); err != nil {
+		return err
+	}
+	if err := checkpointPickerCleanup(ctx, tx, deliveryID, messageID); err != nil {
 		return err
 	}
 	if sessionID != "" {
@@ -290,6 +294,9 @@ func (s *Store) MarkDeliveryChunkSent(ctx context.Context, id string, index int,
 		return err
 	}
 	if err := checkpointTelegramProgress(ctx, tx, deliveryID, index, messageID); err != nil {
+		return err
+	}
+	if err := checkpointPickerCleanup(ctx, tx, deliveryID, messageID); err != nil {
 		return err
 	}
 	questionID := ""

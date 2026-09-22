@@ -268,11 +268,12 @@ func (s *Store) SuppressTelegramDelivery(ctx context.Context, id string) (bool, 
 	if suppress, err := s.SuppressProgressDelivery(ctx, id); err != nil || suppress {
 		return suppress, err
 	}
-	var suppress, awaitingSelection, awaitingReposition bool
+	var suppress, awaitingSelection, awaitingReposition, awaitingPickerCleanup bool
 	err := s.pool.QueryRow(ctx, `SELECT delivery.status IN ('cancelled','sent') OR delivery.visibility_revoked=1 OR NOT `+eventVisibleSQL()+`,
         delivery.kind IN ('agent_progress_message','tool_progress_message') AND `+pendingSelectionConfirmationSQL+`,
-        delivery.kind IN ('agent_progress_message','tool_progress_message') AND `+pendingProgressRepositionSQL+`
-        FROM telegram_deliveries delivery LEFT JOIN events event ON event.event_id=delivery.event_id WHERE delivery.delivery_id=$1`, id).Scan(&suppress, &awaitingSelection, &awaitingReposition)
+        delivery.kind IN ('agent_progress_message','tool_progress_message') AND `+pendingProgressRepositionSQL+`,
+        `+pendingPickerCleanupSQL+`
+        FROM telegram_deliveries delivery LEFT JOIN events event ON event.event_id=delivery.event_id WHERE delivery.delivery_id=$1`, id).Scan(&suppress, &awaitingSelection, &awaitingReposition, &awaitingPickerCleanup)
 	if err != nil || suppress {
 		return suppress, err
 	}
@@ -281,6 +282,9 @@ func (s *Store) SuppressTelegramDelivery(ctx context.Context, id string) (bool, 
 	}
 	if awaitingReposition {
 		return false, ErrTelegramProgressRepositionPending
+	}
+	if awaitingPickerCleanup {
+		return false, ErrTelegramPickerCleanupPending
 	}
 	return false, nil
 }

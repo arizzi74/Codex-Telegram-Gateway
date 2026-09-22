@@ -127,7 +127,7 @@ func assertSessionPageBudget(t *testing.T, text string, keyboard *TelegramKeyboa
 	for _, row := range keyboard.Rows {
 		buttons += len(row)
 		for _, button := range row {
-			if len(button.Data) > 64 || len(button.Text) > 36 || !utf8.ValidString(button.Text) || strings.Contains(button.Text, "\n") {
+			if len(button.Data) > 64 || telegramTextLength(button.Text) > sessionButtonMaxUnits || !utf8.ValidString(button.Text) || strings.Contains(button.Text, "\n") {
 				t.Fatal("invalid or unbounded page button")
 			}
 		}
@@ -171,6 +171,9 @@ func TestSessionPageRedactsBeforeTruncating(t *testing.T) {
 	markup, _ := json.Marshal(keyboard)
 	if strings.Contains(text+string(markup), "sensitive") || !strings.Contains(text, "[REDACTED]") {
 		t.Fatal("truncation exposed a partial secret")
+	}
+	if keyboard.Rows[0][0].Text != "1 [REDACTED]" {
+		t.Fatal("session button must redact the complete name before shortening it")
 	}
 	assertSessionPageBudget(t, text, keyboard)
 	store.sessions[1].Name, store.sessions[1].Preview = "", secret

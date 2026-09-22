@@ -79,8 +79,8 @@ func TestSessionNamesRemainCompleteAcrossDeliveryChunks(t *testing.T) {
 				t.Fatal("preview replaced the explicit session name")
 			}
 			keyboard := messages[len(messages)-1].Keyboard
-			if keyboard.Rows[0][0].Text != "Connect 1" || keyboard.Rows[0][1].Text != "Status 1" {
-				t.Fatalf("long name leaked into the session controls: %#v", keyboard.Rows[0])
+			if keyboard.Rows[0][0].Text != "1 section-0000😀 sectio…" || keyboard.Rows[0][1].Text != "Status 1" {
+				t.Fatalf("long name did not produce a compact numbered session control: %#v", keyboard.Rows[0])
 			}
 		})
 	}
@@ -113,6 +113,30 @@ func TestSessionNamesAreRedactedBeforeDeliverySplits(t *testing.T) {
 	}
 }
 
+func TestSessionSelectionLabelsFitWithoutSplittingUnicode(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		want string
+	}{
+		{"Smart Stage", "1 Smart Stage"},
+		{" Smart\n\t Stage ", "1 Smart Stage"},
+		{strings.Repeat("x", 22), "1 " + strings.Repeat("x", 22)},
+		{strings.Repeat("x", 23), "1 " + strings.Repeat("x", 21) + "…"},
+		{strings.Repeat("😀", 11), "1 " + strings.Repeat("😀", 11)},
+		{strings.Repeat("😀", 12), "1 " + strings.Repeat("😀", 10) + "…"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			store := sessionPagesFixture(1)
+			store.sessions[1].Name = test.name
+			messages, _ := renderSessionNameMessages(t, testSender(store, nil), 0)
+			button := messages[len(messages)-1].Keyboard.Rows[0][0]
+			if button.Text != test.want {
+				t.Fatalf("session label = %q; want %q", button.Text, test.want)
+			}
+		})
+	}
+}
+
 func TestSessionNameNumbersMatchCallbacksAcrossPages(t *testing.T) {
 	store := sessionPagesFixture(23)
 	idsByName := make(map[string]string)
@@ -131,15 +155,15 @@ func TestSessionNameNumbersMatchCallbacksAcrossPages(t *testing.T) {
 			callbackIndex := 2*index + column
 			button := keyboard.Rows[index][column]
 			callback := store.callbacks[callbackIndex]
-			verb := "Connect"
+			wantLabel := fmt.Sprintf("%d %s", number, name)
 			if action == "status" {
-				verb = "Status"
+				wantLabel = fmt.Sprintf("Status %d", number)
 			}
-			if button.Text != fmt.Sprintf("%s %d", verb, number) {
+			if button.Text != wantLabel {
 				t.Fatalf("session %s control has ambiguous label %q", name, button.Text)
 			}
 			if button.Data != "cb:cb_opaque_"+string(rune('a'+callbackIndex)) || callback.Action != action || callback.SessionID.String() != idsByName[name] {
-				t.Fatalf("%s %d does not target its displayed session", verb, number)
+				t.Fatalf("%s does not target its displayed session", wantLabel)
 			}
 		}
 	}
@@ -165,7 +189,7 @@ func TestSessionNameContentDoesNotIncreaseKeyboardSize(t *testing.T) {
 	}
 	for index, row := range keyboard.Rows[:sessionPageSize] {
 		number := sessionPageSize + index + 1
-		if len(row) != 2 || row[0].Text != fmt.Sprintf("Connect %d", number) || row[1].Text != fmt.Sprintf("Status %d", number) {
+		if len(row) != 2 || !strings.HasPrefix(row[0].Text, fmt.Sprintf("%d ", number)) || !strings.HasSuffix(row[0].Text, "…") || row[1].Text != fmt.Sprintf("Status %d", number) {
 			t.Fatalf("session row %d includes a long or ambiguous control", number)
 		}
 	}

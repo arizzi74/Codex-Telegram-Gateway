@@ -198,7 +198,7 @@ func TestControlPlaneWorkerOutboxSurvivesGatewayRestartIntegration(t *testing.T)
 	if currentActive(t, local, runtimeID, targetThread) != active {
 		t.Fatal("temporary progress ended the running turn")
 	}
-	if tg.deletedCount() != 0 {
+	if tg.deletedCount(progressIDs...) != 0 {
 		t.Fatal("temporary progress was removed before the final answer")
 	}
 	if tg.countText("Queued for") != 0 {
@@ -219,13 +219,12 @@ func TestControlPlaneWorkerOutboxSurvivesGatewayRestartIntegration(t *testing.T)
 	beforeResume := countFixtureCalls(f.Calls(), "thread/resume")
 	selectControlSession(t, gw, tg, 10003, runtimeID, 2)
 	waitControl(t, func() bool { return tg.hasText("Connected to", "Beta") })
-	waitControl(t, func() bool { return tg.deletedCount() == len(progressIDs) })
+	waitControl(t, func() bool { return tg.deletedCount(progressIDs...) == len(progressIDs) })
 	for _, id := range progressIDs {
 		if !tg.wasDeleted(id) {
 			t.Fatalf("switching to Beta left Alpha temporary message %d visible", id)
 		}
 	}
-	removedOnSwitch := len(progressIDs)
 	time.Sleep(250 * time.Millisecond)
 	fakeMu.Lock()
 	if got := countFixtureCalls(f.Calls(), "turn/start"); got != beforeStart {
@@ -320,7 +319,7 @@ func TestControlPlaneWorkerOutboxSurvivesGatewayRestartIntegration(t *testing.T)
 		}
 		return false
 	})
-	if tg.deletedCount() != removedOnSwitch {
+	if tg.deletedCount(progressIDs...) != 0 {
 		t.Fatal("temporary progress was removed before the offline final answer was delivered")
 	}
 
@@ -329,7 +328,7 @@ func TestControlPlaneWorkerOutboxSurvivesGatewayRestartIntegration(t *testing.T)
 	defer gw.close()
 	waitControl(t, func() bool { return len(gw.hub.ConnectedWorkers()) == 1 })
 	waitControl(t, func() bool { return tg.countText("final emitted while gateway was offline") == 1 })
-	waitControl(t, func() bool { return tg.deletedCount() == removedOnSwitch+len(progressIDs) })
+	waitControl(t, func() bool { return tg.deletedCount(progressIDs...) == len(progressIDs) })
 	time.Sleep(500 * time.Millisecond)
 	if got := tg.countText("final emitted while gateway was offline"); got != 1 {
 		t.Fatalf("final delivery duplicated after replay: %d", got)
@@ -634,12 +633,16 @@ func (t *telegramRecorder) wasDeleted(messageID int64) bool {
 	return false
 }
 
-func (t *telegramRecorder) deletedCount() int {
+func (t *telegramRecorder) deletedCount(messageIDs ...int64) int {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	targets := make(map[int64]bool, len(messageIDs))
+	for _, id := range messageIDs {
+		targets[id] = true
+	}
 	count := 0
 	for _, action := range t.actions {
-		if action.kind == "delete" {
+		if action.kind == "delete" && (len(targets) == 0 || targets[action.messageID]) {
 			count++
 		}
 	}
@@ -781,7 +784,12 @@ func postTelegram(t *testing.T, c *http.Client, base, secret string, id int64, t
 }
 func postCallback(t *testing.T, c *http.Client, base, secret string, id int64, data string) {
 	t.Helper()
-	body, err := json.Marshal(map[string]any{"update_id": id, "callback_query": map[string]any{"id": "callback-" + string(rune('0'+id)), "from": map[string]any{"id": 7}, "data": data, "message": map[string]any{"message_id": id, "chat": map[string]any{"id": 9}}}})
+	postCallbackForMessage(t, c, base, secret, id, id, data)
+}
+
+func postCallbackForMessage(t *testing.T, c *http.Client, base, secret string, id, messageID int64, data string) {
+	t.Helper()
+	body, err := json.Marshal(map[string]any{"update_id": id, "callback_query": map[string]any{"id": "callback-" + string(rune('0'+id)), "from": map[string]any{"id": 7}, "data": data, "message": map[string]any{"message_id": messageID, "chat": map[string]any{"id": 9}}}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -802,17 +810,56 @@ func postCallback(t *testing.T, c *http.Client, base, secret string, id int64, d
 
 func selectControlSession(t *testing.T, run *gatewayRun, telegram *telegramRecorder, updateID int64, runtime string, number int) {
 	t.Helper()
-	label := fmt.Sprintf("Connect %d", number)
-	previous := wizardButton(telegram, "Sessions ·", label)
+	previous, _ := numberedSessionButton(telegram, number)
 	postTelegram(t, run.server.Client(), run.server.URL, "secret", updateID, "/tgsessions "+runtime, 0)
 	var button string
+	var messageID int64
 	waitControl(t, func() bool {
-		button = wizardButton(telegram, "Sessions ·", label)
+		button, messageID = numberedSessionButton(telegram, number)
 		return button != "" && button != previous
 	})
 	connected := telegram.countText("Connected to")
-	postCallback(t, run.server.Client(), run.server.URL, "secret", updateID+1, button)
+	postCallbackForMessage(t, run.server.Client(), run.server.URL, "secret", updateID+1, messageID, button)
 	waitControl(t, func() bool { return telegram.countText("Connected to") > connected })
+	telegram.mu.Lock()
+	defer telegram.mu.Unlock()
+	seenPicker, deleted := false, false
+	for _, action := range telegram.actions {
+		if action.kind == "send" && action.messageID == messageID {
+			seenPicker = true
+		}
+		if action.kind == "delete" && action.chatID == 9 && action.messageID == messageID {
+			deleted = true
+		}
+		if seenPicker && action.kind == "send" && strings.Contains(action.text, "Connected to") {
+			if !deleted {
+				t.Fatalf("session picker %d was not deleted before connection confirmation", messageID)
+			}
+			return
+		}
+	}
+	t.Fatalf("session picker %d has no subsequent connection confirmation", messageID)
+}
+
+func numberedSessionButton(telegram *telegramRecorder, number int) (string, int64) {
+	telegram.mu.Lock()
+	defer telegram.mu.Unlock()
+	prefix := fmt.Sprintf("%d ", number)
+	for index := len(telegram.messages) - 1; index >= 0; index-- {
+		message := telegram.messages[index]
+		if !strings.Contains(message.Text, "Sessions ·") || message.Keyboard == nil {
+			continue
+		}
+		for _, row := range message.Keyboard.Rows {
+			for _, button := range row {
+				if strings.HasPrefix(button.Text, prefix) && strings.TrimSpace(strings.TrimPrefix(button.Text, prefix)) != "" {
+					// Recorder.Send assigns consecutive IDs to this append-only list.
+					return button.Data, int64(index + 1)
+				}
+			}
+		}
+	}
+	return "", 0
 }
 func currentActive(t *testing.T, local *Store, runtimeID, threadID string) string {
 	t.Helper()

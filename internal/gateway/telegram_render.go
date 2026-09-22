@@ -22,6 +22,9 @@ const callbackLifetime = 15 * time.Minute
 const (
 	sessionPageSize         = 10
 	sessionKeyboardMaxBytes = 4096
+	// Leave room for the status column on narrow Telegram clients. The full
+	// name remains in the message above the keyboard.
+	sessionButtonMaxUnits = 24
 )
 
 type telegramRenderStore interface {
@@ -278,7 +281,8 @@ func (s *Sender) renderSessionList(ctx context.Context, row registry.Delivery, r
 		if err != nil {
 			return "", nil, fmt.Errorf("render session status callback: %w", err)
 		}
-		keyboard.Rows = append(keyboard.Rows, []TelegramButton{{Text: fmt.Sprintf("Connect %d", number), Data: connect}, {Text: fmt.Sprintf("Status %d", number), Data: status}})
+		buttonLabel := s.sessionListField(fmt.Sprintf("%d %s", number, label), sessionButtonMaxUnits, 4*sessionButtonMaxUnits)
+		keyboard.Rows = append(keyboard.Rows, []TelegramButton{{Text: buttonLabel, Data: connect}, {Text: fmt.Sprintf("Status %d", number), Data: status}})
 	}
 	var navigation []TelegramButton
 	for _, target := range []struct {
@@ -351,8 +355,8 @@ func (s *Sender) sessionListLabel(session protocol.Session) string {
 		session.Preview = s.options.Redactor.Redact(session.Preview)
 		session.CWD = s.options.Redactor.Redact(session.CWD)
 	}
-	// This view has numbered controls, so neither names nor preview-based
-	// labels need the compact label used by buttons elsewhere.
+	// Preserve full names and preview-based labels in the message body;
+	// selection buttons independently shorten this label to fit the keyboard.
 	for _, value := range []string{session.Name, session.Preview} {
 		if value = strings.TrimSpace(value); value != "" {
 			return value
@@ -763,6 +767,12 @@ func (s *Sender) inventory(ctx context.Context) (renderInventory, error) {
 }
 
 func (s *Sender) callback(ctx context.Context, row registry.Delivery, callback registry.Callback) (string, error) {
+	if row.Kind == "ui_response" {
+		switch callback.Action {
+		case "sessions", "select", "connect", "new":
+			callback.OriginDeliveryID = row.ID
+		}
+	}
 	if callback.UserID == 0 && row.Kind == "ui_response" {
 		var response registry.AcceptResult
 		if json.Unmarshal(row.Payload, &response) == nil {

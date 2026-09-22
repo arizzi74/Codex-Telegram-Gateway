@@ -33,6 +33,7 @@ var (
 type IncomingUpdate struct {
 	BotID, Text, Action, Target, CallbackToken, QuestionID string
 	UpdateID, UserID, ChatID, TopicID, ReplyToMessageID    int64
+	CallbackMessageID                                      int64
 	CommandTTL                                             time.Duration
 	Raw                                                    json.RawMessage
 	Images                                                 []protocol.Image
@@ -43,6 +44,7 @@ type IncomingUpdate struct {
 // AcceptResult is a durable UI response descriptor. The Telegram renderer owns
 // presentation; the registry only records a bounded view/result code.
 type AcceptResult struct {
+	PreviousPickerID   string                  `json:"previous_picker_id,omitempty"`
 	WorkerUpdates      []WorkerUpdateStatus    `json:"worker_updates,omitempty"`
 	MultiSession       bool                    `json:"multi_session,omitempty"`
 	WizardID           string                  `json:"wizard_id,omitempty"`
@@ -238,7 +240,7 @@ func telegramErrorCode(err error) string {
 }
 
 func validateIncoming(in IncomingUpdate) error {
-	if strings.TrimSpace(in.BotID) == "" || in.UpdateID < 0 || in.UserID == 0 || in.ChatID == 0 || in.TopicID < 0 || in.ReplyToMessageID < 0 {
+	if strings.TrimSpace(in.BotID) == "" || in.UpdateID < 0 || in.UserID == 0 || in.ChatID == 0 || in.TopicID < 0 || in.ReplyToMessageID < 0 || in.CallbackMessageID < 0 {
 		return errors.New("registry: invalid Telegram update")
 	}
 	if len(in.Raw) != 0 && !json.Valid(in.Raw) {
