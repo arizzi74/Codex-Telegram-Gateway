@@ -170,7 +170,7 @@ func TestGatewayNginxInstallPreservesSitesSymlinksAndIsIdempotent(t *testing.T) 
 		t.Fatal("backup changed original bytes or exposed private configuration")
 	}
 	proxy, _ := os.ReadFile(snippets[0])
-	for _, want := range []string{"location ^~ /tgadmin/", "location ^~ /tgapi/", "location = /tgreadyz", "location = /tghealthz", "location = /tgapi/v1/workers/connect", `proxy_set_header Connection "upgrade"`, "proxy_pass http://127.0.0.1:8080;", "proxy_set_header Host $http_host;"} {
+	for _, want := range []string{"location = /tgw { return 308 /tgw/; }", "location ^~ /tgw/", "location ^~ /tgw/admin/", "location ^~ /tgw/api/", "location = /tgw/readyz", "location = /tgw/healthz", "location = /tgw/api/v1/workers/connect", "location = /tgw/api/v1/webui/connect", "location = /tgw/api/v1/webui/activity", `proxy_set_header Connection "upgrade"`, "proxy_buffering off;", "proxy_pass http://127.0.0.1:8080;", "proxy_set_header Host $http_host;"} {
 		if !bytes.Contains(proxy, []byte(want)) {
 			t.Fatalf("missing proxy configuration %q", want)
 		}
@@ -244,10 +244,10 @@ func TestGatewayNginxRefusesConcurrentChangesAndConflictingRoutes(t *testing.T) 
 			f := newGatewayNginxFixture(t)
 			if scenario == "existing-route" || scenario == "included-route" || scenario == "nested-included-route" || scenario == "server-rewrite" {
 				path := f.tls
-				addition := "location = /tgapi/v1/telegram/webhook { return 200; }\n"
+				addition := "location = /tgw/api/v1/telegram/webhook { return 200; }\n"
 				if scenario == "existing-route" {
 					path = f.site
-					addition = "\nserver { listen 443 ssl; server_name conflict.example.com; location /tgadmin/ { return 200; } }\n"
+					addition = "\nserver { listen 443 ssl; server_name conflict.example.com; location /tgw/admin/ { return 200; } }\n"
 				}
 				if scenario == "nested-included-route" {
 					platformWrite(t, f.tls, "location / { include snippets/nested.conf; }\n", 0644)

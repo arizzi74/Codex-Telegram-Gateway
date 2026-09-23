@@ -55,15 +55,15 @@ func testPasskeyRegistrationAndAuthenticationHTTP(t *testing.T, origin string) {
 	t.Cleanup(server.Close)
 	client := passkeyHTTPClient(t, server)
 
-	response := adminRequest(t, client, origin, http.MethodGet, "/tgadmin/", nil, "", "")
+	response := adminRequest(t, client, origin, http.MethodGet, "/tgw/admin/", nil, "", "")
 	requireHTTPStatus(t, response, http.StatusOK)
 	csrf := cookieValue(t, client, origin, csrfCookie)
 
 	// HTTP origin checks run before any ceremony state is created.
-	response = adminRequest(t, client, origin, http.MethodPost, "/tgapi/v1/admin/passkeys/register/begin", map[string]string{"bootstrap_token": bootstrap}, "https://evil.example", csrf)
+	response = adminRequest(t, client, origin, http.MethodPost, "/tgw/api/v1/admin/passkeys/register/begin", map[string]string{"bootstrap_token": bootstrap}, "https://evil.example", csrf)
 	requireHTTPStatus(t, response, http.StatusForbidden)
 
-	response = adminRequest(t, client, origin, http.MethodPost, "/tgapi/v1/admin/passkeys/register/begin", map[string]string{"bootstrap_token": bootstrap}, origin, csrf)
+	response = adminRequest(t, client, origin, http.MethodPost, "/tgw/api/v1/admin/passkeys/register/begin", map[string]string{"bootstrap_token": bootstrap}, origin, csrf)
 	var registration struct {
 		CeremonyID string `json:"ceremony_id"`
 		PublicKey  struct {
@@ -113,10 +113,10 @@ func testPasskeyRegistrationAndAuthenticationHTTP(t *testing.T, origin string) {
 	response = registrationFinishRequest(t, client, origin, csrf, registration.CeremonyID, bootstrap, validRegistration)
 	requireHTTPStatus(t, response, http.StatusForbidden)
 
-	response = adminRequest(t, passkeyHTTPClient(t, server), origin, http.MethodGet, "/tgapi/v1/admin/dashboard", nil, "", "")
+	response = adminRequest(t, passkeyHTTPClient(t, server), origin, http.MethodGet, "/tgw/api/v1/admin/dashboard", nil, "", "")
 	requireHTTPStatus(t, response, http.StatusUnauthorized)
 
-	response = adminRequest(t, client, origin, http.MethodPost, "/tgapi/v1/admin/login/begin", struct{}{}, origin, csrf)
+	response = adminRequest(t, client, origin, http.MethodPost, "/tgw/api/v1/admin/login/begin", struct{}{}, origin, csrf)
 	var login struct {
 		CeremonyID string `json:"ceremony_id"`
 		PublicKey  struct {
@@ -143,7 +143,7 @@ func testPasskeyRegistrationAndAuthenticationHTTP(t *testing.T, origin string) {
 		t.Fatal("login did not set the admin session cookie")
 	}
 
-	response = adminRequest(t, client, origin, http.MethodGet, "/tgapi/v1/admin/dashboard", nil, "", "")
+	response = adminRequest(t, client, origin, http.MethodGet, "/tgw/api/v1/admin/dashboard", nil, "", "")
 	var dashboard struct {
 		registry.AdminDashboard
 		Bot       BotInfo `json:"bot"`
@@ -228,12 +228,12 @@ func adminRequest(t *testing.T, client *http.Client, serverURL, method, path str
 
 func registrationFinishRequest(t *testing.T, client *http.Client, serverURL, csrf, ceremonyID, bootstrap string, credential json.RawMessage) *http.Response {
 	t.Helper()
-	return adminRequest(t, client, serverURL, http.MethodPost, "/tgapi/v1/admin/passkeys/register/finish", map[string]any{"ceremony_id": ceremonyID, "bootstrap_token": bootstrap, "credential": credential}, serverURL, csrf)
+	return adminRequest(t, client, serverURL, http.MethodPost, "/tgw/api/v1/admin/passkeys/register/finish", map[string]any{"ceremony_id": ceremonyID, "bootstrap_token": bootstrap, "credential": credential}, serverURL, csrf)
 }
 
 func loginFinishRequest(t *testing.T, client *http.Client, serverURL, csrf, ceremonyID string, credential json.RawMessage) *http.Response {
 	t.Helper()
-	return adminRequest(t, client, serverURL, http.MethodPost, "/tgapi/v1/admin/login/finish", map[string]any{"ceremony_id": ceremonyID, "credential": credential}, serverURL, csrf)
+	return adminRequest(t, client, serverURL, http.MethodPost, "/tgw/api/v1/admin/login/finish", map[string]any{"ceremony_id": ceremonyID, "credential": credential}, serverURL, csrf)
 }
 
 func decodeHTTPJSON(t *testing.T, response *http.Response, expected int, output any) {

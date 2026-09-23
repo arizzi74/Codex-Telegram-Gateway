@@ -138,7 +138,7 @@ func (m *Manager) guideGatewayCompletion(ctx context.Context, l *Layout, cfg con
 				fmt.Fprintln(m.Out, "Update it when convenient, then resume setup:")
 				fmt.Fprintln(m.Out, "  sudo codex-telegramgw update gateway")
 				m.gatewayFinishInstructions()
-				fmt.Fprintf(m.Out, "An existing administrator can continue signing in at %s/tgadmin/.\n", cfg.PublicBaseURL)
+				fmt.Fprintf(m.Out, "An existing administrator can continue signing in at %s/tgw/admin/.\n", cfg.PublicBaseURL)
 				return nil
 			}
 		}
@@ -149,7 +149,7 @@ func (m *Manager) guideGatewayCompletion(ctx context.Context, l *Layout, cfg con
 		}
 		fmt.Fprint(m.Out, string(output))
 	}
-	fmt.Fprintf(m.Out, "\nOpen %s/tgadmin/ and register your passkey using the one-time token above, or sign in with your existing passkey.\n", cfg.PublicBaseURL)
+	fmt.Fprintf(m.Out, "\nOpen %s/tgw/admin/ and register your passkey using the one-time token above, or sign in with your existing passkey.\n", cfg.PublicBaseURL)
 	fmt.Fprintln(m.Out, "In the console, enroll a worker and copy its worker ID and one-time enrollment token. On the worker machine, run as the user who owns the projects:")
 	fmt.Fprintf(m.Out, "  curl -fsSL https://raw.githubusercontent.com/%s/main/scripts/install.sh | sh\n", DefaultRepo)
 	fmt.Fprintf(m.Out, "Enter %s when asked for the gateway address, then the worker ID and token.\n", cfg.PublicBaseURL)
@@ -178,9 +178,9 @@ func (m *Manager) gatewayPublicReady(ctx context.Context, origin string) error {
 		path, marker string
 		status       int
 	}{
-		{"/tgreadyz", "ready\n", http.StatusOK},
-		{"/tgadmin/", "CODEX GATEWAY", http.StatusOK},
-		{"/tgapi/v1/workers/connect", "", http.StatusUnauthorized},
+		{"/tgw/readyz", "ready\n", http.StatusOK},
+		{"/tgw/admin/", "CODEX GATEWAY", http.StatusOK},
+		{"/tgw/api/v1/workers/connect", "", http.StatusUnauthorized},
 	} {
 		request, err := http.NewRequestWithContext(ctx, http.MethodGet, origin+check.path, nil)
 		if err != nil {
@@ -192,7 +192,7 @@ func (m *Manager) gatewayPublicReady(ctx context.Context, origin string) error {
 		}
 		body, readErr := io.ReadAll(io.LimitReader(response.Body, 512*1024))
 		response.Body.Close()
-		if readErr != nil || response.StatusCode != check.status || (check.marker != "" && !strings.Contains(string(body), check.marker)) || (check.path == "/tgreadyz" && string(body) != "ready\n") {
+		if readErr != nil || response.StatusCode != check.status || (check.marker != "" && !strings.Contains(string(body), check.marker)) || (check.path == "/tgw/readyz" && string(body) != "ready\n") {
 			return errors.New("public HTTPS is not forwarding the gateway routes correctly")
 		}
 	}
@@ -205,6 +205,6 @@ func (m *Manager) printGatewayProxyInstructions(cfg config.GatewayConfig) {
 	fmt.Fprint(m.Out, gatewayCaddySite(cfg))
 	fmt.Fprintln(m.Out, "  sudo systemctl reload caddy")
 	fmt.Fprintf(m.Out, "For nginx, use https://github.com/%s/blob/main/deploy/nginx/telegramgw.conf with your domain, certificate, and local port.\n", DefaultRepo)
-	fmt.Fprintf(m.Out, "The ready check is: curl -fsS %s/tgreadyz\n", cfg.PublicBaseURL)
+	fmt.Fprintf(m.Out, "The ready check is: curl -fsS %s/tgw/readyz\n", cfg.PublicBaseURL)
 	m.gatewayFinishInstructions()
 }

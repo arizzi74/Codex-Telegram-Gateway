@@ -78,7 +78,7 @@ func (m *Manager) setupWorker(ctx context.Context, l *Layout, cwd string, openPr
 		return err
 	}
 	adminURL, _ := url.Parse(gateway)
-	adminURL.Scheme, adminURL.Path, adminURL.RawPath = "https", "/tgadmin/", ""
+	adminURL.Scheme, adminURL.Path, adminURL.RawPath = "https", "/tgw/admin/", ""
 	fmt.Fprintf(m.Out, "Open %s, sign in, and choose Enroll worker. Keep its Worker ID and enrollment token ready; the token is shown only once.\n", adminURL.String())
 	workerID, err := askSetupValue(ctx, prompt, m.Out, "Enrolled worker ID (UUID)", "", false, func(value string) (string, error) {
 		id, err := uuid.Parse(strings.TrimSpace(value))
@@ -195,7 +195,8 @@ func setupGatewayURL(value string) (string, error) {
 	u, err := url.Parse(value)
 	if err == nil && u.Scheme == "https" && u.User == nil && u.RawQuery == "" && !u.ForceQuery && !strings.Contains(value, "#") {
 		// Users often copy the admin-console address from their browser.
-		if u.EscapedPath() == "/tgadmin" || u.EscapedPath() == "/tgadmin/" {
+		switch u.EscapedPath() {
+		case "/tgw", "/tgw/", "/tgw/admin", "/tgw/admin/", "/tgw/webui", "/tgw/webui/", "/tgadmin", "/tgadmin/":
 			u.Path, u.RawPath = "", ""
 		}
 		u, err = config.ParseHTTPSOrigin(u.String())
@@ -213,5 +214,5 @@ func setupGatewayURL(value string) (string, error) {
 			return config.NormalizeGatewayURL(u.String()), nil
 		}
 	}
-	return "", errors.New("gateway address must be a hostname, an HTTPS address (optionally ending in /tgadmin/), or a WSS URL without credentials, query, or fragment")
+	return "", errors.New("gateway address must be a hostname, an HTTPS address (optionally ending in /tgw/admin/), or a WSS URL without credentials, query, or fragment")
 }

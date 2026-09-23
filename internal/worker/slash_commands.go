@@ -281,12 +281,15 @@ func (s *sessionActor) codexFork(ctx context.Context, client *codexadapter.Clien
 	if err != nil {
 		return protocol.Result{}, err
 	}
+	if thread.ID == s.session.ThreadID || !thread.UserSession() {
+		return protocol.Result{}, errors.New("Codex returned an unexpected fork identity")
+	}
 	cwd, err := canonicalWorkspace(thread.CWD, s.agent.cfg.AllowedWorkspaceRoots)
 	if err != nil {
 		return protocol.Result{}, fmt.Errorf("forked thread workspace is not allowed: %w", err)
 	}
 	thread.CWD = cwd
-	created, err := s.agent.store.UpsertSession(sessionFromThread(s.runtime, thread, true))
+	created, err := s.agent.store.UpsertRuntimeSession(s.runtime, sessionFromThread(s.runtime, thread, true))
 	if err != nil {
 		return protocol.Result{}, err
 	}
@@ -328,6 +331,9 @@ func (s *sessionActor) codexStatus(ctx context.Context, client *codexadapter.Cli
 	effort := threadReasoningEffort(thread)
 	if effort == "" {
 		effort = cfg.ReasoningEffort
+	}
+	if current := currentSessionSettings(s.session.Settings, nil, s.runtime.Generation); current != nil {
+		model, effort = current.Model, current.ReasoningEffort
 	}
 	lines := []string{"Codex session", "Model: " + valueOr(model, "default"), "Reasoning: " + valueOr(effort, "default"), "Workspace: " + s.session.CWD}
 	lines = append(lines, s.rolloutStatus(client, thread)...)
@@ -429,8 +435,12 @@ func (s *sessionActor) codexReasoning(ctx context.Context, client *codexadapter.
 	if err != nil {
 		return "", err
 	}
+	model, effort := thread.Model, threadReasoningEffort(thread)
+	if current := currentSessionSettings(s.session.Settings, nil, s.runtime.Generation); current != nil {
+		model, effort = current.Model, current.ReasoningEffort
+	}
 	if args == "" {
-		return "Reasoning effort: " + valueOr(threadReasoningEffort(thread), "default"), nil
+		return "Reasoning effort: " + valueOr(effort, "default"), nil
 	}
 	if len(strings.Fields(args)) != 1 {
 		return "", validationError("usage: /reasoning EFFORT")
@@ -441,12 +451,12 @@ func (s *sessionActor) codexReasoning(ctx context.Context, client *codexadapter.
 	}
 	allowed := false
 	for _, m := range models {
-		if (m.ID == thread.Model || m.Model == thread.Model) && containsString(m.ReasoningEfforts, args) {
+		if (m.ID == model || m.Model == model) && containsString(m.ReasoningEfforts, args) {
 			allowed = true
 		}
 	}
 	if !allowed {
-		return "", validationError("reasoning effort %q is not available for model %s", args, valueOr(thread.Model, "current"))
+		return "", validationError("reasoning effort %q is not available for model %s", args, valueOr(model, "current"))
 	}
 	if err := s.ensureCodexThreadLoaded(ctx, client); err != nil {
 		return "", err

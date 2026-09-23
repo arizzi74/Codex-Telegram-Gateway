@@ -171,14 +171,15 @@ same address. See the [Telegram webhook requirements](https://core.telegram.org/
 
 If you manage the proxy yourself, forward it to the selected local port
 (`127.0.0.1:8080` by default), including WebSocket upgrades. The
-[nginx template](../deploy/nginx/telegramgw.conf) routes `/tgadmin/`,
-`/tgapi/`, `/tghealthz`, and `/tgreadyz`. Preserve these paths when forwarding:
-workers connect at `/tgapi/v1/workers/connect` and Telegram delivers updates
-to `/tgapi/v1/telegram/webhook`.
+[nginx template](../deploy/nginx/telegramgw.conf) routes `/tgw/`, including
+`/tgw/admin/`, `/tgw/webui/`, `/tgw/api/`, `/tgw/healthz`, and `/tgw/readyz`.
+Preserve these paths when forwarding:
+workers connect at `/tgw/api/v1/workers/connect` and Telegram delivers updates
+to `/tgw/api/v1/telegram/webhook`.
 
 Once public HTTPS passes its checks, the wizard registers the Telegram webhook
 and command menu, then creates a first administrator's one-time token if needed.
-Open the printed `/tgadmin/` address, register a passkey within 15 minutes, and
+Open the printed `/tgw/admin/` address, register a passkey within 15 minutes, and
 enroll a worker to obtain its ID and token. Existing administrator passkeys are
 preserved when completion is rerun.
 If an existing gateway predates guided administrator setup, the wizard prints
@@ -390,18 +391,34 @@ updates use an independent updater service and do not change automatic update
 schedules. They update the worker and its local helper; the separate daily
 Codex runtime check continues on its normal schedule.
 
-### Upgrade to the `tg` URL routes
+### Upgrade to the `/tgw` URL routes
 
-The gateway serves the console at `/tgadmin/`, API endpoints under `/tgapi/v1/`,
-and health checks at `/tghealthz` and `/tgreadyz`. Previous unprefixed routes
-return 404. Update proxy rules and external health checks together with the
-gateway; preserve WebSocket support for `/tgapi/v1/workers/connect`.
+The gateway serves the console at `/tgw/admin/`, the browser Codex interface at
+`/tgw/webui/`, API endpoints under `/tgw/api/v1/`, and health checks at
+`/tgw/healthz` and `/tgw/readyz`. Previous `/tgadmin`, `/tgapi`, `/tghealthz`,
+`/tgreadyz`, and unprefixed routes return 404; the new gateway does not expose
+legacy aliases.
 
-Plan this first route change across the gateway and its workers. Finish active
-turns, then stop each worker from a separate terminal before changing the
-gateway. On Linux, use `systemctl --user stop codex-worker.service` as the
-worker's owning user. This also stops its app servers, so do not run it from
-a turn hosted by that worker.
+Update workers **before** the gateway. Temporarily stop the gateway automatic
+update timer, then run `codex-telegramgw update worker` as each worker's owning
+user (or request `/tgupdateworkers` while the old gateway is still running).
+Wait for the workers to finish their current turns, update, and reconnect.
+Updated workers first try `/tgw/api/v1/workers/connect`; a 404 or 410 permits
+retrying the previous `/tgapi/v1/workers/connect` on the same HTTPS host and port.
+This supports the old gateway during the rollout without weakening TLS or
+retrying authentication failures. Workers running an older binary do not have
+this fallback and cannot reconnect after the gateway route change. Do not let
+the gateway update first.
+
+Update proxy rules and external health checks together with the gateway. Proxy
+the entire `/tgw/` prefix, preserve WebSocket support for
+`/tgw/api/v1/workers/connect`, `/tgw/api/v1/webui/connect`, and
+`/tgw/api/v1/webui/activity` (the independent session-status feed), and disable response
+buffering for live browser events. The generated nginx snippet and standalone
+Caddy configuration include
+these settings. Existing proxy installations must have their saved rules
+updated too; installing a new gateway binary does not rewrite arbitrary virtual
+hosts.
 
 Use the bootstrap to run the new manager for this gateway update. Older managers
 continue checking the previous readiness URL even after installing a new binary:
@@ -412,14 +429,13 @@ curl -fsSL https://raw.githubusercontent.com/arizzi74/Codex-Telegram-Gateway/mai
 
 Reload the matching proxy configuration, then run `gateway webhook set` using
 the helper from [Finish gateway setup](#finish-gateway-setup) so Telegram sends
-updates to the new URL. Update each stopped worker as its owning user with
-`codex-telegramgw update worker`; the updater starts it again. New workers
-automatically normalize the previous standard WebSocket URL when loading their
-configuration. Custom endpoints are preserved. Keep the public HTTPS origin
-unchanged; existing worker credentials, saved sessions, and passkeys remain valid.
+updates to the new URL. Updated workers automatically normalize previous
+standard WebSocket URLs when loading their configuration. Custom endpoints are
+preserved. Keep the public HTTPS origin unchanged; existing worker credentials,
+saved sessions, and passkeys remain valid.
 
-Verify `/tgreadyz`, worker reconnection, and bot webhook status in `/tgadmin/`
-before resuming turns.
+Verify `/tgw/readyz`, worker reconnection, and bot webhook status in `/tgw/admin/`
+before re-enabling the gateway automatic update timer.
 
 ### Updating running workers
 
@@ -507,11 +523,24 @@ uses a cached release when the daily check is not yet due.
 Runtime installation uses the same idle reservation as worker maintenance,
 including native CLI turns, approvals, pending requests, and queued Telegram
 work. The worker stops before the native standalone updater downloads and
-installs Codex, then starts its app servers again. The updater verifies fresh
-worker readiness and the actual runtime versions before completing. Failures or
-cancellation trigger an attempt to restore the worker service, and an
-interrupted restart remains pending for the next updater invocation. A worker
-that was already stopped is left stopped.
+installs Codex. Before restarting production, the updater tests the candidate's
+app-server connection with an isolated Codex home, without starting a model turn
+or reading production conversations. It then verifies fresh worker readiness
+and the actual runtime versions.
+
+Runtime maintenance records the previous standalone release before installation.
+If installation, compatibility testing, or readiness fails, recovery restores
+the previous release and checks the worker again. Once a candidate worker has
+started, recovery must obtain a new idle reservation before stopping it; active
+work postpones recovery. Recovery remains pending across updater restarts, and a
+failed release is withheld from repeated automatic installation until the worker
+is upgraded or a newer Codex release becomes available. Recovery is recorded in
+the private `codex-recovery.json` beside `codex-update.json`; do not remove a
+pending recovery journal to force an update. Session files
+and databases are never rewound as part of runtime recovery. If the retained
+release or its readiness cannot be verified, the updater reports the failure
+for operator intervention. Recovery also refuses to overwrite a release changed
+independently after its checkpoint. A worker that was already stopped is left stopped.
 
 If Codex's own updater has already changed the installed launcher, the gateway
 updater still detects an older running app server and schedules its restart
@@ -521,6 +550,13 @@ are skipped. The native Codex installer uses its normal shell/download/archive
 tools; this procedure adds no Python dependency. Gateway-only hosts do not
 check or update Codex. Disabling worker automatic updates also disables these
 scheduled runtime checks; the gateway and worker timer defaults are unchanged.
+
+Both direct Unix sockets and Codex's newer private socket links are supported.
+For a linked backend, the worker checks the expected target location, ownership,
+directory permissions, and socket type before connecting. This does not relax
+the separate checks on the worker's own attachment and update-control
+sockets. Older workers may report `app-server listener path is not a Unix socket`
+after a Codex runtime upgrade; update the worker before retrying that runtime.
 
 A runtime degraded by a missing protocol method retries discovery once per
 minute. It returns to healthy status only after those methods and a complete
@@ -570,6 +606,11 @@ all platform builds, and archive verification. CI uses the latest Go 1.26 patch
 the version's binaries, installer, update manager, and checksum manifest. It
 uploads a draft first so automatic updaters never select a partially uploaded
 release. Published releases are not overwritten; corrections use a new version.
+
+The regular CI workflow also checks the admin interface, browser conversations,
+Web Push controls and public website with a pinned Playwright/Chromium setup.
+Website publication runs its own browser checks before deploying `site/` to
+GitHub Pages. These are development tools, not installed gateway dependencies.
 
 Each release publishes ten component archives, four native manager executables
 (`codex-telegramgw-{linux,darwin}-{amd64,arm64}`), `install.sh`, `SHA256SUMS`, and

@@ -30,7 +30,7 @@ func TestAdminUsesConfiguredHostnameAndExactOrigin(t *testing.T) {
 				t.Fatal("configured hostname removed required user verification")
 			}
 			for _, origin := range []string{tc.origin, "http://" + tc.rpID, "https://" + tc.rpID + ":9443", "https://other.example.net", ""} {
-				request := httptest.NewRequest(http.MethodPost, tc.origin+"/tgapi/v1/admin/login/begin", nil)
+				request := httptest.NewRequest(http.MethodPost, tc.origin+"/tgw/api/v1/admin/login/begin", nil)
 				request.Header.Set("Origin", origin)
 				response := httptest.NewRecorder()
 				if accepted := server.sameOrigin(response, request); accepted != (origin == tc.origin) {
@@ -47,7 +47,7 @@ func TestAdminUsesConfiguredHostnameAndExactOrigin(t *testing.T) {
 func TestAdminRejectsInvalidOrigins(t *testing.T) {
 	for _, origin := range []string{
 		"", "gateway.example.com", "http://gateway.example.com", "https://", "https://:8443",
-		"https://user:password@gateway.example.com", "https://gateway.example.com/tgadmin",
+		"https://user:password@gateway.example.com", "https://gateway.example.com/tgw/admin",
 		"https://gateway.example.com//", "https://gateway.example.com?query=1", "https://gateway.example.com?",
 		"https://gateway.example.com#fragment", "https://gateway.example.com#", "https://gateway.example.com:",
 		"https://gateway.example.com:invalid", "https://gateway.example.com:0", "https://gateway.example.com:65536",

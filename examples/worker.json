@@ -2,7 +2,7 @@
   "worker_id": "00000000-0000-4000-8000-000000000001",
   "name": "my-worker",
   "state_file": "state/worker.db",
-  "gateway_url": "wss://gateway.example.com/tgapi/v1/workers/connect",
+  "gateway_url": "wss://gateway.example.com/tgw/api/v1/workers/connect",
   "token_file": "worker.token",
   "allowed_workspace_roots": ["/home/USERNAME/projects"],
   "max_queued_turns": 20,

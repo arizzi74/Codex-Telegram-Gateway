@@ -34,6 +34,9 @@ type Hub struct {
 	heartbeat, unreachable time.Duration
 	mu                     sync.RWMutex
 	peers                  map[string]*peer
+	webuis                 map[string]*WebUIStream
+	webuiQueuedBytes       int
+	webuiInputBytes        int
 	limiter                *httpguard.Limiter
 	// EventHandler must durably commit before returning nil. Without a handler,
 	// events are deliberately not ACKed, so the worker retains its outbox.
@@ -48,19 +51,23 @@ type peer struct {
 	supportsSessionWorkspaces   bool
 	supportsSessionDeletion     bool
 	supportsConversationHistory bool
+	supportsWebUI               bool
 	conn                        *websocket.Conn
 	ctx                         context.Context
 	cancel                      context.CancelFunc
 	writes                      chan writeRequest
+	writeMu                     sync.Mutex // fences admission against final writer shutdown
+	writeStopped                bool
 }
 
 type writeRequest struct {
 	envelope protocol.Envelope
 	done     chan error
+	complete func(error) // shared once-only completion across queued copies
 }
 
 func NewHub(store WorkerRegistry, logger *slog.Logger, heartbeat, unreachable time.Duration) *Hub {
-	return &Hub{store: store, log: logger, heartbeat: heartbeat, unreachable: unreachable, peers: map[string]*peer{}, limiter: httpguard.NewLimiter(20, 4096, time.Minute)}
+	return &Hub{store: store, log: logger, heartbeat: heartbeat, unreachable: unreachable, peers: map[string]*peer{}, webuis: map[string]*WebUIStream{}, limiter: httpguard.NewLimiter(20, 4096, time.Minute)}
 }
 
 func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -126,6 +133,7 @@ func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		supportsSessionWorkspaces:   hello.SupportsSessionWorkspaces || legacySessionSupport,
 		supportsSessionDeletion:     hello.SupportsSessionDeletion || legacySessionSupport,
 		supportsConversationHistory: hello.SupportsConversationHistory,
+		supportsWebUI:               hello.SupportsWebUI,
 		conn:                        conn, ctx: ctx, cancel: cancel, writes: make(chan writeRequest, 128)}
 	h.mu.Lock()
 	old := h.peers[hello.WorkerID]
@@ -216,6 +224,8 @@ func (h *Hub) handle(ctx context.Context, p *peer, e protocol.Envelope) error {
 			return errors.New("command ingestion unavailable")
 		}
 		return h.AckHandler(ctx, p.workerID, p.connectionID, ack)
+	case "webui":
+		return h.handleWebUI(p, e)
 	default:
 		return errors.New("unexpected worker message")
 	}
@@ -248,19 +258,57 @@ func readEnvelope(ctx context.Context, conn *websocket.Conn) (protocol.Envelope,
 	return protocol.Decode(data)
 }
 
+func (r writeRequest) finish(err error) {
+	if r.complete != nil {
+		r.complete(err)
+		return
+	}
+	r.done <- err
+}
+
+// Fence admission before draining. A cancelled buffered send must never win
+// its select after the writer has performed its final drain.
+func (p *peer) stopWrites() {
+	p.writeMu.Lock()
+	p.writeStopped = true
+	var dropped []writeRequest
+drain:
+	for {
+		select {
+		case request := <-p.writes:
+			dropped = append(dropped, request)
+		default:
+			break drain
+		}
+	}
+	p.writeMu.Unlock()
+	err := p.ctx.Err()
+	if err == nil {
+		err = errors.New("worker writer stopped")
+	}
+	for _, request := range dropped {
+		request.finish(err)
+	}
+}
+
 func (p *peer) writer() {
+	defer p.stopWrites()
 	for {
 		select {
 		case <-p.ctx.Done():
 			return
 		case req := <-p.writes:
+			if err := p.ctx.Err(); err != nil {
+				req.finish(err)
+				return
+			}
 			data, err := json.Marshal(req.envelope)
 			if err == nil {
 				ctx, cancel := context.WithTimeout(p.ctx, 15*time.Second)
 				err = p.conn.Write(ctx, websocket.MessageText, data)
 				cancel()
 			}
-			req.done <- err
+			req.finish(err)
 			if err != nil {
 				p.cancel()
 				return
@@ -269,21 +317,59 @@ func (p *peer) writer() {
 	}
 }
 
-func (p *peer) send(ctx context.Context, kind string, payload any) error {
-	e, err := protocol.NewEnvelope(kind, payload)
-	if err != nil {
+func (p *peer) enqueue(ctx context.Context, request writeRequest) error {
+	p.writeMu.Lock()
+	defer p.writeMu.Unlock()
+	if p.writeStopped {
+		return errors.New("worker writer stopped")
+	}
+	if err := ctx.Err(); err != nil {
 		return err
 	}
-	req := writeRequest{envelope: e, done: make(chan error, 1)}
+	if err := p.ctx.Err(); err != nil {
+		return err
+	}
 	select {
-	case p.writes <- req:
+	case p.writes <- request:
+		return nil
 	case <-ctx.Done():
 		return ctx.Err()
 	case <-p.ctx.Done():
 		return p.ctx.Err()
 	}
+}
+
+func (p *peer) send(ctx context.Context, kind string, payload any) error {
+	return p.sendWithCompletion(ctx, kind, payload, nil)
+}
+
+// Completion owns any byte reservation after successful enqueue. Browser
+// cancellation can end the caller's wait, but cannot release bytes that still
+// exist in a queued envelope or an in-flight socket write.
+func (p *peer) sendWithCompletion(ctx context.Context, kind string, payload any, release func()) error {
+	e, err := protocol.NewEnvelope(kind, payload)
+	if err != nil {
+		if release != nil {
+			release()
+		}
+		return err
+	}
+	done := make(chan error, 1)
+	var once sync.Once
+	req := writeRequest{envelope: e, done: done, complete: func(err error) {
+		once.Do(func() {
+			if release != nil {
+				release()
+			}
+			done <- err
+		})
+	}}
+	if err := p.enqueue(ctx, req); err != nil {
+		req.finish(err)
+		return err
+	}
 	select {
-	case err := <-req.done:
+	case err := <-done:
 		return err
 	case <-ctx.Done():
 		return ctx.Err()

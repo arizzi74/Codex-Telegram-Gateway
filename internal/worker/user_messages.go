@@ -7,7 +7,7 @@ import (
 	"github.com/iaia/telegramgw/internal/protocol"
 )
 
-// Native user prompts are visible in the all-session feed. Exact, accepted
+// Native Web UI and CLI prompts follow the selected or all-session feed. Exact, accepted
 // Telegram submissions are already visible in that chat and are not echoed.
 // Keep occurrences within the turn so identical later CLI input is retained.
 func (s *sessionActor) observeUserMessage(event codexadapter.Event) {

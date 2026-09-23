@@ -50,7 +50,7 @@ func TestControlPlaneGuidedSessionCreationAndDeletionIntegration(t *testing.T) {
 	}
 	defer local.Close()
 	cfg := config.WorkerConfig{
-		WorkerID: workerID.String(), Name: "wizard-worker", GatewayURL: "wss://gateway.example.com/tgapi/v1/workers/connect", TokenFile: tokenPath, StateFile: statePath,
+		WorkerID: workerID.String(), Name: "wizard-worker", GatewayURL: "wss://gateway.example.com/tgw/api/v1/workers/connect", TokenFile: tokenPath, StateFile: statePath,
 		AllowedWorkspaceRoots: []string{workspace},
 		Runtimes:              []config.RuntimeProfile{{ID: "main", Name: "Main", CodexBinary: "/bin/true", WorkingDirectory: workspace, Autostart: true, RestartPolicy: "on-failure"}},
 	}

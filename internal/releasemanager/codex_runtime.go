@@ -8,16 +8,19 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 )
 
 type codexUpdateState struct {
-	Schema         int       `json:"schema"`
-	CheckedAt      time.Time `json:"checked_at,omitempty"`
-	LatestVersion  string    `json:"latest_version,omitempty"`
-	CheckFailed    bool      `json:"check_failed,omitempty"`
-	RestartPending bool      `json:"restart_pending,omitempty"`
+	Schema                  int       `json:"schema"`
+	CheckedAt               time.Time `json:"checked_at,omitempty"`
+	LatestVersion           string    `json:"latest_version,omitempty"`
+	CheckFailed             bool      `json:"check_failed,omitempty"`
+	RestartPending          bool      `json:"restart_pending,omitempty"`
+	RejectedVersions        []string  `json:"rejected_versions,omitempty"`
+	RejectedByWorkerVersion string    `json:"rejected_by_worker_version,omitempty"`
 }
 
 type codexRuntimeProfile struct {
@@ -52,6 +55,19 @@ func loadCodexUpdateState(l *Layout) (codexUpdateState, error) {
 	}
 	if json.Unmarshal(data, &state) != nil || state.Schema != 1 {
 		return state, errors.New("invalid Codex runtime update state")
+	}
+	if state.RejectedByWorkerVersion != "" {
+		if _, err := ParseVersion(state.RejectedByWorkerVersion); err != nil {
+			return state, errors.New("invalid rejected Codex worker version")
+		}
+	}
+	if len(state.RejectedVersions) > 64 {
+		return state, errors.New("too many rejected Codex runtime versions")
+	}
+	for _, version := range state.RejectedVersions {
+		if _, err := ParseVersion(version); err != nil {
+			return state, errors.New("invalid rejected Codex runtime version")
+		}
 	}
 	if state.LatestVersion != "" {
 		if _, err := ParseVersion(state.LatestVersion); err != nil {
@@ -123,9 +139,38 @@ func (m *Manager) UpdateCodexRuntime(ctx context.Context, l *Layout, check bool)
 	if l.Component != "worker" {
 		return errors.New("Codex runtime updates require a worker installation")
 	}
+	journal, err := loadCodexRecovery(l)
+	if err != nil {
+		return err
+	}
+	if journal != nil {
+		if check {
+			return &BusyError{Reason: "Codex runtime recovery is pending"}
+		}
+		cleanup, cancel := context.WithTimeout(context.WithoutCancel(ctx), 90*time.Second)
+		defer cancel()
+		if err := m.recoverCodexRuntime(cleanup, l, journal); err != nil {
+			return err
+		}
+		if m.Out != nil {
+			fmt.Fprintln(m.Out, "Interrupted Codex runtime maintenance recovered; normal update checks resume on the next tick.")
+		}
+		return nil
+	}
 	state, err := loadCodexUpdateState(l)
 	if err != nil {
 		return err
+	}
+	if len(state.RejectedVersions) > 0 && state.RejectedByWorkerVersion != "" {
+		if version, err := m.installedCodexWorkerVersion(ctx, l); err == nil && codexWorkerUpgrade(version, state.RejectedByWorkerVersion) {
+			state.RejectedVersions = nil
+			state.RejectedByWorkerVersion = ""
+			if !check {
+				if err = WriteJSON(codexUpdateStatePath(l), state); err != nil {
+					return err
+				}
+			}
+		}
 	}
 	plans, workerID, err := m.codexRuntimePlans(ctx, l)
 	if err != nil || len(plans) == 0 {
@@ -182,7 +227,7 @@ func (m *Manager) UpdateCodexRuntime(ctx context.Context, l *Layout, check bool)
 			if err != nil {
 				return err
 			}
-			if comparison > 0 {
+			if comparison > 0 && !slices.Contains(state.RejectedVersions, state.LatestVersion) {
 				plan.TargetVersion = state.LatestVersion
 				plan.NeedsInstall, maintenance = true, true
 				fmt.Fprintf(m.Out, "Codex runtime update available: %s -> %s.\n", plan.Distribution.Version, state.LatestVersion)
@@ -202,9 +247,14 @@ func (m *Manager) UpdateCodexRuntime(ctx context.Context, l *Layout, check bool)
 			}
 		}
 	}
+	if slices.Contains(state.RejectedVersions, state.LatestVersion) && m.Out != nil {
+		fmt.Fprintln(m.Out, "The latest Codex runtime release previously failed validation and will not be retried automatically.")
+	}
 	if check || !maintenance {
 		if !maintenance && checkErr == nil {
-			if state.CheckFailed {
+			if slices.Contains(state.RejectedVersions, state.LatestVersion) {
+				// Failure notice above explains why this installation stays on its prior release.
+			} else if state.CheckFailed {
 				fmt.Fprintln(m.Out, "The last Codex release check failed; it will be retried at the next daily check.")
 			} else {
 				fmt.Fprintln(m.Out, "Codex runtime is current; automatic release checks run once per UTC day.")
@@ -238,4 +288,9 @@ func (m *Manager) restorePendingCodexWorker(ctx context.Context, l *Layout) erro
 		return errors.New("Codex runtime recovery could not restore the worker service; inspect its service logs")
 	}
 	return m.WorkerReady(ctx, l, after, "")
+}
+
+func codexWorkerUpgrade(current, previous string) bool {
+	comparison, err := CompareVersions(current, previous)
+	return err == nil && comparison > 0
 }

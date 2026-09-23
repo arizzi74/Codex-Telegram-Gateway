@@ -1,13 +1,13 @@
 # Administrator console
 
-The passkey-only console is served at `/tgadmin/`. The gateway enables it with
+The passkey-only console is served at `/tgw/admin/`. The gateway enables it with
 the configured public origin and read-only Telegram bot status checks.
 `PublicBaseURL` must be the gateway's exact public HTTPS origin, such as
 `https://gateway.example.com`. WebAuthn derives its relying-party ID from that
 origin's hostname; browser requests must match the full configured origin,
 including its port when one is specified.
 
-The `/tgadmin/` console and `/tgapi/v1/admin/` endpoints share that origin.
+The `/tgw/admin/` console and `/tgw/api/v1/admin/` endpoints share that origin.
 Keep the origin configuration free of a path prefix so existing passkeys remain
 bound to the same hostname when URL routes change.
 
@@ -20,14 +20,14 @@ The browser uses these endpoints:
 
 | Endpoint | Purpose |
 | --- | --- |
-| `POST /tgapi/v1/admin/passkeys/register/begin` | Begins bootstrap or an authenticated additional-passkey ceremony. |
-| `POST /tgapi/v1/admin/passkeys/register/finish` | Verifies and persists a registration response. |
-| `POST /tgapi/v1/admin/login/begin` / `finish` | Begins and completes a discoverable passkey login. |
-| `GET /tgapi/v1/admin/dashboard` | Returns visible sessions and statistics, workers, runtimes, bot status, and pending counts. |
-| `GET, DELETE /tgapi/v1/admin/passkeys[/{id}]` | Lists credentials or revokes a non-final credential. |
-| `POST /tgapi/v1/admin/workers` | Creates a worker and returns its one-time enrollment token. |
-| `DELETE /tgapi/v1/admin/workers/{id}` | Revokes a worker. |
-| `POST /tgapi/v1/admin/workers/{id}/rotate-token` | Returns a replacement enrollment token. |
+| `POST /tgw/api/v1/admin/passkeys/register/begin` | Begins bootstrap or an authenticated additional-passkey ceremony. |
+| `POST /tgw/api/v1/admin/passkeys/register/finish` | Verifies and persists a registration response. |
+| `POST /tgw/api/v1/admin/login/begin` / `finish` | Begins and completes a discoverable passkey login. |
+| `GET /tgw/api/v1/admin/dashboard` | Returns visible sessions and statistics, workers, runtimes, bot status, and pending counts. |
+| `GET, DELETE /tgw/api/v1/admin/passkeys[/{id}]` | Lists credentials or revokes a non-final credential. |
+| `POST /tgw/api/v1/admin/workers` | Creates a worker and returns its one-time enrollment token. |
+| `DELETE /tgw/api/v1/admin/workers/{id}` | Revokes a worker. |
+| `POST /tgw/api/v1/admin/workers/{id}/rotate-token` | Returns a replacement enrollment token. |
 
 All state-changing requests require the exact configured `Origin`, the strict
 same-site session, and a double-submit `X-CSRF-Token`. Ceremony cookies bind

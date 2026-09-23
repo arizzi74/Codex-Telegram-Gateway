@@ -66,7 +66,7 @@ func newSessionModeControlConfig(t *testing.T, configure func(*config.WorkerConf
 	if err != nil {
 		t.Fatal(err)
 	}
-	cfg := config.WorkerConfig{WorkerID: workerID.String(), Name: "sessions-worker", GatewayURL: "wss://gateway.example.com/tgapi/v1/workers/connect", TokenFile: tokenFile, StateFile: stateFile, AllowedWorkspaceRoots: []string{root}, Runtimes: []config.RuntimeProfile{{ID: "main", Name: "Main", CodexBinary: "/bin/true", WorkingDirectory: root, Autostart: true, RestartPolicy: "on-failure"}}}
+	cfg := config.WorkerConfig{WorkerID: workerID.String(), Name: "sessions-worker", GatewayURL: "wss://gateway.example.com/tgw/api/v1/workers/connect", TokenFile: tokenFile, StateFile: stateFile, AllowedWorkspaceRoots: []string{root}, Runtimes: []config.RuntimeProfile{{ID: "main", Name: "Main", CodexBinary: "/bin/true", WorkingDirectory: root, Autostart: true, RestartPolicy: "on-failure"}}}
 	if configure != nil {
 		configure(&cfg)
 	}

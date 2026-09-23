@@ -9,7 +9,7 @@ import (
 	"github.com/iaia/telegramgw/internal/registry"
 )
 
-func TestAdminRoutesUseTGPrefix(t *testing.T) {
+func TestAdminRoutesUseTGWPrefix(t *testing.T) {
 	s, err := New(&registry.Store{}, Config{Origin: passkeyTestOrigin})
 	if err != nil {
 		t.Fatal(err)
@@ -19,11 +19,15 @@ func TestAdminRoutesUseTGPrefix(t *testing.T) {
 		code     int
 		contains string
 	}{
-		{"/tgadmin", http.StatusTemporaryRedirect, "/tgadmin/"},
-		{"/tgadmin/", http.StatusOK, `/tgadmin/static/app.js`},
-		{"/tgadmin/static/app.css", http.StatusOK, "font-family"},
-		{"/tgadmin/static/app.js", http.StatusOK, "const api = '/tgapi/v1/admin'"},
-		{"/tgapi/v1/admin/dashboard", http.StatusUnauthorized, ""},
+		{"/tgw/admin", http.StatusTemporaryRedirect, "/tgw/admin/"},
+		{"/tgw/admin/", http.StatusOK, `/tgw/admin/static/app.js`},
+		{"/tgw/admin/static/app.css", http.StatusOK, "font-family"},
+		{"/tgw/admin/static/app.js", http.StatusOK, "const api = '/tgw/api/v1/admin'"},
+		{"/tgw/api/v1/admin/dashboard", http.StatusUnauthorized, ""},
+		{"/tgadmin", http.StatusNotFound, ""},
+		{"/tgadmin/", http.StatusNotFound, ""},
+		{"/tgadmin/static/app.js", http.StatusNotFound, ""},
+		{"/tgapi/v1/admin/dashboard", http.StatusNotFound, ""},
 		{"/admin", http.StatusNotFound, ""},
 		{"/admin/", http.StatusNotFound, ""},
 		{"/admin/static/app.js", http.StatusNotFound, ""},

@@ -37,6 +37,7 @@ type Manager struct {
 	PollInterval time.Duration
 	// Internal test seam; production always uses the compiled-in provenance policy.
 	verifyManifest func(repo, tag string, manifest, bundle []byte) error
+	codexPreflight func(context.Context, *codexDistribution) error
 }
 
 type Release struct {

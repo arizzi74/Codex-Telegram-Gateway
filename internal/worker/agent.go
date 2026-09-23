@@ -21,6 +21,8 @@ import (
 // Agent joins runtime supervision, independent session actors, and the durable
 // transport. The network context never owns a runtime or an accepted turn.
 type Agent struct {
+	historySource func(context.Context, string) (webUIHistorySource, error)
+	webHistory    webUIHistoryCache
 	updateMu      sync.Mutex
 	update        *updateState
 	cfg           config.WorkerConfig
@@ -85,6 +87,10 @@ func (a *Agent) Run(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	conn.observeWebUI = a.observeWebUISession
+	conn.commandWebUI = a.executeWebUICommand
+	conn.questionsWebUI = a.webUIQuestions
+	conn.historyWebUI = a.webUIHistory
 	stopUpdateControl, err := a.startUpdateControl(ctx)
 	if err != nil {
 		return err
@@ -233,32 +239,50 @@ func (a *Agent) emit(runtime protocol.Runtime, sessionID, kind string, data any)
 }
 
 func (a *Agent) onSession(runtime protocol.Runtime, s protocol.Session) {
-	if a.ctx.Err() != nil {
-		return
+	_ = a.onSessionContext(a.ctx, runtime, s)
+}
+
+// Browser admission must stop waiting for a busy actor when its connection
+// closes. Actors themselves retain the worker lifetime, including snapshots
+// already accepted before the browser disconnects.
+func (a *Agent) onSessionContext(ctx context.Context, runtime protocol.Runtime, s protocol.Session) error {
+	if err := ctx.Err(); err != nil {
+		return err
 	}
+	if err := a.ctx.Err(); err != nil {
+		return err
+	}
+	s.Settings = currentSessionSettings(s.Settings, nil, runtime.Generation)
 	a.mu.Lock()
 	actor := a.sessions[s.ID]
 	if actor == nil {
 		if s.Archived {
 			a.mu.Unlock()
-			return
+			return nil
 		}
-		actor = &sessionActor{agent: a, identityRuntime: runtime.ID, identityThread: s.ThreadID, runtime: runtime, session: s, commands: make(chan actorCommand), eventQueue: make(chan actorEvent, 128), requestQueue: make(chan actorRequest, 32), snapshots: make(chan actorSnapshot, 8), pending: map[string]pendingRequest{}, updateChecks: make(chan chan bool)}
+		actor = &sessionActor{agent: a, identityRuntime: runtime.ID, identityThread: s.ThreadID, runtime: runtime, session: s, commands: make(chan actorCommand), webCommands: make(chan webUIActorCommand), eventQueue: make(chan actorEvent, 128), requestQueue: make(chan actorRequest, 32), snapshots: make(chan actorSnapshot, 8), pending: map[string]pendingRequest{}, updateChecks: make(chan chan bool)}
 		a.sessions[s.ID] = actor
 		a.group.Add(1)
 		go func() { defer a.group.Done(); actor.run() }()
 		a.mu.Unlock()
-		return
+		return nil
 	}
 	a.mu.Unlock()
 	processed := make(chan struct{})
 	select {
 	case actor.snapshots <- actorSnapshot{runtime: runtime, session: s, processed: processed}:
+	case <-ctx.Done():
+		return ctx.Err()
 	case <-a.ctx.Done():
+		return a.ctx.Err()
 	}
 	select {
 	case <-processed:
+		return ctx.Err()
+	case <-ctx.Done():
+		return ctx.Err()
 	case <-a.ctx.Done():
+		return a.ctx.Err()
 	}
 }
 
@@ -275,6 +299,9 @@ func (a *Agent) actorForThread(runtimeID, threadID string) *sessionActor {
 }
 
 func (a *Agent) onEvent(runtime protocol.Runtime, event codexadapter.Event) {
+	if event.Kind == "thread_closed" || event.Kind == "thread_deleted" {
+		a.manager.forgetWebUIObserver(runtime, event.ThreadID)
+	}
 	if event.Kind == "thread_deleted" {
 		a.manager.observeNativeThreadDeleted(runtime, event.ThreadID)
 	}
@@ -284,7 +311,7 @@ func (a *Agent) onEvent(runtime protocol.Runtime, event codexadapter.Event) {
 	if event.Thread != nil && event.Thread.ID != "" && workspaceAllowed(event.Thread.CWD, a.cfg.AllowedWorkspaceRoots) {
 		session := sessionFromThread(runtime, *event.Thread, true)
 		if a.actorForThread(runtime.ID, event.Thread.ID) == nil {
-			saved, err := a.store.UpsertSession(session)
+			saved, err := a.store.UpsertRuntimeSession(runtime, session)
 			if err != nil {
 				a.report(err)
 				return
@@ -371,7 +398,7 @@ func (a *Agent) createLoop(runtimeID string, queue <-chan protocol.Command) {
 				}
 				thread.Name = name
 			}
-			s, err := a.store.UpsertSession(protocol.Session{WorkerID: a.cfg.WorkerID, RuntimeID: runtimeID, ThreadID: thread.ID, Name: thread.Name, Preview: thread.Preview, CWD: cwd, State: "idle", Loaded: true})
+			s, err := a.store.UpsertRuntimeSession(runtime, protocol.Session{WorkerID: a.cfg.WorkerID, RuntimeID: runtimeID, ThreadID: thread.ID, Name: thread.Name, Preview: thread.Preview, CWD: cwd, State: "idle", Loaded: true})
 			if err != nil {
 				a.report(err)
 				continue
@@ -506,6 +533,7 @@ type sessionActor struct {
 	runtime                         protocol.Runtime
 	session                         protocol.Session
 	commands                        chan actorCommand
+	webCommands                     chan webUIActorCommand
 	snapshots                       chan actorSnapshot
 	eventQueue                      chan actorEvent
 	requestQueue                    chan actorRequest
@@ -546,6 +574,9 @@ func (s *sessionActor) run() {
 				}
 				continue
 			}
+			// Discovery metadata describes saved turns, not the latest native
+			// model selection. Never replace confirmed preferences with it.
+			snapshot.session.Settings = currentSessionSettings(snapshot.session.Settings, previous.Settings, snapshot.runtime.Generation)
 			if snapshot.runtime.Generation > s.runtime.Generation || snapshot.runtime.State == "failed" || snapshot.runtime.State == "stopped" {
 				s.runtime = snapshot.runtime
 				s.session = snapshot.session
@@ -565,6 +596,7 @@ func (s *sessionActor) run() {
 				if s.session.ActiveTurnID == "" && s.activeCommand == nil {
 					s.session = snapshot.session
 				} else {
+					s.session.Settings = snapshot.session.Settings
 					s.session.Archived = snapshot.session.Archived
 					s.session.Name, s.session.Preview = snapshot.session.Name, snapshot.session.Preview
 					s.session.CWD, s.session.GitBranch, s.session.GitRoot = snapshot.session.CWD, snapshot.session.GitBranch, snapshot.session.GitRoot
@@ -594,6 +626,19 @@ func (s *sessionActor) run() {
 			reply <- updateSessionIdle(s.session) && len(s.queue) == 0 && s.activeCommand == nil && !s.awaitingTurnStart && len(s.pending) == 0 && len(s.eventQueue) == 0 && len(s.requestQueue) == 0
 		case request := <-s.commands:
 			s.command(request)
+		case request := <-s.webCommands:
+			if request.history != nil {
+				history, err := s.webUIHistory(request)
+				request.reply <- webUICommandReply{history: history, err: err}
+				continue
+			}
+			if request.questions {
+				questions, err := s.webUIQuestions(request)
+				request.reply <- webUICommandReply{questions: questions, err: err}
+				continue
+			}
+			result, err := s.webUICommand(request)
+			request.reply <- webUICommandReply{result: result, err: err}
 		case event := <-s.eventQueue:
 			if event.generation == s.runtime.Generation {
 				s.event(event.event)
@@ -790,7 +835,7 @@ func (s *sessionActor) command(req actorCommand) {
 func codexCommandNeedsIdle(name, args string) bool {
 	name, args = strings.ToLower(strings.TrimSpace(name)), strings.TrimSpace(args)
 	switch name {
-	case "review":
+	case "review", "plan":
 		return true
 	case "init", "compact", "archive":
 		return args == ""
@@ -799,7 +844,7 @@ func codexCommandNeedsIdle(name, args string) bool {
 		return choice != "" && choice != "cancel" && choice != "full-access" && choice != "danger-full-access"
 	case "model":
 		return !modelMenuReadOnly(args)
-	case "rename", "reasoning", "approvals", "plan", "personality", "memories", "goal":
+	case "rename", "reasoning", "approvals", "personality", "memories", "goal":
 		return args != ""
 	case "fast":
 		return args != "" && args != "status"
@@ -895,7 +940,7 @@ func (s *sessionActor) save() {
 		stats.ActiveSince = nil
 		s.session.Stats = &stats
 	}
-	saved, err := s.agent.store.UpsertSession(s.session)
+	saved, err := s.agent.store.UpsertRuntimeSession(s.runtime, s.session)
 	if err == nil {
 		s.session = saved
 	}
@@ -920,6 +965,8 @@ func (s *sessionActor) event(event codexadapter.Event) {
 		return
 	}
 	switch event.Kind {
+	case "thread_settings_updated":
+		s.observeThreadSettings(event)
 	case "thread_status_changed":
 		previous := s.session.State
 		switch event.State {

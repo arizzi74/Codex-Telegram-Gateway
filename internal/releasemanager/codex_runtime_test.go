@@ -41,6 +41,7 @@ func newCodexScheduleFixture(t *testing.T) *codexScheduleFixture {
 	f := &codexScheduleFixture{m: m, l: l, now: time.Date(2026, 9, 18, 12, 0, 0, 0, time.UTC), latest: "0.156.0", running: "0.155.0"}
 	m.Now = func() time.Time { return f.now }
 	m.Out = &f.output
+	m.codexPreflight = func(context.Context, *codexDistribution) error { return nil }
 	m.HTTP.Transport = coreRoundTripper(func(request *http.Request) (*http.Response, error) {
 		f.checks++
 		if request.URL.String() != codexLatestURL && request.URL.String() != codexLatestFallbackURL {

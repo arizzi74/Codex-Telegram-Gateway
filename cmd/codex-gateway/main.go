@@ -132,7 +132,7 @@ func run(args []string, logger *slog.Logger) error {
 		if !strings.EqualFold(identity.Username, strings.TrimPrefix(cfg.Secrets.BotName, "@")) {
 			return errors.New("Telegram token belongs to a different bot than BOTNAME")
 		}
-		if err := api.SetWebhook(ctx, cfg.PublicBaseURL+"/tgapi/v1/telegram/webhook", secret); err != nil {
+		if err := api.SetWebhook(ctx, cfg.PublicBaseURL+"/tgw/api/v1/telegram/webhook", secret); err != nil {
 			return err
 		}
 		fmt.Println("Telegram webhook configured.")
@@ -158,19 +158,21 @@ func run(args []string, logger *slog.Logger) error {
 		hub.AckHandler = store.AcknowledgeCommand
 		mux := gateway.NewMux(store, hub)
 		api := gateway.NewTelegramClient(cfg.Secrets.BotToken)
-		mux.Handle("/tgapi/v1/telegram/webhook", gateway.NewWebhook(store, cfg, secret, api, logger))
+		mux.Handle("/tgw/api/v1/telegram/webhook", gateway.NewWebhook(store, cfg, secret, api, logger))
 		redactor, err := auth.NewRedactor([]string{regexp.QuoteMeta(cfg.Secrets.BotToken), regexp.QuoteMeta(secret), `cwk_[a-f0-9]+`, `sk-[A-Za-z0-9_-]{16,}`}, "[REDACTED]")
 		if err != nil {
 			return err
 		}
 		console, err := admin.New(store, admin.Config{Origin: cfg.PublicBaseURL, BotAPI: api,
 			BotUsername: cfg.Secrets.BotName, AllowedUserCount: len(cfg.AllowedUserIDs),
-			AllowedChatCount: len(cfg.AllowedChatIDs), Redactor: redactor})
+			AllowedChatCount: len(cfg.AllowedChatIDs), Redactor: redactor, WebUI: hub})
 		if err != nil {
 			return err
 		}
-		mux.Handle("/tgadmin/", console)
-		mux.Handle("/tgapi/v1/admin/", console)
+		mux.Handle("/tgw/admin/", console)
+		mux.Handle("/tgw/api/v1/admin/", console)
+		mux.Handle("/tgw/webui/", console)
+		mux.Handle("/tgw/api/v1/webui/", console)
 		sender := gateway.NewSender(store, api, logger, gateway.SenderOptions{BotID: cfg.Secrets.BotName, OwnerID: cfg.Secrets.WLID, AllowedChatIDs: cfg.AllowedChatIDs, Redactor: redactor})
 		dispatcher := gateway.NewDispatcher(store, hub, logger)
 		server := &http.Server{Addr: cfg.Listen, Handler: mux, ReadHeaderTimeout: cfg.ReadHeaderTimeout, ReadTimeout: 15 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 16 << 10}
@@ -195,6 +197,7 @@ func run(args []string, logger *slog.Logger) error {
 			}
 		})
 		services.Go(func() { hub.Run(serviceCtx) })
+		services.Go(func() { console.RunWebPush(serviceCtx, logger) })
 		services.Go(func() { _ = sender.Run(serviceCtx) })
 		services.Go(func() { _ = dispatcher.Run(serviceCtx) })
 		services.Go(func() {

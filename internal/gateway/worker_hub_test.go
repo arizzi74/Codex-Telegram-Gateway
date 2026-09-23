@@ -45,7 +45,7 @@ func TestAT01RegistrationAT02CredentialRejection(t *testing.T) {
 	hub := NewHub(store, slog.New(slog.NewTextHandler(io.Discard, nil)), time.Second, 3*time.Second)
 	server := httptest.NewTLSServer(NewMux(store, hub))
 	defer server.Close()
-	url := "wss" + strings.TrimPrefix(server.URL, "https") + "/tgapi/v1/workers/connect"
+	url := "wss" + strings.TrimPrefix(server.URL, "https") + "/tgw/api/v1/workers/connect"
 	_, resp, err := websocket.Dial(ctx, url, &websocket.DialOptions{HTTPClient: server.Client(), HTTPHeader: http.Header{"Authorization": []string{"Bearer invalid"}}})
 	if err == nil || resp == nil || resp.StatusCode != 401 {
 		t.Fatalf("invalid token: %v %v", resp, err)

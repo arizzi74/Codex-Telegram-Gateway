@@ -95,7 +95,7 @@ func applySessionWizardEvent(ctx context.Context, tx *dbTx, workerID uuid.UUID, 
 				return true, err
 			}
 		} else if target.runtimeCurrent {
-			if err := upsertProtocolSession(ctx, tx, workerID, *target.runtimeID, target.sessionID, *result.Session); err != nil {
+			if err := upsertProtocolSession(ctx, tx, workerID, *target.runtimeID, target.sessionID, *result.Session, event.RuntimeGeneration); err != nil {
 				return true, err
 			}
 		}

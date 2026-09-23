@@ -33,7 +33,7 @@ func (s *pendingReplyStore) AcceptTelegram(_ context.Context, in registry.Incomi
 func TestWebhookWaitsForReplyRouteWithoutChangingUpdate(t *testing.T) {
 	store := &pendingReplyStore{pending: 2}
 	handler := NewWebhook(store, config.GatewayConfig{AllowedUserIDs: []int64{7}, Secrets: config.BotSecrets{BotName: "bot"}}, "secret", nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	r := httptest.NewRequest("POST", "/tgapi/v1/telegram/webhook", strings.NewReader(`{"update_id":107,"message":{"from":{"id":7},"chat":{"id":9},"text":"Linux","reply_to_message":{"message_id":44}}}`))
+	r := httptest.NewRequest("POST", "/tgw/api/v1/telegram/webhook", strings.NewReader(`{"update_id":107,"message":{"from":{"id":7},"chat":{"id":9},"text":"Linux","reply_to_message":{"message_id":44}}}`))
 	r.Header.Set("X-Telegram-Bot-Api-Secret-Token", "secret")
 	w := httptest.NewRecorder()
 	handler.ServeHTTP(w, r)
@@ -63,7 +63,7 @@ func TestWebhookReplyRetryRemainsBoundedAndDoesNotRetryOtherErrors(t *testing.T)
 			handler := NewWebhook(store, config.GatewayConfig{AllowedUserIDs: []int64{7}, Secrets: config.BotSecrets{BotName: "bot"}}, "secret", nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
 			ctx, cancel := context.WithTimeout(t.Context(), 80*time.Millisecond)
 			defer cancel()
-			r := httptest.NewRequest("POST", "/tgapi/v1/telegram/webhook", strings.NewReader(`{"update_id":107,"message":{"from":{"id":7},"chat":{"id":9},"text":"Linux","reply_to_message":{"message_id":44}}}`)).WithContext(ctx)
+			r := httptest.NewRequest("POST", "/tgw/api/v1/telegram/webhook", strings.NewReader(`{"update_id":107,"message":{"from":{"id":7},"chat":{"id":9},"text":"Linux","reply_to_message":{"message_id":44}}}`)).WithContext(ctx)
 			r.Header.Set("X-Telegram-Bot-Api-Secret-Token", "secret")
 			w := httptest.NewRecorder()
 			handler.ServeHTTP(w, r)

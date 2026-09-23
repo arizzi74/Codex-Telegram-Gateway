@@ -297,14 +297,15 @@ func gatewayNginxSnippet(cfg config.GatewayConfig) string {
 	var out strings.Builder
 	out.WriteString("# Managed by codex-telegramgw setup; gateway routes only.\n")
 	out.WriteString("# Gateway authentication limits use this overwritten X-Real-IP from loopback only.\n")
-	out.WriteString("location = /tgadmin { return 308 /tgadmin/; }\n")
-	for _, location := range []string{"^~ /tgadmin/", "= /tgapi/v1/workers/connect", "^~ /tgapi/", "= /tghealthz", "= /tgreadyz"} {
+	out.WriteString("location = /tgw { return 308 /tgw/; }\n")
+	out.WriteString("location = /tgw/admin { return 308 /tgw/admin/; }\n")
+	for _, location := range []string{"^~ /tgw/", "^~ /tgw/admin/", "= /tgw/api/v1/workers/connect", "= /tgw/api/v1/webui/connect", "= /tgw/api/v1/webui/activity", "^~ /tgw/api/", "= /tgw/healthz", "= /tgw/readyz"} {
 		fmt.Fprintf(&out, "location %s {\n    proxy_pass %s;\n    proxy_http_version 1.1;\n", location, upstream)
 		out.WriteString(headers)
-		if strings.Contains(location, "workers/connect") {
-			out.WriteString("    proxy_set_header Upgrade $http_upgrade;\n    proxy_set_header Connection \"upgrade\";\n    proxy_read_timeout 75s;\n    proxy_send_timeout 75s;\n")
+		if strings.Contains(location, "workers/connect") || strings.Contains(location, "webui/connect") || strings.Contains(location, "webui/activity") {
+			out.WriteString("    proxy_set_header Upgrade $http_upgrade;\n    proxy_set_header Connection \"upgrade\";\n    proxy_read_timeout 75s;\n    proxy_send_timeout 75s;\n    proxy_buffering off;\n")
 		} else {
-			out.WriteString("    proxy_set_header Connection \"\";\n    proxy_read_timeout 30s;\n")
+			out.WriteString("    proxy_set_header Connection \"\";\n    proxy_buffering off;\n    proxy_read_timeout 75s;\n")
 		}
 		out.WriteString("}\n")
 	}
@@ -363,7 +364,7 @@ func (configuration *gatewayNginxConfiguration) routeConflict(directive *gateway
 func gatewayNginxRouteConflict(directive *gatewayNginxDirective) bool {
 	if directive.name == "location" {
 		for _, arg := range directive.args {
-			for _, path := range []string{"/tgadmin", "/tgapi", "/tghealthz", "/tgreadyz"} {
+			for _, path := range []string{"/tgw", "/tgadmin", "/tgapi", "/tghealthz", "/tgreadyz"} {
 				if strings.Contains(arg, path) || (len(arg) > 1 && strings.HasPrefix(arg, "/") && strings.HasPrefix(path, arg)) {
 					return true
 				}

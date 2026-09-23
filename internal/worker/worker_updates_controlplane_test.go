@@ -26,7 +26,7 @@ func TestControlPlaneWorkerUpdateQueuedOfflineWithoutSession(t *testing.T) {
 	local, cfg := testConnectionStore(t, workerID.String())
 	defer local.Close()
 	cfg.StateFile = local.db.Path()
-	cfg.GatewayURL = "wss://gateway.example.com/tgapi/v1/workers/connect"
+	cfg.GatewayURL = "wss://gateway.example.com/tgw/api/v1/workers/connect"
 	token, err := os.ReadFile(cfg.TokenFile)
 	if err != nil {
 		t.Fatal(err)

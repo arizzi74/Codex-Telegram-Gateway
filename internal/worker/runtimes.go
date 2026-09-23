@@ -57,6 +57,8 @@ type managedRuntime struct {
 	runtime           protocol.Runtime
 	client            *codexadapter.Client
 	subscriptions     map[string]struct{}
+	observerReady     map[string]struct{} // acknowledged subscription plus actor snapshot
+	observerEpoch     map[string]uint64   // closed threads fence in-flight browser admission
 	degraded          bool
 	capabilityRetryAt time.Time
 	hiddenLoaded      map[string]bool
@@ -464,6 +466,8 @@ func (m *RuntimeManager) discover(ctx context.Context, runtime protocol.Runtime,
 		}
 		visible[thread.ID] = true
 		candidate.Stats = m.sessionStats(client, thread)
+		observerSubscribed := false
+		_, observerEpoch := m.webUIObserverState(runtime, client, thread.ID)
 		if loaded[thread.ID] {
 			resumed, subscribed, resumeErr := m.subscribeLoadedThread(ctx, runtime, client, thread.ID, retryUnavailable)
 			if resumeErr != nil {
@@ -484,6 +488,7 @@ func (m *RuntimeManager) discover(ctx context.Context, runtime protocol.Runtime,
 					candidate.ActiveTurnID = resumed.ActiveTurnID
 					candidate.State = "running"
 				}
+				observerSubscribed = true
 			}
 		}
 		if prior, found := byThread[thread.ID]; found {
@@ -507,10 +512,13 @@ func (m *RuntimeManager) discover(ctx context.Context, runtime protocol.Runtime,
 			}
 			if m.hooks.OnSession != nil {
 				m.hooks.OnSession(runtime, candidate)
+				if observerSubscribed && ctx.Err() == nil {
+					m.markWebUIObserverReady(runtime, client, thread.ID, observerEpoch)
+				}
 			}
 			continue
 		}
-		saved, err := m.store.UpsertSession(candidate)
+		saved, err := m.store.UpsertRuntimeSession(runtime, candidate)
 		if err != nil {
 			return persistenceError(err)
 		}
@@ -519,6 +527,9 @@ func (m *RuntimeManager) discover(ctx context.Context, runtime protocol.Runtime,
 		}
 		if m.hooks.OnSession != nil {
 			m.hooks.OnSession(runtime, saved)
+			if observerSubscribed && ctx.Err() == nil {
+				m.markWebUIObserverReady(runtime, client, thread.ID, observerEpoch)
+			}
 		}
 	}
 	for _, prior := range existing {
@@ -690,7 +701,7 @@ func (m *RuntimeManager) markRuntimeFailed(runtime protocol.Runtime) {
 	}
 	for _, session := range sessions {
 		session.State, session.ActiveTurnID, session.Loaded = "not_loaded", "", false
-		saved, err := m.store.UpsertSession(session)
+		saved, err := m.store.UpsertRuntimeSession(runtime, session)
 		if err != nil {
 			m.report(err)
 			continue

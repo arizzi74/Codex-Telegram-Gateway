@@ -64,7 +64,7 @@ func TestLoginGlobalBudgetsBoundRotatingClients(t *testing.T) {
 }
 
 func loginLimitRequest(s *Server, phase, ip string) *httptest.ResponseRecorder {
-	r := httptest.NewRequest(http.MethodPost, "/tgapi/v1/admin/login/"+phase, strings.NewReader("{}"))
+	r := httptest.NewRequest(http.MethodPost, "/tgw/api/v1/admin/login/"+phase, strings.NewReader("{}"))
 	r.RemoteAddr = "127.0.0.1:1234"
 	r.Header.Set("X-Real-IP", ip)
 	r.Header.Set("Origin", passkeyTestOrigin)

@@ -49,7 +49,7 @@ CGO disabled; the LaunchAgent was not run on a Darwin host.
 
 The first personal passkey requires the owner's authenticator. Run
 `codex-gateway --config /path/to/gateway.json admin bootstrap` as the gateway's
-service account, then open `/tgadmin/` at the configured public HTTPS origin and
+service account, then open `/tgw/admin/` at the configured public HTTPS origin and
 register. The implementation was tested
 with a synthetic authenticator; production contains no fabricated passkey.
 

@@ -395,6 +395,20 @@ func (s *Store) BeginRuntime(profileID, name, defaultCWD string) (protocol.Runti
 
 // UpsertSession preserves one stable UUID for each runtime/thread pair.
 func (s *Store) UpsertSession(session protocol.Session) (protocol.Session, error) {
+	return s.upsertSession(session, 0)
+}
+
+// UpsertRuntimeSession also preserves confirmed preferences across metadata
+// responses racing native settings notifications, within the explicit runtime
+// generation. Production runtime/actor writers must use this fenced form.
+func (s *Store) UpsertRuntimeSession(runtime protocol.Runtime, session protocol.Session) (protocol.Session, error) {
+	if runtime.WorkerID != s.workerID || runtime.ID != session.RuntimeID || runtime.Generation == 0 || runtime.Generation > math.MaxInt64 {
+		return protocol.Session{}, errors.New("worker store: invalid session runtime generation")
+	}
+	return s.upsertSession(session, runtime.Generation)
+}
+
+func (s *Store) upsertSession(session protocol.Session, generation uint64) (protocol.Session, error) {
 	if _, err := uuid.Parse(session.RuntimeID); err != nil || session.ThreadID == "" {
 		return protocol.Session{}, errors.New("worker store: session runtime_id and thread_id are required")
 	}
@@ -406,6 +420,9 @@ func (s *Store) UpsertSession(session protocol.Session) (protocol.Session, error
 		b := tx.Bucket(bucketSessions)
 		key := sessionKey(session.RuntimeID, session.ThreadID)
 		saved = session
+		if generation != 0 {
+			saved.Settings = currentSessionSettings(saved.Settings, nil, generation)
+		}
 		if value := b.Get(key); value != nil {
 			var old protocol.Session
 			if err := json.Unmarshal(value, &old); err != nil {
@@ -418,6 +435,13 @@ func (s *Store) UpsertSession(session protocol.Session) (protocol.Session, error
 				return nil
 			}
 			saved.ID = old.ID
+			if generation != 0 {
+				if old.Settings != nil && old.Settings.RuntimeGeneration > generation {
+					saved = old
+					return nil
+				}
+				saved.Settings = currentSessionSettings(saved.Settings, old.Settings, generation)
+			}
 		} else if saved.ID == "" {
 			saved.ID = uuid.NewString()
 		}
@@ -481,7 +505,7 @@ func (s *Store) changeDiscoveredSessionVisibility(runtime protocol.Runtime, expe
 			return err
 		}
 		saved = current
-		if current.Deleted {
+		if current.Deleted || (current.Settings != nil && current.Settings.RuntimeGeneration > runtime.Generation) {
 			return nil
 		}
 		previous := expected
@@ -489,6 +513,7 @@ func (s *Store) changeDiscoveredSessionVisibility(runtime protocol.Runtime, expe
 		if saved.Archived == candidate.Archived || !reflect.DeepEqual(current, previous) || !saved.UpdatedAt.Equal(expected.UpdatedAt) {
 			return nil
 		}
+		candidate.Settings = currentSessionSettings(candidate.Settings, saved.Settings, runtime.Generation)
 		saved = candidate
 		saved.UpdatedAt = time.Now().UTC()
 		encoded, err := json.Marshal(saved)

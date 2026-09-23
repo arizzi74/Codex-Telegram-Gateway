@@ -1,0 +1,15 @@
+{
+  "id": "/tgw/webui/",
+  "name": "Codex Gateway",
+  "short_name": "Codex",
+  "description": "Your Codex sessions and turn notifications.",
+  "start_url": "/tgw/webui/",
+  "scope": "/tgw/webui/",
+  "display": "standalone",
+  "background_color": "#111316",
+  "theme_color": "#111316",
+  "icons": [
+    { "src": "/tgw/webui/static/webui-icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any maskable" },
+    { "src": "/tgw/webui/static/webui-icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable" }
+  ]
+}

@@ -1,9 +1,15 @@
 # Codex Telegram control plane
 
 A Go gateway and Linux/macOS worker with embedded SQLite storage for controlling local
-Codex sessions through an allowlisted Telegram bot. The gateway includes a
-passkey-authenticated admin console. Workers supervise private Codex app-server
-processes and support local terminal attachment.
+Codex sessions through an allowlisted Telegram bot or a responsive browser interface.
+The gateway includes a passkey-authenticated admin console. Workers supervise
+private Codex app-server processes and support local terminal attachment.
+
+[Explore the website](https://arizzi74.github.io/Codex-Telegram-Gateway/) ·
+[Installation guide](docs/installation.md) ·
+[Latest release](https://github.com/arizzi74/Codex-Telegram-Gateway/releases/latest)
+
+[![Desktop browser interface with a session list, conversation and live tool activity. Screenshot uses fictional demo data.](site/assets/screenshots/webui-desktop.png)](https://arizzi74.github.io/Codex-Telegram-Gateway/#screenshots)
 
 ## Quick install
 
@@ -49,14 +55,17 @@ preserves existing configurations and running sessions; prepared private JSON
 configurations are also supported. Gateway completion can be resumed with
 `sudo codex-telegramgw finish gateway`.
 
-Gateway URLs use `/tgadmin/` for the console, `/tgapi/v1/` for APIs,
-and `/tghealthz` and `/tgreadyz` for health checks.
+Gateway URLs all live under `/tgw`: `/tgw/admin/` for the console,
+`/tgw/webui/` for the browser Codex interface, `/tgw/api/v1/` for APIs,
+and `/tgw/healthz` and `/tgw/readyz` for health checks.
 
 Both commands enable daily automatic updates from
 [GitHub Releases](https://github.com/arizzi74/Codex-Telegram-Gateway/releases).
 The worker also checks for stable Codex runtime updates once per day (UTC).
 Supported standalone installations update when the worker has no active or
 queued work, then its app servers restart and their versions are verified.
+Runtime updates test compatibility before restarting production and retain the
+previous release for recovery if the candidate fails.
 Use `/tgupdateworkers` in Telegram to queue an update check for every worker.
 Each worker installs a newer release and restarts when all its turns finish;
 workers already up to date are left running.
@@ -66,13 +75,35 @@ enrollment, and manual updates.
 ## Components
 
 - **Gateway:** receives Telegram updates, manages worker connections, and serves
-  the passkey-authenticated admin console.
+  the passkey-authenticated admin console and browser Codex interface.
 - **Registry:** stores routing, commands, events, approvals, and Telegram
   delivery state in a local SQLite file.
 - **Worker:** runs on a development machine, supervises Codex app servers, and
   executes commands within configured workspace roots.
 - **Local helper:** opens a terminal interface against a private app-server
   socket or starts an independent local runtime.
+
+## Browser interface
+
+Open `/tgw/webui/` on your gateway's HTTPS address, sign in with your existing
+admin passkey, and choose a worker session. The interface uses Codex-inspired
+colors and formatting with responsive text, completed replies and live tool activity,
+model and reasoning controls, and question and approval prompts. It talks to the
+worker's existing app-server; it does not launch a terminal or another Codex CLI.
+
+Connection progress distinguishes the live connection from session restoration
+and history loading. On mobile, the session menu turns green while any session
+is working; a pending question takes priority with a yellow question mark.
+
+Enable notifications in the session sidebar to receive turn-completion alerts
+from all sessions, including while the web app is closed. On iPhone or iPad,
+first add the web UI to the Home Screen and open it from there.
+
+Disconnecting closes the viewer while accepted turns keep running. Reconnecting
+loads current history without resending prompts. Drafts remain in browser memory
+while the page stays open. See the [browser interface guide](docs/webui.md) for
+controls and limits, and the [route migration instructions](docs/installation.md#upgrade-to-the-tgw-url-routes)
+before updating an existing installation to `/tgw`.
 
 ## Configuration and startup
 
@@ -189,8 +220,8 @@ and access to its SQLite database:
 codex-gateway --config /path/to/gateway.json admin bootstrap
 ```
 
-Open `/tgadmin/` on your gateway's public HTTPS URL, such as
-`https://gateway.example.com/tgadmin/`, and enter the one-time token under **First
+Open `/tgw/admin/` on your gateway's public HTTPS URL, such as
+`https://gateway.example.com/tgw/admin/`, and enter the one-time token under **First
 administrator?**. Register your passkey, sign in, and add a spare passkey.
 The token expires in 15 minutes. The console manages worker enrollment,
 credential rotation, and revocation. It lists user sessions with prompt counts,

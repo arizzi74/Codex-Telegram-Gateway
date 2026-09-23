@@ -29,22 +29,46 @@ func acceptWorkerUpdates(ctx context.Context, tx *dbTx, in IncomingUpdate) (Acce
 	if strings.TrimSpace(in.Text) != "" || strings.TrimSpace(in.Target) != "" {
 		return AcceptResult{View: "error", ErrorCode: "worker_updates_usage"}, nil
 	}
+	workers, err := queueWorkerUpdates(ctx, tx, &in)
+	return AcceptResult{View: "worker_updates", WorkerUpdates: workers}, err
+}
+
+// QueueWebUIWorkerUpdates shares the durable Telegram maintenance queue, but
+// deliberately creates no Telegram subscription or message. Repeated browser
+// requests join the same pending update and do not force a running worker down.
+func (s *Store) QueueWebUIWorkerUpdates(ctx context.Context) ([]WorkerUpdateStatus, error) {
+	tx, err := s.pool.BeginTx(ctx, TxOptions{})
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	workers, err := queueWorkerUpdates(ctx, tx, nil)
+	if err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+	return workers, nil
+}
+
+func queueWorkerUpdates(ctx context.Context, tx *dbTx, subscriber *IncomingUpdate) ([]WorkerUpdateStatus, error) {
 	rows, err := tx.Query(ctx, `SELECT worker_id,name,COALESCE(worker_version,'') FROM workers WHERE enabled=TRUE ORDER BY name,worker_id`)
 	if err != nil {
-		return AcceptResult{}, fmt.Errorf("registry: list workers for update: %w", err)
+		return nil, fmt.Errorf("registry: list workers for update: %w", err)
 	}
 	workers := make([]WorkerUpdateStatus, 0)
 	for rows.Next() {
 		var worker WorkerUpdateStatus
 		if err := rows.Scan(&worker.WorkerID, &worker.Name, &worker.Version); err != nil {
 			rows.Close()
-			return AcceptResult{}, err
+			return nil, err
 		}
 		workers = append(workers, worker)
 	}
 	if err := rows.Err(); err != nil {
 		rows.Close()
-		return AcceptResult{}, err
+		return nil, err
 	}
 	rows.Close()
 	for index := range workers {
@@ -59,14 +83,39 @@ func acceptWorkerUpdates(ctx context.Context, tx *dbTx, in IncomingUpdate) (Acce
 			worker.State = "already_queued"
 		}
 		if err != nil {
-			return AcceptResult{}, fmt.Errorf("registry: queue worker update: %w", err)
+			return nil, fmt.Errorf("registry: queue worker update: %w", err)
 		}
-		if _, err := tx.Exec(ctx, `INSERT INTO worker_update_watchers (request_id,bot_id,user_id,chat_id,message_thread_id)
-            VALUES ($1,$2,$3,$4,$5) ON CONFLICT (request_id,bot_id,chat_id,message_thread_id) DO NOTHING`, requestID, in.BotID, in.UserID, in.ChatID, in.TopicID); err != nil {
-			return AcceptResult{}, fmt.Errorf("registry: subscribe to worker update: %w", err)
+		if subscriber != nil {
+			if _, err := tx.Exec(ctx, `INSERT INTO worker_update_watchers (request_id,bot_id,user_id,chat_id,message_thread_id)
+            VALUES ($1,$2,$3,$4,$5) ON CONFLICT (request_id,bot_id,chat_id,message_thread_id) DO NOTHING`, requestID, subscriber.BotID, subscriber.UserID, subscriber.ChatID, subscriber.TopicID); err != nil {
+				return nil, fmt.Errorf("registry: subscribe to worker update: %w", err)
+			}
 		}
 	}
-	return AcceptResult{View: "worker_updates", WorkerUpdates: workers}, nil
+	return workers, nil
+}
+
+// WorkerUpdateSnapshot returns only the latest maintenance request per enabled
+// worker. It excludes subscriber identities and internal dispatch metadata.
+func (s *Store) WorkerUpdateSnapshot(ctx context.Context) ([]WorkerUpdateStatus, error) {
+	rows, err := s.pool.Query(ctx, `SELECT r.worker_id,w.name,r.state,COALESCE(r.version,''),COALESCE(r.error_code,'')
+        FROM workers w JOIN worker_update_requests r ON r.request_id=(
+            SELECT request_id FROM worker_update_requests WHERE worker_id=w.worker_id
+            ORDER BY (state='pending') DESC,created_at DESC,rowid DESC LIMIT 1)
+        WHERE w.enabled=TRUE ORDER BY w.name,w.worker_id`)
+	if err != nil {
+		return nil, fmt.Errorf("registry: read worker update status: %w", err)
+	}
+	defer rows.Close()
+	updates := make([]WorkerUpdateStatus, 0)
+	for rows.Next() {
+		var update WorkerUpdateStatus
+		if err := rows.Scan(&update.WorkerID, &update.Name, &update.State, &update.Version, &update.ErrorCode); err != nil {
+			return nil, err
+		}
+		updates = append(updates, update)
+	}
+	return updates, rows.Err()
 }
 
 // PendingWorkerUpdates includes requests queued while the worker was offline

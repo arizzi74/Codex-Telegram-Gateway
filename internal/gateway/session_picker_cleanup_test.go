@@ -182,7 +182,7 @@ func TestWebhookForwardsPickerCallbackMessageIdentity(t *testing.T) {
 	cfg := config.GatewayConfig{AllowedUserIDs: []int64{7}, Secrets: config.BotSecrets{BotName: "bot"}}
 	handler := NewWebhook(store, cfg, "secret", nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	body := `{"update_id":20,"callback_query":{"id":"callback-id","from":{"id":7},"message":{"message_id":123,"message_thread_id":4,"chat":{"id":99},"reply_to_message":{"message_id":88}},"data":"cb:opaque-token"}}`
-	r := httptest.NewRequest("POST", "/tgapi/v1/telegram/webhook", strings.NewReader(body))
+	r := httptest.NewRequest("POST", "/tgw/api/v1/telegram/webhook", strings.NewReader(body))
 	r.Header.Set("X-Telegram-Bot-Api-Secret-Token", "secret")
 	w := httptest.NewRecorder()
 	handler.ServeHTTP(w, r)

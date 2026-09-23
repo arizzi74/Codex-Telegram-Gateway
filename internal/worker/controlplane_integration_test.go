@@ -351,7 +351,7 @@ func TestControlPlaneWorkerOutboxSurvivesGatewayRestartIntegration(t *testing.T)
 	// readiness probe must not stop this already-running local runtime.
 	bad := readinessFail{Store: store}
 	r := httptest.NewRecorder()
-	gateway.NewMux(bad, gw.hub).ServeHTTP(r, httptest.NewRequest(http.MethodGet, "/tgreadyz", nil))
+	gateway.NewMux(bad, gw.hub).ServeHTTP(r, httptest.NewRequest(http.MethodGet, "/tgw/readyz", nil))
 	if r.Code != http.StatusServiceUnavailable || len(agent.manager.Snapshot()) != 1 {
 		t.Fatalf("readiness/runtime isolation = %d runtimes=%d", r.Code, len(agent.manager.Snapshot()))
 	}
@@ -372,7 +372,7 @@ func startControlGateway(t *testing.T, store *registry.Store, telegram gateway.T
 	hub.EventHandler = store.IngestEvent
 	hub.AckHandler = store.AcknowledgeCommand
 	mux := gateway.NewMux(store, hub)
-	mux.Handle("/tgapi/v1/telegram/webhook", gateway.NewWebhook(store, config.GatewayConfig{AllowedUserIDs: []int64{7}, AllowedChatIDs: []int64{9}, CommandExpiry: time.Hour, Secrets: config.BotSecrets{BotName: "bot"}}, "secret", telegram, log))
+	mux.Handle("/tgw/api/v1/telegram/webhook", gateway.NewWebhook(store, config.GatewayConfig{AllowedUserIDs: []int64{7}, AllowedChatIDs: []int64{9}, CommandExpiry: time.Hour, Secrets: config.BotSecrets{BotName: "bot"}}, "secret", telegram, log))
 	run := &gatewayRun{hub: hub, cancel: cancel}
 	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		run.handlers.Add(1)
@@ -768,7 +768,7 @@ func postTelegram(t *testing.T, c *http.Client, base, secret string, id int64, t
 		message["reply_to_message"] = map[string]any{"message_id": reply, "chat": map[string]any{"id": 9}}
 	}
 	body, _ := json.Marshal(map[string]any{"update_id": id, "message": message})
-	req, err := http.NewRequest(http.MethodPost, base+"/tgapi/v1/telegram/webhook", strings.NewReader(string(body)))
+	req, err := http.NewRequest(http.MethodPost, base+"/tgw/api/v1/telegram/webhook", strings.NewReader(string(body)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -793,7 +793,7 @@ func postCallbackForMessage(t *testing.T, c *http.Client, base, secret string, i
 	if err != nil {
 		t.Fatal(err)
 	}
-	req, err := http.NewRequest(http.MethodPost, base+"/tgapi/v1/telegram/webhook", strings.NewReader(string(body)))
+	req, err := http.NewRequest(http.MethodPost, base+"/tgw/api/v1/telegram/webhook", strings.NewReader(string(body)))
 	if err != nil {
 		t.Fatal(err)
 	}

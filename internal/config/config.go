@@ -31,7 +31,7 @@ const (
 	DefaultUnreachableAfter  = 30 * time.Second
 	DefaultCommandExpiry     = time.Hour
 	DefaultReadHeaderTimeout = 5 * time.Second
-	WorkerConnectPath        = "/tgapi/v1/workers/connect"
+	WorkerConnectPath        = "/tgw/api/v1/workers/connect"
 )
 
 // GatewayConfig is the JSON configuration for codex-gateway.

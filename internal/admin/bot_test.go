@@ -38,7 +38,7 @@ func (a *dashboardBotAPI) GetWebhook(context.Context) (gateway.WebhookInfo, erro
 func TestBotMonitorCachesConcurrentDashboardReads(t *testing.T) {
 	a := &dashboardBotAPI{
 		identity: gateway.TelegramUser{ID: 123, IsBot: true, Username: "example_bot", FirstName: "Example", LastName: "Bot"},
-		webhook:  gateway.WebhookInfo{URL: passkeyTestOrigin + "/tgapi/v1/telegram/webhook", PendingUpdates: 3},
+		webhook:  gateway.WebhookInfo{URL: passkeyTestOrigin + "/tgw/api/v1/telegram/webhook", PendingUpdates: 3},
 	}
 	m := newBotMonitor(Config{Origin: passkeyTestOrigin, BotAPI: a, BotUsername: "@configured_bot", AllowedUserCount: 2, AllowedChatCount: 1})
 	var reads sync.WaitGroup
@@ -96,7 +96,7 @@ func TestDashboardRequiresAuthenticationBeforeBotCheck(t *testing.T) {
 		t.Fatal(err)
 	}
 	w := httptest.NewRecorder()
-	s.ServeHTTP(w, httptest.NewRequest(http.MethodGet, passkeyTestOrigin+"/tgapi/v1/admin/dashboard", nil))
+	s.ServeHTTP(w, httptest.NewRequest(http.MethodGet, passkeyTestOrigin+"/tgw/api/v1/admin/dashboard", nil))
 	if w.Code != http.StatusUnauthorized {
 		t.Fatalf("unauthenticated status: %d", w.Code)
 	}

@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -26,6 +27,8 @@ type codexApplyFixture struct {
 	readinessFault       string
 	nativeFault          string
 	cancel               context.CancelFunc
+	preflightFault       bool
+	busyAfterStart       bool
 }
 
 func newCodexApplyFixture(t *testing.T) *codexApplyFixture {
@@ -47,6 +50,13 @@ func newCodexApplyFixture(t *testing.T) *codexApplyFixture {
 		t.Fatal(err)
 	}
 	f.manager = &Manager{Run: f.run, CodexRun: f.update, Now: func() time.Time { return f.now }, ReadyTimeout: 10 * time.Millisecond, PollInterval: time.Millisecond}
+	f.manager.codexPreflight = func(_ context.Context, _ *codexDistribution) error {
+		f.events = append(f.events, "preflight")
+		if f.preflightFault {
+			return errors.New("candidate compatibility failure")
+		}
+		return nil
+	}
 	return f
 }
 
@@ -80,13 +90,14 @@ func (f *codexApplyFixture) run(ctx context.Context, args ...string) (CommandRes
 	}
 	if args[0] == f.plan.Distribution.Binary {
 		f.events = append(f.events, "inspect")
+		f.version = f.installedVersion()
 		return CommandResult{Output: []byte("codex-cli " + f.version)}, nil
 	}
 	if args[0] == "systemctl" {
 		switch args[2] {
 		case "show":
 			if args[len(args)-1] == "--value" {
-				return CommandResult{Output: []byte("123\n")}, nil
+				return CommandResult{Output: []byte(strconv.Itoa(f.pid) + "\n")}, nil
 			}
 			if !f.running {
 				return CommandResult{Output: []byte("MainPID=0\nActiveState=inactive\n")}, nil
@@ -107,15 +118,18 @@ func (f *codexApplyFixture) run(ctx context.Context, args ...string) (CommandRes
 		}
 	}
 	if args[0] == f.layout.Binary {
+		if len(args) == 2 && args[1] == "version" {
+			return CommandResult{Output: []byte("0.5.43")}, nil
+		}
 		if len(args) >= 5 && args[3] == "update" {
 			f.events = append(f.events, args[4])
 			if args[4] == "abort" {
 				return CommandResult{}, nil
 			}
-			if f.busy {
+			if f.busy || (f.busyAfterStart && f.pid == 456) {
 				return CommandResult{Output: []byte(`{"error":"worker update: session is busy"}`), ExitCode: 1}, nil
 			}
-			data, _ := json.Marshal(workerLease{WorkerID: "worker-id", PID: 123, Token: "private-token", ExpiresAt: f.now.Add(2 * time.Minute)})
+			data, _ := json.Marshal(workerLease{WorkerID: "worker-id", PID: f.pid, Token: "private-token", ExpiresAt: f.now.Add(2 * time.Minute)})
 			return CommandResult{Output: data}, nil
 		}
 		if args[3] == "status" {
@@ -132,7 +146,11 @@ func (f *codexApplyFixture) run(ctx context.Context, args ...string) (CommandRes
 func (f *codexApplyFixture) status() []byte {
 	runtime := map[string]any{"profile_id": "main", "state": "running", "pid": 789, "codex_version": "codex-cli " + f.version}
 	status := map[string]any{"worker_id": "worker-id", "pid": f.pid, "updated_at": f.now, "gateway_connected": true, "runtimes": []any{runtime}}
-	switch f.readinessFault {
+	fault := f.readinessFault
+	if f.installedVersion() == "0.154.0" {
+		fault = ""
+	}
+	switch fault {
 	case "version":
 		runtime["codex_version"] = "codex-cli 0.154.0"
 	case "profile":
@@ -161,6 +179,20 @@ func (f *codexApplyFixture) update(ctx context.Context, _ ...string) (CommandRes
 	if f.running {
 		f.t.Fatal("native updater ran while worker was running")
 	}
+	if strings.HasPrefix(f.nativeFault, "partial-") {
+		f.installVersion(f.nextVersion)
+		if f.nativeFault == "partial-cancel" {
+			f.cancel()
+			return CommandResult{}, ctx.Err()
+		}
+		return CommandResult{ExitCode: 1}, nil
+	}
+	if f.nativeFault == "removed-current" {
+		if err := os.Remove(filepath.Join(f.plan.Distribution.Home, "packages", "standalone", "current")); err != nil {
+			f.t.Fatal(err)
+		}
+		return CommandResult{ExitCode: 1}, nil
+	}
 	if f.nativeFault == "cancel" {
 		f.cancel()
 		return CommandResult{}, ctx.Err()
@@ -182,7 +214,7 @@ func TestCodexRuntimeApplyFencesWorkAndChecksReadiness(t *testing.T) {
 	if err := f.manager.applyCodexRuntimeUpdates(t.Context(), f.layout, []codexRuntimePlan{f.plan}, false, f.record); err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"inspect", "prepare", "record-restart", "stop", "inspect", "native-update", "inspect", "start"}
+	want := []string{"inspect", "prepare", "record-restart", "stop", "inspect", "native-update", "inspect", "preflight", "start"}
 	if !slices.Equal(f.events, want) || !f.running || f.version != "0.157.0" {
 		t.Fatalf("events=%v running=%v version=%s", f.events, f.running, f.version)
 	}
@@ -304,4 +336,19 @@ func TestCodexRuntimeReadyRequiresFreshManagedProfiles(t *testing.T) {
 			}
 		})
 	}
+}
+
+func (f *codexApplyFixture) installedVersion() string {
+	f.t.Helper()
+	data, err := os.ReadFile(filepath.Join(f.plan.Distribution.Home, "packages", "standalone", "current", "codex-package.json"))
+	if err != nil {
+		return "unavailable"
+	}
+	var value struct {
+		Version string `json:"version"`
+	}
+	if err = json.Unmarshal(data, &value); err != nil {
+		f.t.Fatal(err)
+	}
+	return value.Version
 }

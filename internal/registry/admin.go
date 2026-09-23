@@ -431,6 +431,9 @@ func (s *Store) RevokeAdminCredential(ctx context.Context, id []byte) error {
 	if err != nil {
 		return err
 	}
+	if _, err = tx.Exec(ctx, `DELETE FROM webpush_subscriptions WHERE credential_id=$1`, id); err != nil {
+		return err
+	}
 	return tx.Commit(ctx)
 }
 
@@ -464,11 +467,19 @@ func (s *Store) ValidateAdminSession(ctx context.Context, token string) (AdminCr
 	return c, nil
 }
 func (s *Store) RevokeAdminSession(ctx context.Context, token string) error {
-	_, err := s.pool.Exec(ctx, `UPDATE admin_sessions SET revoked_at=(strftime('%Y-%m-%dT%H:%M:%f','now') || '000000Z') WHERE token_hash=$1 AND revoked_at IS NULL`, hashSecret(token))
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	_, err = tx.Exec(ctx, `UPDATE admin_sessions SET revoked_at=(strftime('%Y-%m-%dT%H:%M:%f','now') || '000000Z') WHERE token_hash=$1 AND revoked_at IS NULL`, hashSecret(token))
 	if err != nil {
 		return fmt.Errorf("registry: revoke admin session: %w", err)
 	}
-	return nil
+	if _, err = tx.Exec(ctx, `DELETE FROM webpush_subscriptions WHERE admin_session_id IN (SELECT session_id FROM admin_sessions WHERE token_hash=$1)`, hashSecret(token)); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }
 
 func randomSecret(n int) (string, error) {

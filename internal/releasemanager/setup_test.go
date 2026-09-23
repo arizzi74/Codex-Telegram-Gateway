@@ -89,7 +89,7 @@ func preparedWorkerConfig(t *testing.T, cwd string) string {
 	cfg := config.WorkerConfig{
 		WorkerID: "00000000-0000-4000-8000-000000000001", Name: "test-worker",
 		StateFile: "state/worker.db", TokenFile: token,
-		GatewayURL:            "wss://gateway.example.com/tgapi/v1/workers/connect",
+		GatewayURL:            "wss://gateway.example.com/tgw/api/v1/workers/connect",
 		AllowedWorkspaceRoots: []string{cwd},
 		Runtimes:              []config.RuntimeProfile{{ID: "primary", CodexBinary: "codex", WorkingDirectory: cwd, Autostart: true}},
 	}
@@ -190,7 +190,7 @@ func TestSetupWorkerGuidedConfigIsPrivateValidatedAndTemporary(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				if cfg.GatewayURL != "wss://gateway.example.com:8443/tgapi/v1/workers/connect" || cfg.Name != `Worker "one"` || cfg.StateFile != filepath.Join(l.Home, ".local/state/codex-worker/worker.db") {
+				if cfg.GatewayURL != "wss://gateway.example.com:8443/tgw/api/v1/workers/connect" || cfg.Name != `Worker "one"` || cfg.StateFile != filepath.Join(l.Home, ".local/state/codex-worker/worker.db") {
 					t.Fatalf("bad generated worker config: %+v", cfg)
 				}
 				canonicalHome, _ := filepath.EvalSymlinks(l.Home)
@@ -218,7 +218,7 @@ func TestSetupWorkerGuidedConfigIsPrivateValidatedAndTemporary(t *testing.T) {
 			if strings.Contains(output.String(), token) || (err != nil && strings.Contains(err.Error(), token)) {
 				t.Fatal("setup leaked token")
 			}
-			if !strings.Contains(output.String(), "https://gateway.example.com:8443/tgadmin/") || !strings.Contains(output.String(), "Enroll worker") {
+			if !strings.Contains(output.String(), "https://gateway.example.com:8443/tgw/admin/") || !strings.Contains(output.String(), "Enroll worker") {
 				t.Fatal("setup did not guide gateway enrollment")
 			}
 		})
@@ -424,29 +424,33 @@ func TestSetupWorkerRejectsInvalidBootstrapRelease(t *testing.T) {
 
 func TestSetupGatewayURL(t *testing.T) {
 	for _, test := range []struct{ input, want string }{
-		{"gateway.example.com", "wss://gateway.example.com/tgapi/v1/workers/connect"},
-		{"gateway.example.com:8443", "wss://gateway.example.com:8443/tgapi/v1/workers/connect"},
-		{" gateway.example.com/tgadmin/ ", "wss://gateway.example.com/tgapi/v1/workers/connect"},
-		{"https://gateway.example.com/tgadmin", "wss://gateway.example.com/tgapi/v1/workers/connect"},
-		{"https://gateway.example.com:8443/tgadmin/", "wss://gateway.example.com:8443/tgapi/v1/workers/connect"},
-		{"https://gateway.example.com", "wss://gateway.example.com/tgapi/v1/workers/connect"},
-		{"https://[::1]:8443/", "wss://[::1]:8443/tgapi/v1/workers/connect"},
-		{"wss://gateway.example.com", "wss://gateway.example.com/tgapi/v1/workers/connect"},
-		{"wss://gateway.example.com/", "wss://gateway.example.com/tgapi/v1/workers/connect"},
-		{"wss://gateway.example.com/api/v1/workers/connect", "wss://gateway.example.com/tgapi/v1/workers/connect"},
-		{"wss://gateway.example.com:8443/api/v1/workers/connect/", "wss://gateway.example.com:8443/tgapi/v1/workers/connect"},
-		{"wss://gateway.example.com/tgapi/v1/workers/connect", "wss://gateway.example.com/tgapi/v1/workers/connect"},
+		{"gateway.example.com", "wss://gateway.example.com/tgw/api/v1/workers/connect"},
+		{"gateway.example.com:8443", "wss://gateway.example.com:8443/tgw/api/v1/workers/connect"},
+		{" gateway.example.com/tgw/admin/ ", "wss://gateway.example.com/tgw/api/v1/workers/connect"},
+		{"https://gateway.example.com/tgw/admin", "wss://gateway.example.com/tgw/api/v1/workers/connect"},
+		{"https://gateway.example.com:8443/tgw/admin/", "wss://gateway.example.com:8443/tgw/api/v1/workers/connect"},
+		{"https://gateway.example.com/tgw/webui/", "wss://gateway.example.com/tgw/api/v1/workers/connect"},
+		{"https://gateway.example.com/tgw/", "wss://gateway.example.com/tgw/api/v1/workers/connect"},
+		{"https://gateway.example.com/tgadmin/", "wss://gateway.example.com/tgw/api/v1/workers/connect"},
+		{"wss://gateway.example.com/tgapi/v1/workers/connect", "wss://gateway.example.com/tgw/api/v1/workers/connect"},
+		{"https://gateway.example.com", "wss://gateway.example.com/tgw/api/v1/workers/connect"},
+		{"https://[::1]:8443/", "wss://[::1]:8443/tgw/api/v1/workers/connect"},
+		{"wss://gateway.example.com", "wss://gateway.example.com/tgw/api/v1/workers/connect"},
+		{"wss://gateway.example.com/", "wss://gateway.example.com/tgw/api/v1/workers/connect"},
+		{"wss://gateway.example.com/api/v1/workers/connect", "wss://gateway.example.com/tgw/api/v1/workers/connect"},
+		{"wss://gateway.example.com:8443/api/v1/workers/connect/", "wss://gateway.example.com:8443/tgw/api/v1/workers/connect"},
+		{"wss://gateway.example.com/tgw/api/v1/workers/connect", "wss://gateway.example.com/tgw/api/v1/workers/connect"},
 		{"wss://gateway.example.com/custom/connect", "wss://gateway.example.com/custom/connect"},
 		{"http://gateway.example.com", ""},
-		{"https://user:token@gateway.example.com/tgadmin/", ""},
-		{"https://gateway.example.com/tgadmin/?token=private", ""},
-		{"https://gateway.example.com/tgadmin/?", ""},
-		{"https://gateway.example.com/tgadmin/#", ""},
-		{"https://gateway.example.com/tgadmin/#private", ""},
+		{"https://user:token@gateway.example.com/tgw/admin/", ""},
+		{"https://gateway.example.com/tgw/admin/?token=private", ""},
+		{"https://gateway.example.com/tgw/admin/?", ""},
+		{"https://gateway.example.com/tgw/admin/#", ""},
+		{"https://gateway.example.com/tgw/admin/#private", ""},
 		{"https://gateway.example.com/tg%61dmin/", ""},
-		{"user:token@gateway.example.com/tgadmin/", ""},
-		{"gateway.example.com/tgadmin/?token=private", ""},
-		{"gateway.example.com/tgadmin/#", ""},
+		{"user:token@gateway.example.com/tgw/admin/", ""},
+		{"gateway.example.com/tgw/admin/?token=private", ""},
+		{"gateway.example.com/tgw/admin/#", ""},
 		{"", ""},
 		{"//gateway.example.com", ""},
 		{"https://gateway.example.com/path", ""},

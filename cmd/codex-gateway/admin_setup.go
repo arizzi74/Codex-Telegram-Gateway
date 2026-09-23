@@ -20,7 +20,7 @@ func bootstrapGatewayAdmin(ctx context.Context, store gatewayAdminSetupStore, or
 			return err
 		}
 		if len(credentials) > 0 {
-			fmt.Fprintf(out, "An administrator passkey is already registered. Sign in at %s/tgadmin/.\n", origin)
+			fmt.Fprintf(out, "An administrator passkey is already registered. Sign in at %s/tgw/admin/.\n", origin)
 			return nil
 		}
 	}
@@ -28,6 +28,6 @@ func bootstrapGatewayAdmin(ctx context.Context, store gatewayAdminSetupStore, or
 	if err != nil {
 		return err
 	}
-	fmt.Fprintf(out, "Open %s/tgadmin/ and register a passkey with this one-time token (expires in 15 minutes):\n%s\n", origin, token)
+	fmt.Fprintf(out, "Open %s/tgw/admin/ and register a passkey with this one-time token (expires in 15 minutes):\n%s\n", origin, token)
 	return nil
 }

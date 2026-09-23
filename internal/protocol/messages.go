@@ -25,25 +25,27 @@ type Runtime struct {
 }
 
 type Session struct {
-	ID           string        `json:"session_id"`
-	WorkerID     string        `json:"worker_id"`
-	RuntimeID    string        `json:"runtime_id"`
-	ThreadID     string        `json:"codex_thread_id"`
-	Name         string        `json:"name"`
-	Preview      string        `json:"preview,omitempty"`
-	CWD          string        `json:"cwd"`
-	GitBranch    string        `json:"git_branch,omitempty"`
-	GitRoot      string        `json:"git_root,omitempty"`
-	State        string        `json:"state"`
-	ActiveTurnID string        `json:"active_turn_id,omitempty"`
-	Loaded       bool          `json:"loaded"`
-	Archived     bool          `json:"archived"`
-	Deleted      bool          `json:"deleted,omitempty"`
-	UpdatedAt    time.Time     `json:"updated_at"`
-	Stats        *SessionStats `json:"stats,omitempty"`
+	ID           string           `json:"session_id"`
+	WorkerID     string           `json:"worker_id"`
+	RuntimeID    string           `json:"runtime_id"`
+	ThreadID     string           `json:"codex_thread_id"`
+	Name         string           `json:"name"`
+	Preview      string           `json:"preview,omitempty"`
+	CWD          string           `json:"cwd"`
+	GitBranch    string           `json:"git_branch,omitempty"`
+	GitRoot      string           `json:"git_root,omitempty"`
+	State        string           `json:"state"`
+	ActiveTurnID string           `json:"active_turn_id,omitempty"`
+	Loaded       bool             `json:"loaded"`
+	Archived     bool             `json:"archived"`
+	Deleted      bool             `json:"deleted,omitempty"`
+	UpdatedAt    time.Time        `json:"updated_at"`
+	Stats        *SessionStats    `json:"stats,omitempty"`
+	Settings     *SessionSettings `json:"settings,omitempty"`
 }
 
 type Hello struct {
+	SupportsWebUI               bool      `json:"supports_webui,omitempty"`
 	SupportsWorkerUpdate        bool      `json:"supports_worker_update,omitempty"`
 	WorkerID                    string    `json:"worker_id"`
 	WorkerName                  string    `json:"worker_name"`
@@ -68,6 +70,7 @@ type HelloAck struct {
 }
 
 type Heartbeat struct {
+	SupportsWebUI               bool      `json:"supports_webui,omitempty"`
 	SupportsWorkerUpdate        bool      `json:"supports_worker_update,omitempty"`
 	WorkerID                    string    `json:"worker_id"`
 	SupportsImageInput          bool      `json:"supports_image_input,omitempty"`

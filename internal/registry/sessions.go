@@ -14,7 +14,7 @@ import (
 	"github.com/iaia/telegramgw/internal/protocol"
 )
 
-func upsertProtocolSession(ctx context.Context, tx *dbTx, workerID, runtimeID uuid.UUID, expectedID *uuid.UUID, session protocol.Session) error {
+func upsertProtocolSession(ctx context.Context, tx *dbTx, workerID, runtimeID uuid.UUID, expectedID *uuid.UUID, session protocol.Session, generation uint64) error {
 	id, err := uuid.Parse(session.ID)
 	if err != nil || session.WorkerID != workerID.String() || session.RuntimeID != runtimeID.String() ||
 		(expectedID != nil && id != *expectedID) || strings.TrimSpace(session.ThreadID) == "" || !validSessionState(session.State) {
@@ -66,6 +66,29 @@ func upsertProtocolSession(ctx context.Context, tx *dbTx, workerID, runtimeID uu
 			return err
 		}
 		return ErrEventTarget
+	}
+	return upsertSessionSettings(ctx, tx, workerID, runtimeID, id, generation, session.Settings)
+}
+
+func upsertSessionSettings(ctx context.Context, tx *dbTx, workerID, runtimeID, sessionID uuid.UUID, generation uint64, settings *protocol.SessionSettings) error {
+	// Old workers and discovery snapshots without confirmed preferences must
+	// not clear a setting. Nor may a carried snapshot cross a runtime restart.
+	if settings == nil || settings.RuntimeGeneration != generation {
+		return nil
+	}
+	if settings.Validate() != nil {
+		return ErrEventTarget
+	}
+	_, err := tx.Exec(ctx, `INSERT INTO session_settings (session_id,worker_id,runtime_id,runtime_generation,revision,model,reasoning_effort)
+        SELECT $1,$2,$3,$4,$5,$6,$7 FROM runtimes WHERE runtime_id=$3 AND worker_id=$2 AND generation=$4
+        ON CONFLICT(session_id) DO UPDATE SET runtime_generation=excluded.runtime_generation,revision=excluded.revision,
+          model=excluded.model,reasoning_effort=excluded.reasoning_effort
+        WHERE session_settings.worker_id=excluded.worker_id AND session_settings.runtime_id=excluded.runtime_id
+          AND (excluded.runtime_generation>session_settings.runtime_generation OR
+            (excluded.runtime_generation=session_settings.runtime_generation AND excluded.revision>session_settings.revision))`,
+		sessionID, workerID, runtimeID, int64(settings.RuntimeGeneration), int64(settings.Revision), settings.Model, settings.ReasoningEffort)
+	if err != nil {
+		return fmt.Errorf("registry: save current session settings: %w", err)
 	}
 	return nil
 }

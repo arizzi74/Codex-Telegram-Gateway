@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -37,7 +38,10 @@ func (m *Manager) currentCodexDistribution(ctx context.Context, expected *codexD
 // The live worker lease, rather than a status snapshot, authorizes its shutdown.
 // recordRestart durably records recovery intent before any service is stopped.
 func (m *Manager) applyCodexRuntimeUpdates(ctx context.Context, l *Layout, plans []codexRuntimePlan, resumeStopped bool, recordRestart func() error) (retErr error) {
-	if len(plans) == 0 && !resumeStopped {
+	if len(plans) > 32 {
+		return errors.New("too many Codex installations for safe update recovery")
+	}
+	if len(plans) == 0 {
 		return nil
 	}
 	running, err := m.workerRunning(ctx, l)
@@ -45,33 +49,77 @@ func (m *Manager) applyCodexRuntimeUpdates(ctx context.Context, l *Layout, plans
 		return err
 	}
 	restart := running || resumeStopped
-	var lease *workerLease
-	stopAttempted, stopped, restarted := false, false, false
-	defer func() {
-		if retErr == nil {
-			return
-		}
-		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 90*time.Second)
-		defer cancel()
-		if lease != nil && !stopped {
-			if err := m.workerAbort(cleanupCtx, l, lease.Token); err != nil && !stopAttempted {
-				retErr = errors.Join(retErr, errors.New("worker reservation could not be released; it will expire automatically"))
-			}
-		}
-		if restart && !restarted && (stopAttempted || (!running && resumeStopped)) {
-			if err := m.Service(cleanupCtx, l, "start"); err != nil {
-				retErr = errors.Join(retErr, errors.New("Codex runtime update could not restore the worker service; inspect its service logs"))
-			}
-		}
-	}()
+	journal := &codexRecovery{Schema: 1, Phase: "prepared", Restart: restart, ActiveInstall: -1}
 	for _, plan := range plans {
 		if _, err := ParseVersion(plan.TargetVersion); err != nil {
 			return errors.New("Codex runtime update target is invalid")
 		}
-		if _, err := m.currentCodexDistribution(ctx, plan.Distribution); err != nil {
+		current, err := m.currentCodexDistribution(ctx, plan.Distribution)
+		if err != nil {
 			return err
 		}
+		snapshot, err := snapshotCodexRuntime(current, plan.Profiles)
+		if err != nil {
+			return err
+		}
+		if plan.NeedsInstall {
+			target := strings.TrimPrefix(filepath.Base(snapshot.ReleaseDir), snapshot.Distribution.Version+"-")
+			snapshot.CandidateReleaseDir = filepath.Join(filepath.Dir(snapshot.ReleaseDir), plan.TargetVersion+"-"+target)
+		}
+		journal.Snapshots = append(journal.Snapshots, snapshot)
+		if plan.NeedsInstall {
+			journal.rejectVersion(plan.TargetVersion)
+		}
+		// An externally updated launcher can be checked without stopping the old
+		// app server. A rejected candidate must not disrupt that still-running server.
+		if !plan.NeedsInstall {
+			if err := m.preflightCodexRuntime(ctx, current); err != nil {
+				return err
+			}
+		}
 	}
+	if err := validateCodexRecoverySize(journal); err != nil {
+		return err
+	}
+	var lease *workerLease
+	stopped, journalWritten := false, false
+	defer func() {
+		if retErr == nil {
+			return
+		}
+		cleanup, cancel := context.WithTimeout(context.WithoutCancel(ctx), 90*time.Second)
+		defer cancel()
+		if lease != nil && !stopped {
+			if err := m.workerAbort(cleanup, l, lease.Token); err != nil {
+				retErr = errors.Join(retErr, errors.New("worker reservation could not be released; it will expire automatically"))
+			}
+		}
+		if !journalWritten {
+			return
+		}
+		// Capture a partially installed candidate only for the installer that
+		// just failed, never replace an already-recorded candidate identity.
+		if journal.Phase == "installing" && journal.ActiveInstall >= 0 && journal.ActiveInstall < len(journal.Snapshots) {
+			snapshot := &journal.Snapshots[journal.ActiveInstall]
+			if !snapshot.CandidateObserved {
+				current, err := m.currentCodexDistribution(cleanup, &snapshot.Distribution)
+				if err == nil && current.Version != snapshot.Distribution.Version {
+					if path, err := filepath.EvalSymlinks(current.Binary); err == nil {
+						snapshot.CandidateReleaseDir = filepath.Dir(filepath.Dir(path))
+						snapshot.CandidateObserved = true
+						journal.rejectVersion(current.Version)
+					}
+				}
+			}
+		}
+		if err := m.recoverCodexRuntime(cleanup, l, journal); err != nil {
+			retErr = errors.Join(retErr, err)
+		} else if journal.Phase == "prepared" {
+			retErr = errors.Join(retErr, errors.New("Codex maintenance did not change the installation; worker service state restored"))
+		} else if journal.Phase != "committed" {
+			retErr = errors.Join(retErr, errors.New("previous Codex releases restored; failed releases will not be retried automatically"))
+		}
+	}()
 	if running {
 		lease, err = m.workerPrepare(ctx, l)
 		if err != nil {
@@ -82,32 +130,37 @@ func (m *Manager) applyCodexRuntimeUpdates(ctx context.Context, l *Layout, plans
 		if recordRestart == nil {
 			return errors.New("Codex runtime update cannot record worker restart recovery")
 		}
-		if err := recordRestart(); err != nil {
+		if err = recordRestart(); err != nil {
 			return err
 		}
 	}
-	if err := ctx.Err(); err != nil {
+	if err = ctx.Err(); err != nil {
 		return err
 	}
 	if lease != nil && lease.ExpiresAt.Sub(m.updateNow()) < 45*time.Second {
 		return &BusyError{Reason: "worker update reservation expired; retry later"}
 	}
+	if err = writeCodexRecovery(l, journal); err != nil {
+		return err
+	}
+	journalWritten = true
 	if running {
-		stopAttempted = true
-		if err := m.Service(ctx, l, "stop"); err != nil {
+		if err = m.Service(ctx, l, "stop"); err != nil {
 			return err
 		}
 	}
-	// A successful service command alone is insufficient: an unmanaged worker
-	// or a service transition must not race an update of its shared runtime.
-	if stillRunning, err := m.workerRunning(ctx, l); err != nil {
+	if live, err := m.workerRunning(ctx, l); err != nil {
 		return err
-	} else if stillRunning {
+	} else if live {
 		return errors.New("Codex runtime update could not confirm that the worker stopped")
 	}
 	stopped = true
-	expectedVersions := make(map[string]string)
-	for _, plan := range plans {
+	journal.Phase = "installing"
+	if err = writeCodexRecovery(l, journal); err != nil {
+		return err
+	}
+	expected := map[string]string{}
+	for index, plan := range plans {
 		current, err := m.currentCodexDistribution(ctx, plan.Distribution)
 		if err != nil {
 			return err
@@ -117,7 +170,11 @@ func (m *Manager) applyCodexRuntimeUpdates(ctx context.Context, l *Layout, plans
 			return errors.New("Codex runtime update could not verify the installed version")
 		}
 		if comparison < 0 {
-			if err := m.installCodexRuntime(ctx, current); err != nil {
+			journal.ActiveInstall = index
+			if err = writeCodexRecovery(l, journal); err != nil {
+				return err
+			}
+			if err = m.installCodexRuntime(ctx, current); err != nil {
 				return err
 			}
 			current, err = m.currentCodexDistribution(ctx, plan.Distribution)
@@ -129,24 +186,49 @@ func (m *Manager) applyCodexRuntimeUpdates(ctx context.Context, l *Layout, plans
 				return errors.New("Codex runtime update did not install the required version")
 			}
 		}
+		if current.Version != plan.Distribution.Version {
+			path, err := filepath.EvalSymlinks(current.Binary)
+			if err != nil {
+				return errors.New("cannot checkpoint updated Codex release")
+			}
+			journal.Snapshots[index].CandidateReleaseDir = filepath.Dir(filepath.Dir(path))
+			journal.Snapshots[index].CandidateObserved = true
+			journal.rejectVersion(current.Version)
+		}
+		journal.ActiveInstall = -1
+		if err = writeCodexRecovery(l, journal); err != nil {
+			return err
+		}
+		if err = m.preflightCodexRuntime(ctx, current); err != nil {
+			return err
+		}
 		for profile, autostart := range plan.Profiles {
 			if autostart {
-				expectedVersions[profile] = current.Version
+				expected[profile] = current.Version
 			}
 		}
 	}
-	if !restart {
-		return nil
+	if restart {
+		journal.Phase = "starting"
+		if err = writeCodexRecovery(l, journal); err != nil {
+			return err
+		}
+		after := m.updateNow()
+		if err = m.Service(ctx, l, "start"); err != nil {
+			return err
+		}
+		if err = m.WorkerReady(ctx, l, after, ""); err != nil {
+			return err
+		}
+		if err = m.codexRuntimeReady(ctx, l, after, expected); err != nil {
+			return err
+		}
 	}
-	after := m.updateNow()
-	if err := m.Service(ctx, l, "start"); err != nil {
+	journal.Phase = "committed"
+	if err = writeCodexRecovery(l, journal); err != nil {
 		return err
 	}
-	restarted = true
-	if err := m.WorkerReady(ctx, l, after, ""); err != nil {
-		return err
-	}
-	return m.codexRuntimeReady(ctx, l, after, expectedVersions)
+	return clearCodexRecovery(l)
 }
 
 func (m *Manager) managedCodexWorkerPID(ctx context.Context, l *Layout) (int, error) {

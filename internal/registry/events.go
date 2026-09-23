@@ -44,6 +44,14 @@ func (s *Store) IngestEvent(ctx context.Context, workerID, connectionID uuid.UUI
 		return fmt.Errorf("registry: normalize event payload: %w", err)
 	}
 	event.Data = data
+	// Capture activity transitions in the same order as their commits. Lock
+	// before acquiring SQLite's single connection, so snapshot readers never
+	// wait for a transaction that is itself waiting for the snapshot lock.
+	activity := activityEvent(event.Kind)
+	if activity {
+		s.activity.readMu.Lock()
+		defer s.activity.readMu.Unlock()
+	}
 	tx, err := s.pool.BeginTx(ctx, TxOptions{})
 	if err != nil {
 		return fmt.Errorf("registry: begin event ingestion: %w", err)
@@ -79,6 +87,15 @@ func (s *Store) IngestEvent(ctx context.Context, workerID, connectionID uuid.UUI
 	if err != nil {
 		return err
 	}
+	var beforeActivity *SessionActivity
+	activitySession := ""
+	if activity && target.sessionID != nil && target.runtimeCurrent && s.activityObserved() {
+		activitySession = target.sessionID.String()
+		beforeActivity, err = s.activityRowTx(ctx, tx, activitySession)
+		if err != nil {
+			return err
+		}
+	}
 	// The event ledger has a composite session ownership FK. A discovery creates
 	// that normalized session in this transaction before its event row is added;
 	// the transaction still rolls back both writes if any later step fails.
@@ -88,7 +105,7 @@ func (s *Store) IngestEvent(ctx context.Context, workerID, connectionID uuid.UUI
 			return fmt.Errorf("registry: decode session discovery: %w", err)
 		}
 		if target.runtimeCurrent {
-			if err := upsertProtocolSession(ctx, tx, workerID, *target.runtimeID, target.sessionID, session); err != nil {
+			if err := upsertProtocolSession(ctx, tx, workerID, *target.runtimeID, target.sessionID, session, event.RuntimeGeneration); err != nil {
 				return err
 			}
 		} else if target.runtimeHistorical {
@@ -124,12 +141,29 @@ func (s *Store) IngestEvent(ctx context.Context, workerID, connectionID uuid.UUI
 			return err
 		}
 	}
+	pushQueued, err := enqueueWebPushDeliveries(ctx, tx, event, target)
+	if err != nil {
+		return err
+	}
 	if _, err := tx.Exec(ctx, `UPDATE worker_event_watermarks
         SET event_seq = $2, updated_at = (strftime('%Y-%m-%dT%H:%M:%f','now') || '000000Z') WHERE worker_id = $1`, workerID, sequence); err != nil {
 		return fmt.Errorf("registry: advance event watermark: %w", err)
 	}
+	var afterActivity *SessionActivity
+	if activitySession != "" {
+		afterActivity, err = s.activityRowTx(ctx, tx, activitySession)
+		if err != nil {
+			return err
+		}
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("registry: commit event ingestion: %w", err)
+	}
+	if activity {
+		s.publishActivityTransition(event.Kind, activitySession, beforeActivity, afterActivity)
+	}
+	if pushQueued {
+		s.notifyWebPush()
 	}
 	return nil
 }
@@ -433,7 +467,7 @@ func (s *Store) applyEvent(ctx context.Context, tx *dbTx, workerID uuid.UUID, ev
 		if !target.runtimeCurrent {
 			return false, nil, nil
 		}
-		if err := upsertProtocolSession(ctx, tx, workerID, *target.runtimeID, target.sessionID, session); err != nil {
+		if err := upsertProtocolSession(ctx, tx, workerID, *target.runtimeID, target.sessionID, session, event.RuntimeGeneration); err != nil {
 			return false, nil, err
 		}
 		return false, nil, nil
@@ -511,7 +545,7 @@ func (s *Store) applyEvent(ctx context.Context, tx *dbTx, workerID uuid.UUID, ev
 			}
 			expectedID = nil
 		}
-		if err := upsertProtocolSession(ctx, tx, workerID, *target.runtimeID, expectedID, *result.Session); err != nil {
+		if err := upsertProtocolSession(ctx, tx, workerID, *target.runtimeID, expectedID, *result.Session, event.RuntimeGeneration); err != nil {
 			return false, nil, err
 		}
 		var parseErr error
@@ -865,7 +899,7 @@ func enqueueEventDeliveries(ctx context.Context, tx *dbTx, eventID uuid.UUID, ev
 	}
 	rows, err := tx.Query(ctx, `WITH targets AS (
         SELECT bot_id, chat_id, message_thread_id FROM telegram_bindings
-        WHERE session_id = $1 AND $3 NOT IN ('command_completed','user_message')
+        WHERE session_id = $1 AND $3 <> 'command_completed'
           AND NOT EXISTS (SELECT 1 FROM commands WHERE command_id=$4 AND operation='read_history')
         UNION
         SELECT mode.bot_id,mode.chat_id,mode.message_thread_id FROM telegram_chat_modes mode

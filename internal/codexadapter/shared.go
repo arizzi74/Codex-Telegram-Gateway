@@ -14,8 +14,9 @@ import (
 )
 
 // SharedRuntime owns an attachable local app-server and its private byte
-// proxy. The app-server listens only on SocketPath; the adapter uses JSONL on
-// its side of a WebSocket bridge carried through proxy stdin/stdout.
+// proxy. SocketPath is the private advertised endpoint; newer Codex releases
+// publish it as a validated alias to their protected physical socket. The
+// adapter uses JSONL over a WebSocket bridge carried through proxy stdin/stdout.
 //
 // The owner must be closed. Closing it stops and reaps both processes. It
 // never attaches to or terminates a pre-existing app-server.
@@ -49,22 +50,34 @@ func StartShared(ctx context.Context, config Config, socketPath string) (*Shared
 	}
 	server := exec.Command(config.Command, serverArgs...)
 	server.Dir = config.WorkingDirectory
+	server.Env = config.Env
 	server.Stderr = config.Stderr
 	if err := server.Start(); err != nil {
 		return nil, fmt.Errorf("start shared codex app-server: %w", err)
 	}
 	serverWait := waitCommand(server)
-	if err := waitForSocket(startupCtx, socketPath, serverWait); err != nil {
+	socket, err := waitForSocket(startupCtx, socketPath, serverWait)
+	if err != nil {
 		_ = stopCommand(server, serverWait)
 		return nil, err
 	}
-	if err := os.Chmod(socketPath, 0o600); err != nil {
-		_ = stopCommand(server, serverWait)
-		return nil, fmt.Errorf("restrict shared app-server socket: %w", err)
-	}
+	// From here every failure owns this validated endpoint. Stop the child
+	// before removing its captured socket, including the physical socket behind
+	// the rendezvous alias used by newer Codex releases.
+	started := false
+	defer func() {
+		if !started {
+			if err := stopCommand(server, serverWait); err == nil {
+				_ = socket.remove()
+			}
+		}
+	}()
 
-	proxy := exec.Command(config.Command, "app-server", "proxy", "--sock", socketPath)
+	// Connect to the validated physical endpoint. Replacing the advertised
+	// alias later must not redirect this adapter or the worker's attach proxy.
+	proxy := exec.Command(config.Command, "app-server", "proxy", "--sock", socket.endpoint)
 	proxy.Dir = config.WorkingDirectory
+	proxy.Env = config.Env
 	proxy.Stderr = config.Stderr
 	in, err := proxy.StdinPipe()
 	if err != nil {
@@ -100,11 +113,12 @@ func StartShared(ctx context.Context, config Config, socketPath string) (*Shared
 			if err := stopCommand(proxy, proxyWait); err != nil && !errors.Is(err, os.ErrProcessDone) {
 				cleanupErr = err
 			}
-			if err := stopCommand(server, serverWait); err != nil && !errors.Is(err, os.ErrProcessDone) && cleanupErr == nil {
+			if err := stopCommand(server, serverWait); err != nil {
+				if cleanupErr == nil {
+					cleanupErr = err
+				}
+			} else if err := socket.remove(); err != nil && cleanupErr == nil {
 				cleanupErr = err
-			}
-			if err := os.Remove(socketPath); err != nil && !errors.Is(err, os.ErrNotExist) && cleanupErr == nil {
-				cleanupErr = fmt.Errorf("remove shared app-server socket: %w", err)
 			}
 		})
 		return cleanupErr
@@ -113,7 +127,7 @@ func StartShared(ctx context.Context, config Config, socketPath string) (*Shared
 	client := New(transport, config)
 	client.mu.Lock()
 	client.pid = server.Process.Pid
-	client.localSocket = socketPath
+	client.localSocket = socket.endpoint
 	client.mu.Unlock()
 	runtime := &SharedRuntime{Client: client, SocketPath: socketPath, server: server, proxy: proxy, serverWait: serverWait, proxyWait: proxyWait, cleanup: cleanup}
 	go func() {
@@ -127,6 +141,7 @@ func StartShared(ctx context.Context, config Config, socketPath string) (*Shared
 		_ = runtime.Close()
 		return nil, err
 	}
+	started = true
 	return runtime, nil
 }
 
@@ -147,8 +162,8 @@ func (r *SharedRuntime) ProxyPID() int {
 }
 
 // Close stops both owned children, waits for their reaping goroutines, and
-// removes only the socket this runtime created. It does not remove the parent
-// directory because that directory may be supplied by the caller.
+// removes only the captured endpoint and any validated rendezvous alias this
+// runtime created. Parent directories can be shared and are left in place.
 func (r *SharedRuntime) Close() error {
 	if r == nil {
 		return nil
@@ -220,11 +235,11 @@ func prepareSocketPath(socketPath string) (string, error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return "", fmt.Errorf("create private socket directory: %w", err)
 	}
-	info, err := os.Stat(dir)
+	info, err := os.Lstat(dir)
 	if err != nil {
 		return "", fmt.Errorf("inspect socket directory: %w", err)
 	}
-	if !info.IsDir() || info.Mode().Perm()&0o077 != 0 {
+	if !info.IsDir() || info.Mode().Perm() != 0o700 || !socketOwnedByCurrentUser(info) {
 		return "", errors.New("shared app-server socket directory must be private (0700)")
 	}
 	if _, err := os.Lstat(socketPath); err == nil {
@@ -257,32 +272,48 @@ func sharedServerArgs(args []string, socketPath string) ([]string, error) {
 	return append(result, "--listen", "unix://"+socketPath), nil
 }
 
-func waitForSocket(ctx context.Context, socketPath string, serverWait *commandWait) error {
+func waitForSocket(ctx context.Context, socketPath string, serverWait *commandWait) (*sharedSocket, error) {
+	directory, err := sharedDaemonSocketDirectory()
+	if err != nil {
+		return nil, err
+	}
+	return waitForSocketInDirectory(ctx, socketPath, directory, serverWait)
+}
+
+func waitForSocketInDirectory(ctx context.Context, socketPath, directory string, serverWait *commandWait) (*sharedSocket, error) {
 	ticker := time.NewTicker(10 * time.Millisecond)
 	defer ticker.Stop()
 	for {
-		info, err := os.Lstat(socketPath)
-		if err == nil {
-			if info.Mode()&os.ModeSocket == 0 {
-				return errors.New("app-server listener path is not a Unix socket")
-			}
-			return nil
+		select {
+		case <-serverWait.done:
+			return nil, socketServerExited(serverWait)
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		default:
 		}
-		if !errors.Is(err, os.ErrNotExist) {
-			return fmt.Errorf("inspect app-server socket: %w", err)
+		socket, err := inspectSharedSocket(socketPath, directory)
+		if err == nil {
+			return socket, nil
+		}
+		if !errors.Is(err, os.ErrNotExist) && !errors.Is(err, errSocketPermissionsPending) {
+			return nil, fmt.Errorf("inspect app-server socket: %w", err)
 		}
 		select {
 		case <-serverWait.done:
-			err := serverWait.result()
-			if err == nil {
-				err = ErrClosed
-			}
-			return fmt.Errorf("shared codex app-server exited before listening: %w", err)
+			return nil, socketServerExited(serverWait)
 		case <-ctx.Done():
-			return ctx.Err()
+			return nil, ctx.Err()
 		case <-ticker.C:
 		}
 	}
+}
+
+func socketServerExited(serverWait *commandWait) error {
+	err := serverWait.result()
+	if err == nil {
+		err = ErrClosed
+	}
+	return fmt.Errorf("shared codex app-server exited before listening: %w", err)
 }
 
 var _ io.Closer = (*SharedRuntime)(nil)

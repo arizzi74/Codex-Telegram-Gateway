@@ -221,6 +221,9 @@ func (s *Store) AcceptTelegram(ctx context.Context, in IncomingUpdate) (AcceptRe
 	if err := tx.Commit(ctx); err != nil {
 		return AcceptResult{}, fmt.Errorf("registry: commit Telegram accept: %w", err)
 	}
+	if result.ApprovalID != "" || result.CommandID != "" {
+		s.notifySessionActivity()
+	}
 	return result, nil
 }
 
@@ -1025,6 +1028,9 @@ func (s *Store) AcknowledgeCommand(ctx context.Context, workerID, connectionID u
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("registry: commit command acknowledgement: %w", err)
 	}
+	if ct.RowsAffected() > 0 && status == "failed" {
+		s.notifySessionActivity()
+	}
 	return nil
 }
 
@@ -1131,6 +1137,9 @@ func (s *Store) expireCommands(ctx context.Context, limit int) (int, error) {
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return 0, fmt.Errorf("registry: commit command expiry: %w", err)
+	}
+	if count > 0 {
+		s.notifySessionActivity()
 	}
 	return count, nil
 }

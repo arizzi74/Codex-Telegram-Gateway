@@ -55,6 +55,7 @@ func (s *Store) BindConnection(ctx context.Context, workerID, connectionID uuid.
 	if ct.RowsAffected() == 0 {
 		return ErrInvalidToken
 	}
+	s.notifySessionActivity()
 	return nil
 }
 
@@ -130,6 +131,7 @@ func (s *Store) RegisterConnection(ctx context.Context, token string, connection
 	if err := tx.Commit(ctx); err != nil {
 		return Worker{}, fmt.Errorf("registry: commit connection registration: %w", err)
 	}
+	s.notifySessionActivity()
 	return worker, nil
 }
 
@@ -162,6 +164,9 @@ func (s *Store) Disconnect(ctx context.Context, workerID, connectionID uuid.UUID
 	if err != nil {
 		return fmt.Errorf("registry: disconnect worker: %w", err)
 	}
+	// A local admin process may already have revoked/fenced this connection.
+	// Its database change still needs to reach viewers in this gateway process.
+	s.notifySessionActivity()
 	if ct.RowsAffected() == 0 {
 		return ErrConnectionFenced
 	}
@@ -181,6 +186,9 @@ func (s *Store) MarkUnreachable(ctx context.Context, threshold time.Duration) (i
           AND last_seen_at < $1`, time.Now().UTC().Add(-threshold))
 	if err != nil {
 		return 0, fmt.Errorf("registry: mark unreachable workers: %w", err)
+	}
+	if ct.RowsAffected() > 0 {
+		s.notifySessionActivity()
 	}
 	return ct.RowsAffected(), nil
 }
@@ -208,6 +216,10 @@ func (s *Store) RecordHeartbeat(ctx context.Context, heartbeat Heartbeat) error 
 		return fmt.Errorf("registry: begin heartbeat: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	activityChanged, err := s.heartbeatActivityChanged(ctx, tx, heartbeat)
+	if err != nil {
+		return err
+	}
 	ct, err := tx.Exec(ctx, `UPDATE workers
         SET last_seen_at = (strftime('%Y-%m-%dT%H:%M:%f','now') || '000000Z'), connectivity = 'online', heartbeat_metadata = $3,
             updated_at = (strftime('%Y-%m-%dT%H:%M:%f','now') || '000000Z')
@@ -226,6 +238,9 @@ func (s *Store) RecordHeartbeat(ctx context.Context, heartbeat Heartbeat) error 
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("registry: commit heartbeat: %w", err)
+	}
+	if activityChanged {
+		s.notifySessionActivity()
 	}
 	return nil
 }

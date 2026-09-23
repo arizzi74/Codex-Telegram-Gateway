@@ -613,7 +613,7 @@ func TestGatewayReadinessRequiresManagedExecutable(t *testing.T) {
 		t.Run(strconv.FormatBool(correct), func(t *testing.T) {
 			l, _, _ := updateFixture(t, "gateway")
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				if r.URL.Path != "/tgreadyz" {
+				if r.URL.Path != "/tgw/readyz" {
 					t.Errorf("wrong URL: %s", r.URL.Path)
 				}
 				w.WriteHeader(http.StatusOK)

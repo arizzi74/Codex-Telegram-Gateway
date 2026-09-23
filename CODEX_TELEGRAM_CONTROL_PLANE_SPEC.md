@@ -371,7 +371,7 @@ worker:
   name: example-macbook
 
 gateway:
-  url: wss://codex.example.com/tgapi/v1/workers/connect
+  url: wss://codex.example.com/tgw/api/v1/workers/connect
   token_file: ~/.config/codex-worker/token
 
 runtimes:
@@ -522,10 +522,10 @@ Internet
   v
 Caddy/nginx
   |
-  +--> /tgapi/v1/telegram/webhook
-  +--> /tgapi/v1/workers/connect
-  +--> /tghealthz
-  +--> /tgreadyz
+  +--> /tgw/api/v1/telegram/webhook
+  +--> /tgw/api/v1/workers/connect
+  +--> /tgw/healthz
+  +--> /tgw/readyz
         |
         v
 codex-gateway 127.0.0.1:8080
@@ -546,10 +546,10 @@ unless deployed behind a trusted private load balancer.
 Required:
 
 ```text
-POST /tgapi/v1/telegram/webhook
-GET  /tgapi/v1/workers/connect      # HTTP upgrade to WebSocket
-GET  /tghealthz
-GET  /tgreadyz
+POST /tgw/api/v1/telegram/webhook
+GET  /tgw/api/v1/workers/connect      # HTTP upgrade to WebSocket
+GET  /tgw/healthz
+GET  /tgw/readyz
 ```
 
 Optional administrative endpoint:
@@ -888,7 +888,7 @@ Use one long-lived authenticated WSS connection per Worker.
 Endpoint:
 
 ```text
-wss://codex.example.com/tgapi/v1/workers/connect
+wss://codex.example.com/tgw/api/v1/workers/connect
 ```
 
 The custom protocol is application-defined JSON messages.
@@ -2389,7 +2389,7 @@ worker:
   state_file: ~/.local/share/codex-worker/state.db
 
 gateway:
-  url: wss://codex.example.com/tgapi/v1/workers/connect
+  url: wss://codex.example.com/tgw/api/v1/workers/connect
   token_file: ~/.config/codex-worker/token
 
 security:
@@ -2443,13 +2443,13 @@ No public administration API is required.
 
 # 30. Health and Readiness
 
-## Gateway `/tghealthz`
+## Gateway `/tgw/healthz`
 
 Returns 200 if process is alive.
 
 No DB requirement.
 
-## Gateway `/tgreadyz`
+## Gateway `/tgw/readyz`
 
 Returns 200 only if:
 
@@ -2561,10 +2561,10 @@ codex.example.com {
 Gateway itself handles:
 
 ```text
-/tgapi/v1/telegram/webhook
-/tgapi/v1/workers/connect
-/tghealthz
-/tgreadyz
+/tgw/api/v1/telegram/webhook
+/tgw/api/v1/workers/connect
+/tgw/healthz
+/tgw/readyz
 ```
 
 Caddy automatically supports WebSocket upgrade forwarding.

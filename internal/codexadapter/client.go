@@ -57,6 +57,9 @@ type Config struct {
 	Args    []string
 	// WorkingDirectory becomes the app-server process working directory.
 	WorkingDirectory string
+	// Env is the complete child environment. Nil inherits the current process
+	// environment; callers can supply an isolated CODEX_HOME for preflight checks.
+	Env []string
 	// Stderr receives process diagnostics. Supply a redacting writer; the
 	// adapter deliberately does not log raw process output itself.
 	Stderr         io.Writer
@@ -176,6 +179,7 @@ func Start(ctx context.Context, config Config) (*Client, error) {
 	// must keep running after Start returns.
 	cmd := exec.Command(config.Command, config.Args...)
 	cmd.Dir = config.WorkingDirectory
+	cmd.Env = config.Env
 	cmd.Stderr = config.Stderr
 	in, err := cmd.StdinPipe()
 	if err != nil {

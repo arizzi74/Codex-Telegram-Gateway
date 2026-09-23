@@ -15,16 +15,19 @@ type routeReadiness struct {
 func (s routeReadiness) Ping(context.Context) error            { return s.pingErr }
 func (s routeReadiness) CheckMigrations(context.Context) error { return s.migrationErr }
 
-func TestGatewayRoutesUseTGPrefix(t *testing.T) {
+func TestGatewayRoutesUseTGWPrefix(t *testing.T) {
 	mux := NewMux(routeReadiness{}, NewHub(nil, nil, 0, 0))
 	for _, tc := range []struct {
 		path string
 		code int
 		body string
 	}{
-		{"/tghealthz", http.StatusOK, "ok\n"},
-		{"/tgreadyz", http.StatusOK, "ready\n"},
-		{"/tgapi/v1/workers/connect", http.StatusUnauthorized, "unauthorized\n"},
+		{"/tgw/healthz", http.StatusOK, "ok\n"},
+		{"/tgw/readyz", http.StatusOK, "ready\n"},
+		{"/tgw/api/v1/workers/connect", http.StatusUnauthorized, "unauthorized\n"},
+		{"/tghealthz", http.StatusNotFound, "404 page not found\n"},
+		{"/tgreadyz", http.StatusNotFound, "404 page not found\n"},
+		{"/tgapi/v1/workers/connect", http.StatusNotFound, "404 page not found\n"},
 		{"/healthz", http.StatusNotFound, "404 page not found\n"},
 		{"/readyz", http.StatusNotFound, "404 page not found\n"},
 		{"/api/v1/workers/connect", http.StatusNotFound, "404 page not found\n"},
@@ -53,7 +56,7 @@ func TestTGReadinessChecksRegistryAndSchema(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			w := httptest.NewRecorder()
-			NewMux(tc.store, NewHub(nil, nil, 0, 0)).ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/tgreadyz", nil))
+			NewMux(tc.store, NewHub(nil, nil, 0, 0)).ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/tgw/readyz", nil))
 			if w.Code != http.StatusServiceUnavailable || w.Body.String() != tc.body {
 				t.Fatalf("readiness: status=%d body=%q", w.Code, w.Body.String())
 			}

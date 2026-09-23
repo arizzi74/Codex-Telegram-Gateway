@@ -30,6 +30,32 @@ generated proxy snippets require no global nginx rate-limit zones. Valid worker
 tokens bypass anonymous failure limits, preserving reconnects even behind a
 shared NAT or a proxy missing the client header.
 
+## Browser interface
+
+The same gateway daemon serves `/tgw/webui/` and `/tgw/admin/`. Both use the admin
+passkey session; the browser interface requires an exact configured HTTPS Origin
+when opening `/tgw/api/v1/webui/connect`. WebSocket upgrades are required for
+all three endpoints: `/tgw/api/v1/workers/connect`, `/tgw/api/v1/webui/connect`,
+and `/tgw/api/v1/webui/activity`. The activity connection keeps every session's
+sidebar status current independently of the selected conversation. Guided nginx
+and Caddy setup include all three; manually managed proxies must also cover the
+full `/tgw/` prefix. If the selected conversation works but the sidebar does not
+update, check the activity endpoint: HTTP 426 responses indicate missing WebSocket
+upgrade headers in the proxy. Existing nginx snippets need this route added;
+updating only the gateway binary does not rewrite proxy configuration.
+
+Browser disconnects detach the viewer without interrupting an accepted Codex
+turn. Worker or gateway reconnection refreshes session history rather than
+replaying submissions. If a connection drops immediately after sending a prompt,
+check the refreshed conversation before retrying: delivery may already have
+succeeded. Passkey expiration or revocation requires signing in again; stream
+authorization is checked on input and periodically while viewing output.
+
+The interface uses the existing worker/app-server connection, without an extra
+CLI or terminal service. See [browser controls and limitations](webui.md) and
+the [worker-first `/tgw` migration](installation.md#upgrade-to-the-tgw-url-routes)
+before upgrading installations using older URL prefixes.
+
 ## Gateway host
 
 Create a dedicated unprivileged service account and data directories, then
@@ -164,7 +190,7 @@ recent committed data can still be in its `-wal` sidecar.
 For restore, stop the gateway, preserve the current database and both sidecars,
 and restore the verified backup with mode `0600` and gateway ownership. Remove
 only the old destination's `-wal` and `-shm` files while every connection is
-closed, then start the gateway and verify `/tgreadyz` and worker reconnection.
+closed, then start the gateway and verify `/tgw/readyz` and worker reconnection.
 Workers keep their local Codex processes and durable outboxes running.
 
 ## Switching from PostgreSQL
@@ -199,7 +225,7 @@ Replace `database_url_env` in the gateway configuration with:
 ```
 
 Remove the old database URL from the service environment, install the new binary
-and systemd template, reload systemd, and start the gateway. Check `/tgreadyz`, worker
+and systemd template, reload systemd, and start the gateway. Check `/tgw/readyz`, worker
 reconnection, event acknowledgements, and the existing admin login and session
 bindings. There is no need to enroll workers or register passkeys again.
 
@@ -288,7 +314,7 @@ Create a first-admin token only from the gateway host:
 codex-gateway --config /etc/codex-gateway/gateway.json admin bootstrap
 ```
 
-It expires in 15 minutes and is shown once. Open `/tgadmin/` over HTTPS, enroll a
+It expires in 15 minutes and is shown once. Open `/tgw/admin/` over HTTPS, enroll a
 resident user-verified personal passkey, and add a second passkey before
 revoking the first. The browser console can create workers, rotate their token,
 and revoke them. Copy a returned worker token directly to the worker’s private

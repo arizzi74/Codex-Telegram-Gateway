@@ -1,6 +1,6 @@
 'use strict';
 
-const api = '/tgapi/v1/admin';
+const api = '/tgw/api/v1/admin';
 const $ = id => document.getElementById(id);
 const pageSize = 10;
 let csrf = cookie('__Host-telegramgw-csrf');
@@ -8,6 +8,12 @@ let authenticated = false;
 let loading = false;
 let dashboard = null;
 let sessionPage = 0;
+// Only the built-in web interface and a single canonical session link are
+// allowed after login. Never turn notification links into an open redirect.
+const requestedReturn = new URLSearchParams(location.search).get('next') || '';
+const returnToWebUI = requestedReturn === '/tgw/webui/' ||
+  (requestedReturn.length === '/tgw/webui/?session_id='.length + 36 && /^\/tgw\/webui\/\?session_id=[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(requestedReturn))
+  ? requestedReturn : '';
 
 function b64(bytes) {
   return btoa(String.fromCharCode(...new Uint8Array(bytes))).replaceAll('+', '-').replaceAll('/', '_').replaceAll('=', '');
@@ -345,6 +351,7 @@ async function load(includeKeys = true) {
     const data = await call('/dashboard');
     dashboard = data;
     authenticated = true;
+    if (returnToWebUI) { location.replace(returnToWebUI); return; }
     $('auth').hidden = true;
     $('console').hidden = false;
     $('logout').hidden = false;
@@ -378,7 +385,27 @@ $('new-worker').addEventListener('click', () => perform(async () => {
     await load(false);
   }
 }));
-$('logout').addEventListener('click', () => perform(async () => { await call('/logout', { method: 'POST', body: '{}' }); location.reload(); }));
+$('logout').addEventListener('click', () => perform(async () => {
+  // An installed web app can outlive a login cookie. Disable this browser's
+  // existing device before signing out, including after a fresh admin login.
+  let subscriptionID = '';
+  try { subscriptionID = localStorage.getItem('codex-webui-push-subscription') || ''; } catch (_) { /* Optional device preference. */ }
+  if (subscriptionID) {
+    try {
+      await fetch('/tgw/api/v1/webui/push/unsubscribe', { method: 'POST', credentials: 'same-origin', signal: AbortSignal.timeout(5000),
+        headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': cookie('__Host-telegramgw-csrf') }, body: JSON.stringify({ subscription_id: subscriptionID }) });
+    } catch (_) { /* Server logout also revokes devices bound to this login. */ }
+  }
+  await call('/logout', { method: 'POST', body: '{}' });
+  try {
+    if (navigator.serviceWorker) await Promise.race([
+      navigator.serviceWorker.getRegistration('/tgw/webui/').then(registration => registration?.pushManager?.getSubscription()).then(subscription => subscription?.unsubscribe()),
+      new Promise(resolve => setTimeout(resolve, 3000)),
+    ]);
+  } catch (_) { /* Browser cleanup must not prevent completion of sign-out. */ }
+  try { localStorage.removeItem('codex-webui-push-subscription'); } catch (_) { /* Storage can be disabled. */ }
+  location.reload();
+}));
 $('refresh').addEventListener('click', () => load());
 for (const id of ['session-search', 'session-state']) $(id).addEventListener(id === 'session-search' ? 'input' : 'change', () => { sessionPage = 0; renderSessions(); });
 $('session-prev').addEventListener('click', () => { sessionPage--; renderSessions(); });

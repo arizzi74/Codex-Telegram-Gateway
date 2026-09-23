@@ -22,7 +22,7 @@ const data = {
   workers: [{ ID: 'worker-1', Name: 'Linux worker ' + malicious, OS: 'linux', Arch: 'amd64', Connectivity: 'connected', Version: '1.2.3', Enabled: true }],
   runtimes: [{ runtime_id: 'runtime-1' }],
   sessions: [...sessions, { session_id: 'hidden', name: 'Archived subagent', state: 'idle', archived: true }], pending_approvals: 1, queued_commands: 0,
-  bot: { username: 'example_bot', display_name: 'Example bot ' + malicious, id: 12345, status: 'connected', webhook_status: 'active', webhook_url: 'https://gateway.example.com/tgapi/v1/telegram/webhook', pending_updates: 0, allowed_user_count: 1, allowed_chat_count: 0, checked_at: time },
+  bot: { username: 'example_bot', display_name: 'Example bot ' + malicious, id: 12345, status: 'connected', webhook_status: 'active', webhook_url: 'https://gateway.example.com/tgw/api/v1/telegram/webhook', pending_updates: 0, allowed_user_count: 1, allowed_chat_count: 0, checked_at: time },
 };
 
 (async () => {
@@ -38,7 +38,8 @@ const data = {
     const request = route.request();
     const url = new URL(request.url());
     paths.push(url.pathname);
-    if (url.pathname.startsWith('/tgapi/')) {
+    if (url.pathname === '/tgw/webui/') return route.fulfill({ contentType: 'text/html', body: '<p>Web UI destination</p>' });
+    if (url.pathname.startsWith('/tgw/api/')) {
       let body = {};
       let status = 200;
       if (url.pathname.endsWith('/dashboard')) { body = data; status = dashboardStatus; dashboardReads++; }
@@ -53,7 +54,7 @@ const data = {
   });
   try {
     if (page.clock) await page.clock.install();
-    await page.goto('http://admin.test/tgadmin');
+    await page.goto('http://admin.test/tgw/admin');
     await page.waitForSelector('#console:not([hidden])');
     assert.equal(await page.locator('#sessions').textContent(), '12');
     assert.equal(await page.locator('.session-card').count(), 10);
@@ -125,7 +126,28 @@ const data = {
     await page.waitForSelector('#auth:not([hidden])');
     assert.equal(await page.locator('#console').getAttribute('hidden'), '');
     assert.equal(await page.locator('.session-card').count(), 0, 'Session expiry removes session data');
-    assert.ok(paths.every(path => path === '/tgadmin' || path.startsWith('/tgadmin/') || path.startsWith('/tgapi/')), 'Every gateway request must use a tg-prefixed route');
+    assert.ok(paths.every(path => path === '/tgw/admin' || path.startsWith('/tgw/admin/') || path.startsWith('/tgw/api/')), 'Every gateway request must use the /tgw prefix');
+    // Notification links retain only the built-in session target after login.
+    dashboardStatus = 200;
+    const sessionLink = '/tgw/webui/?session_id=11111111-2222-4333-8444-555555555555';
+    for (const destination of ['/tgw/webui/', sessionLink]) {
+      await page.goto('http://admin.test/tgw/admin/?next=' + encodeURIComponent(destination));
+      await page.waitForURL('http://admin.test' + destination);
+    }
+    for (const destination of ['https://invalid.example/', '//invalid.example/', '/tgw/admin/', sessionLink + '&next=https://invalid.example/', sessionLink + '\n', '/tgw/webui/?session_id=invalid']) {
+      await page.goto('http://admin.test/tgw/admin/?next=' + encodeURIComponent(destination));
+      await page.waitForSelector('#console:not([hidden])');
+      assert.equal(new URL(page.url()).pathname, '/tgw/admin/', 'Unsafe or unsupported return targets stay in admin');
+    }
+    // Explicit sign-out cleans up the browser device even after a fresh login.
+    const device = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee';
+    await page.evaluate(id => localStorage.setItem('codex-webui-push-subscription', id), device);
+    const beforeLogout = mutations.length;
+    await page.locator('#logout').click();
+    await page.waitForFunction(() => !localStorage.getItem('codex-webui-push-subscription'));
+    const logoutCalls = mutations.slice(beforeLogout);
+    assert.ok(logoutCalls.some(entry => entry.path.endsWith('/webui/push/unsubscribe') && JSON.parse(entry.body).subscription_id === device), 'Sign-out disables the current device');
+    assert.ok(logoutCalls.findIndex(entry => entry.path.endsWith('/webui/push/unsubscribe')) < logoutCalls.findIndex(entry => entry.path.endsWith('/admin/logout')), 'Device cleanup starts while the login is still valid');
     assert.deepEqual(errors, []);
     console.log('Admin browser checks passed: mobile/desktop layout, full names, stats, filters, pagination, safe rendering, refresh/error recovery, enrollment flows, session expiry.');
   } finally { await browser.close(); }

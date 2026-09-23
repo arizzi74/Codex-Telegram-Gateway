@@ -263,26 +263,69 @@ func TestTelegramQuestionsReachDisconnectedKnownChatIntegration(t *testing.T) {
 	}
 }
 
-func TestTelegramNativeUserMessagesOnlyReachMultiSessionChatsIntegration(t *testing.T) {
+func TestTelegramNativeUserMessagesFollowSelectedSessionIntegration(t *testing.T) {
 	env := newEventTestEnv(t)
 	ctx := context.Background()
 	if err := env.store.IngestEvent(ctx, env.worker, env.connection, env.discovery(t)); err != nil {
 		t.Fatal(err)
 	}
 	acceptModeUpdate(t, env, 1, "select", env.session.String(), "")
-	progressEvent(t, env, 2, "user_message", "turn-user", "")
-	if got := sessionModeDeliveries(t, env.store); len(got) != 0 {
-		t.Fatalf("single mode echoed prompt: %+v", got)
-	}
-	acceptModeUpdate(t, env, 2, "multisession", "", "on")
-	progressEvent(t, env, 3, "user_message", "turn-user", "")
+	event := progressEvent(t, env, 2, "user_message", "turn-user", "")
 	got := sessionModeDeliveries(t, env.store)
+	if len(got) != 1 || got[0].Kind != "user_message" {
+		t.Fatalf("selected session missed external prompt: %+v", got)
+	}
+	if suppress, err := env.store.SuppressTelegramDelivery(ctx, got[0].ID); err != nil || suppress {
+		t.Fatalf("selected session prompt suppressed %v %v", suppress, err)
+	}
+	if err := env.store.IngestEvent(ctx, env.worker, env.connection, event); err != nil {
+		t.Fatal(err)
+	}
+	if duplicate := sessionModeDeliveries(t, env.store); len(duplicate) != 0 {
+		t.Fatalf("replayed worker event duplicated prompt: %+v", duplicate)
+	}
+	other := uuid.New()
+	insertRouteSession(t, env, other, "other-thread", "")
+	acceptModeUpdate(t, env, 2, "select", other.String(), "")
+	if suppress, err := env.store.SuppressTelegramDelivery(ctx, got[0].ID); err != nil || !suppress {
+		t.Fatalf("prompt queued before switching escaped %v %v", suppress, err)
+	}
+	progressEvent(t, env, 3, "user_message", "turn-user", "")
+	if hidden := sessionModeDeliveries(t, env.store); len(hidden) != 0 {
+		t.Fatalf("unselected session prompt leaked: %+v", hidden)
+	}
+	acceptModeUpdate(t, env, 3, "multisession", "", "on")
+	progressEvent(t, env, 4, "user_message", "turn-user", "")
+	got = sessionModeDeliveries(t, env.store)
 	if len(got) != 1 || got[0].Kind != "user_message" {
 		t.Fatalf("multi mode missed prompt: %+v", got)
 	}
-	acceptModeUpdate(t, env, 3, "multisession", "", "off")
+	acceptModeUpdate(t, env, 4, "multisession", "", "off")
 	if suppress, err := env.store.SuppressTelegramDelivery(ctx, got[0].ID); err != nil || !suppress {
 		t.Fatalf("prompt queued before toggle escaped %v %v", suppress, err)
+	}
+}
+
+func TestTelegramNativeUserMessagesDoNotDuplicateSelectedMultiSessionDeliveryIntegration(t *testing.T) {
+	env := newEventTestEnv(t)
+	ctx := context.Background()
+	if err := env.store.IngestEvent(ctx, env.worker, env.connection, env.discovery(t)); err != nil {
+		t.Fatal(err)
+	}
+	acceptModeUpdate(t, env, 1, "select", env.session.String(), "")
+	acceptModeUpdate(t, env, 2, "multisession", "", "on")
+	progressEvent(t, env, 2, "user_message", "turn-user", "")
+	got := sessionModeDeliveries(t, env.store)
+	if len(got) != 1 || got[0].Kind != "user_message" {
+		t.Fatalf("selected multisession prompt delivery = %+v", got)
+	}
+	acceptModeUpdate(t, env, 3, "multisession", "", "off")
+	if suppress, err := env.store.SuppressTelegramDelivery(ctx, got[0].ID); err != nil || suppress {
+		t.Fatalf("selected session prompt suppressed after disabling multisession %v %v", suppress, err)
+	}
+	acceptModeUpdate(t, env, 4, "disconnect", "", "")
+	if suppress, err := env.store.SuppressTelegramDelivery(ctx, got[0].ID); err != nil || !suppress {
+		t.Fatalf("disconnected prompt escaped send guard %v %v", suppress, err)
 	}
 }
 

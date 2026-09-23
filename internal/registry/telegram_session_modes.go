@@ -20,8 +20,7 @@ func sessionVisibleSQL(bot, chat, topic, session string) string {
 
 func eventVisibleSQL() string {
 	visible := sessionVisibleSQL("delivery.bot_id", "delivery.chat_id", "delivery.message_thread_id", "event.session_id")
-	multi := `EXISTS(SELECT 1 FROM telegram_chat_modes mode WHERE mode.bot_id=delivery.bot_id AND mode.chat_id=delivery.chat_id AND mode.message_thread_id=delivery.message_thread_id AND mode.multi_session=1)`
-	return `(event.session_id IS NULL OR (event.kind IN ('command_completed','command_failed') AND EXISTS(SELECT 1 FROM commands command WHERE command.command_id=json_extract(event.payload,'$.command_id') AND command.operation NOT IN ('start_turn','steer','interrupt'))) OR (EXISTS(SELECT 1 FROM sessions visible_session WHERE visible_session.session_id=event.session_id AND visible_session.archived=FALSE) AND (event.kind IN ('approval_requested','user_input_requested') OR (event.kind='user_message' AND ` + multi + `) OR (event.kind<>'user_message' AND ` + visible + `))))`
+	return `(event.session_id IS NULL OR (event.kind IN ('command_completed','command_failed') AND EXISTS(SELECT 1 FROM commands command WHERE command.command_id=json_extract(event.payload,'$.command_id') AND command.operation NOT IN ('start_turn','steer','interrupt'))) OR (EXISTS(SELECT 1 FROM sessions visible_session WHERE visible_session.session_id=event.session_id AND visible_session.archived=FALSE) AND (event.kind IN ('approval_requested','user_input_requested') OR ` + visible + `)))`
 }
 
 func rememberTelegramContext(ctx context.Context, tx *dbTx, in IncomingUpdate) error {

@@ -35,7 +35,7 @@ func TestWebhookRejectsActorBeforeProcessing(t *testing.T) {
 		{"secret", `{"update_id":2,"message":{"from":{"id":8,"username":"allowed-name"},"chat":{"id":7},"text":"hi"}}`, 403},
 		{"secret", `{"update_id":3,"message":{"from":{"id":7},"chat":{"id":7},"text":"hi"}}`, 200},
 	} {
-		r := httptest.NewRequest("POST", "/tgapi/v1/telegram/webhook", strings.NewReader(tc.body))
+		r := httptest.NewRequest("POST", "/tgw/api/v1/telegram/webhook", strings.NewReader(tc.body))
 		r.Header.Set("X-Telegram-Bot-Api-Secret-Token", tc.header)
 		w := httptest.NewRecorder()
 		handler.ServeHTTP(w, r)

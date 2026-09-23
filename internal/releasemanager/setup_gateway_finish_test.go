@@ -24,11 +24,11 @@ func (f gatewaySetupRoundTrip) RoundTrip(request *http.Request) (*http.Response,
 func readyGatewayResponse(request *http.Request) (*http.Response, error) {
 	status, body := http.StatusOK, ""
 	switch request.URL.Path {
-	case "/tgreadyz":
+	case "/tgw/readyz":
 		body = "ready\n"
-	case "/tgadmin/":
+	case "/tgw/admin/":
 		body = "<html>CODEX GATEWAY</html>"
-	case "/tgapi/v1/workers/connect":
+	case "/tgw/api/v1/workers/connect":
 		status, body = http.StatusUnauthorized, "unauthorized\n"
 	default:
 		status = http.StatusNotFound
@@ -54,7 +54,7 @@ func TestGatewayPublicSetupChecksTLSAndEveryRoute(t *testing.T) {
 	if err := m.gatewayPublicReady(context.Background(), server.URL); err != nil {
 		t.Fatal(err)
 	}
-	if !reflect.DeepEqual(paths, []string{"/tgreadyz", "/tgadmin/", "/tgapi/v1/workers/connect"}) {
+	if !reflect.DeepEqual(paths, []string{"/tgw/readyz", "/tgw/admin/", "/tgw/api/v1/workers/connect"}) {
 		t.Fatalf("checked routes = %v", paths)
 	}
 }
@@ -64,9 +64,9 @@ func TestGatewayPublicSetupRejectsMisconfiguredProxyAndRedirect(t *testing.T) {
 		path, body string
 		status     int
 	}{
-		{"/tgreadyz", "not ready\n", 200}, {"/tgreadyz", "ready\n", 503},
-		{"/tgadmin/", "unrelated page", 200}, {"/tgapi/v1/workers/connect", "", 404},
-		{"/tgreadyz", "", 302},
+		{"/tgw/readyz", "not ready\n", 200}, {"/tgw/readyz", "ready\n", 503},
+		{"/tgw/admin/", "unrelated page", 200}, {"/tgw/api/v1/workers/connect", "", 404},
+		{"/tgw/readyz", "", 302},
 	} {
 		t.Run(tc.path+tc.body, func(t *testing.T) {
 			m := New(nil)
@@ -126,7 +126,7 @@ func TestFinishGatewayRegistersBotAsServiceAccountAndGuidesEnrollment(t *testing
 			t.Fatalf("unexpected operation %v", command)
 		}
 	}
-	for _, message := range []string{"https://gateway.example.com/tgadmin/", "enroll a worker", "worker ID", "curl -fsSL", "/tgsessions"} {
+	for _, message := range []string{"https://gateway.example.com/tgw/admin/", "enroll a worker", "worker ID", "curl -fsSL", "/tgsessions"} {
 		if !strings.Contains(output.String(), message) {
 			t.Fatalf("missing setup guidance: %s", message)
 		}

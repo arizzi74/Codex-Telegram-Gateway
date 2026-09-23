@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover, interactive-widget=resizes-content">
+  <meta name="color-scheme" content="dark light">
+  <meta name="theme-color" content="#111316">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="Codex">
+  <title>Codex · Gateway</title>
+  <link rel="manifest" href="/tgw/webui/manifest.webmanifest">
+  <link rel="icon" href="/tgw/webui/static/webui-icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="/tgw/webui/static/webui-icon-180.png">
+  <link rel="stylesheet" href="/tgw/webui/static/webui.css">
+  <script defer src="/tgw/webui/static/webui-format.js"></script>
+  <script defer src="/tgw/webui/static/webui-commands.js"></script>
+  <script defer src="/tgw/webui/static/webui-command-ui.js"></script>
+  <script defer src="/tgw/webui/static/webui-notifications.js"></script>
+  <script defer src="/tgw/webui/static/webui.js"></script>
+</head>
+<body>
+  <a class="skip-link" href="#prompt">Skip to prompt</a>
+  <main id="shell">
+    <aside id="sidebar" aria-label="Sessions">
+      <div class="sidebar-heading"><a class="brand" href="/tgw/webui/">›_ <strong>Codex</strong></a><button id="close-sessions" class="icon mobile-only" aria-label="Close sessions">×</button></div>
+      <div class="sidebar-tools"><label for="session-search" class="sr-only">Find a session</label><input id="session-search" type="search" placeholder="Find a session…" autocomplete="off"><button id="refresh-sessions" class="icon" aria-label="Refresh sessions">↻</button></div>
+      <p id="sessions-status" class="muted small" role="status">Loading sessions…</p>
+      <p id="activity-status" class="muted small" role="status" data-state="connecting">Connecting live updates…</p>
+      <nav id="session-list" aria-label="Available sessions"></nav>
+      <footer class="sidebar-footer"><div class="notifications-control"><button id="toggle-notifications" class="quiet" type="button" aria-describedby="notifications-status" aria-pressed="false" disabled>Notifications</button><p id="notifications-status" role="status">Sign in to manage notifications.</p></div><a href="/tgw/admin/">Operations console ↗</a></footer>
+    </aside>
+    <button id="sidebar-backdrop" aria-label="Close sessions" hidden></button>
+    <section id="workspace" aria-label="Conversation">
+      <header class="topbar">
+        <button id="show-sessions" class="icon mobile-only" aria-label="Choose a session" aria-expanded="false" aria-controls="sidebar">☰</button>
+        <div class="session-heading"><h1 id="session-title">Codex</h1><p id="session-location">Choose a session to continue</p></div>
+        <button id="show-commands" class="quiet" type="button" aria-label="Open command menu" aria-controls="command-panel" aria-expanded="false">/ Commands</button>
+        <div class="font-controls" role="group" aria-label="Conversation font size"><button id="font-decrease" class="quiet" type="button" aria-label="Decrease font size" title="Decrease conversation font size">−</button><output id="font-size" aria-live="polite">14px</output><button id="font-increase" class="quiet" type="button" aria-label="Increase font size" title="Increase conversation font size">+</button></div>
+        <button id="disconnect" class="quiet" hidden>Disconnect</button>
+      </header>
+      <div id="connection" data-state="connecting" role="status" aria-live="polite"><span id="connection-dot" aria-hidden="true"></span><span id="connection-text">Connecting to gateway…</span><button id="reconnect" class="quiet" hidden>Reconnect</button></div>
+      <div id="auth" class="welcome" hidden><span class="welcome-mark" aria-hidden="true">›_</span><h2>Your Codex, wherever you are.</h2><p>Sign in with your gateway passkey to open your sessions.</p><a class="primary button-link" href="/tgw/admin/?next=/tgw/webui/">Sign in with a passkey</a></div>
+      <div id="empty" class="welcome" hidden><span class="welcome-mark" aria-hidden="true">›_</span><h2>Pick up where you left off.</h2><p>Select a session. Your conversation and running work stay on its worker when you disconnect.</p><button id="empty-sessions" class="primary mobile-only">Choose a session</button></div>
+      <div id="transcript" tabindex="0" aria-label="Conversation history" hidden>
+        <button id="older" class="quiet older" hidden>Load 20 earlier messages</button>
+        <div id="messages"></div>
+        <div id="activity" class="muted" role="status" hidden><span class="activity-dot" aria-hidden="true">●</span><span id="activity-text">Working…</span></div>
+      </div>
+      <button id="jump-latest" class="quiet" hidden>↓ Latest messages</button>
+      <div id="notice" role="alert" hidden></div>
+      <section id="questions" aria-label="Questions and approvals" hidden></section>
+      <section id="command-panel" aria-label="Command menu" hidden>
+        <div class="command-heading"><strong id="command-title">Commands</strong><button id="close-commands" class="quiet" type="button" aria-label="Close command menu">×</button></div>
+        <label for="command-search" class="sr-only">Find a command</label><input id="command-search" type="search" placeholder="Find a command…" autocomplete="off" spellcheck="false" aria-controls="command-suggestions" aria-autocomplete="list">
+        <div id="command-suggestions" role="listbox" aria-label="Slash commands"></div>
+        <div id="command-content" aria-live="polite"></div>
+      </section>
+      <form id="composer" hidden>
+        <div id="steer-notice" role="status" aria-live="polite" hidden></div>
+        <div id="image-preview" hidden><img id="image-thumbnail" alt="Image attached to this prompt"><span id="image-description"></span><button id="remove-image" type="button" class="quiet" aria-label="Remove image">×</button></div>
+        <input id="image-file" type="file" accept="image/png,image/jpeg,image/gif" hidden>
+        <div class="input-row"><button id="attach-image" type="button" class="quiet" aria-label="Attach image" title="Paste an image or choose a PNG, JPEG or GIF">＋</button><span class="prompt-mark" aria-hidden="true">›</span><label for="prompt" class="sr-only">Message Codex</label><textarea id="prompt" rows="1" placeholder="Ask Codex to do anything" maxlength="200000" spellcheck="true"></textarea><div class="send-controls"><button id="stop" type="button" class="quiet" hidden>Stop</button><button id="send" type="submit" class="primary" disabled>Send ↑</button></div></div>
+        <div id="session-status" class="statusline">
+          <div class="model-controls"><span id="model" aria-label="Model" title="Use /model to change the model">Session model</span><span aria-hidden="true">·</span><span id="effort" aria-label="Reasoning effort" title="Use /reasoning to change reasoning effort">Session effort</span></div>
+          <span id="turn-state">Disconnected</span><span id="usage"></span><span id="rate-limits" aria-label="Codex usage limits"></span><span id="workspace-path"></span>
+          <span class="keyboard-hint"><kbd>Enter</kbd> send · <kbd>Shift Enter</kbd> newline</span>
+        </div>
+      </form>
+    </section>
+  </main>
+  <dialog id="delete-session-dialog" aria-labelledby="delete-session-title" aria-describedby="delete-session-description">
+    <h2 id="delete-session-title">Delete session?</h2>
+    <p id="delete-session-name"></p>
+    <p id="delete-session-description">This permanently removes the conversation and any child sessions it created. The working directory and all files on disk will be kept.</p>
+    <p id="delete-session-cwd" class="muted small"></p>
+    <p id="delete-session-message" role="status" hidden></p>
+    <div class="delete-session-actions"><button id="delete-session-cancel" type="button" class="quiet" autofocus>Cancel</button><button id="delete-session-confirm" type="button" class="delete-confirm">Delete session</button></div>
+  </dialog>
+</body>
+</html>

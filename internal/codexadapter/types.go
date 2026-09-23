@@ -36,6 +36,7 @@ type Event struct {
 	State     string
 	Text      string
 	Thread    *Thread
+	Settings  *CurrentThreadSettings
 	RequestID string
 	Unknown   bool
 	Err       error
@@ -81,6 +82,9 @@ type Choice struct{ Label, Description string }
 func newEvent(method string, params json.RawMessage) Event {
 	threadID, turnID, itemID := ids(params)
 	event := Event{Kind: eventKind(method), Method: method, Params: cloneRaw(params), Raw: cloneRaw(params), ThreadID: threadID, TurnID: turnID, ItemID: itemID, Unknown: !knownNotification(method)}
+	if method == "thread/settings/updated" {
+		event.Settings = decodeCurrentThreadSettings(params)
+	}
 	var value struct {
 		Status json.RawMessage `json:"status"`
 		State  json.RawMessage `json:"state"`
@@ -243,6 +247,8 @@ func eventKind(method string) string {
 		return "thread_started"
 	case "thread/status/changed":
 		return "thread_status_changed"
+	case "thread/settings/updated":
+		return "thread_settings_updated"
 	case "thread/closed":
 		return "thread_closed"
 	case "thread/deleted":
@@ -564,6 +570,7 @@ type ThreadOptions struct {
 	Sandbox        string
 	Personality    string
 	ServiceName    string
+	HistoryMode    string // Optional thread/start persistence contract; never applied on resume.
 }
 
 func (o ThreadOptions) fields() map[string]any {
@@ -595,7 +602,14 @@ func (c *Client) StartThread(ctx context.Context, options ThreadOptions) (Thread
 	var reply struct {
 		Thread json.RawMessage `json:"thread"`
 	}
-	if err := c.request(ctx, "thread/start", options.fields(), &reply, false); err != nil {
+	params := options.fields()
+	if options.HistoryMode != "" {
+		if options.HistoryMode != "legacy" && options.HistoryMode != "paginated" {
+			return Thread{}, errors.New("unsupported thread history mode")
+		}
+		params["historyMode"] = options.HistoryMode
+	}
+	if err := c.request(ctx, "thread/start", params, &reply, false); err != nil {
 		return Thread{}, err
 	}
 	thread, err := decodeThread(reply.Thread)

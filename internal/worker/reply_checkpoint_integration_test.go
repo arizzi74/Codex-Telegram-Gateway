@@ -69,7 +69,7 @@ func TestControlPlaneReplyWaitsForQuestionCheckpoint(t *testing.T) {
 		"message_id": 105, "from": map[string]any{"id": 7}, "chat": map[string]any{"id": 9}, "text": "Linux",
 		"reply_to_message": map[string]any{"message_id": messageID, "chat": map[string]any{"id": 9}},
 	}})
-	req, err := http.NewRequest(http.MethodPost, e.gw.server.URL+"/tgapi/v1/telegram/webhook", strings.NewReader(string(body)))
+	req, err := http.NewRequest(http.MethodPost, e.gw.server.URL+"/tgw/api/v1/telegram/webhook", strings.NewReader(string(body)))
 	if err != nil {
 		t.Fatal(err)
 	}

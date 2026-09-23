@@ -32,7 +32,10 @@ func TestRealSharedRuntimeSmoke(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	runtime, err := StartShared(ctx, Config{WorkingDirectory: t.TempDir(), ClientInfo: ClientInfo{Name: "telegramgw-real-smoke"}}, filepath.Join(t.TempDir(), "private", "app-server.sock"))
+	home := t.TempDir()
+	fixture := newSocketFixture(t)
+	config := Config{Command: os.Getenv("CODEX_REAL_BINARY"), WorkingDirectory: t.TempDir(), ClientInfo: ClientInfo{Name: "telegramgw-real-smoke"}, Env: append(os.Environ(), "CODEX_HOME="+home)}
+	runtime, err := StartShared(ctx, config, fixture.alias)
 	if err != nil {
 		t.Fatalf("start shared runtime: %v", err)
 	}
@@ -45,6 +48,15 @@ func TestRealSharedRuntimeSmoke(t *testing.T) {
 	}
 	if _, err := runtime.ListThreads(ctx, "", 1); err != nil {
 		t.Fatalf("stored thread list: %v", err)
+	}
+	endpoint := runtime.LocalSocket()
+	if err := runtime.Close(); err != nil {
+		t.Fatalf("close shared runtime: %v", err)
+	}
+	for _, path := range []string{runtime.SocketPath, endpoint} {
+		if _, err := os.Lstat(path); !os.IsNotExist(err) {
+			t.Fatalf("owned socket survived shutdown: %s: %v", path, err)
+		}
 	}
 }
 

@@ -31,7 +31,9 @@ var (
 
 // Store is safe for concurrent use. The caller owns its lifecycle.
 type Store struct {
-	pool *dbPool
+	pool     *dbPool
+	activity sessionActivityHub
+	webpush  webPushHub
 }
 
 // Open creates or opens a private SQLite database file and configures durable
@@ -47,6 +49,8 @@ func Open(ctx context.Context, path string) (*Store, error) {
 // Close releases database connections. It is safe to call on a nil Store.
 func (s *Store) Close() {
 	if s != nil && s.pool != nil {
+		s.closeSessionActivity()
+		s.closeWebPush()
 		s.pool.Close()
 	}
 }
@@ -321,6 +325,7 @@ func (s *Store) RevokeWorker(ctx context.Context, workerID uuid.UUID) error {
 	if ct.RowsAffected() == 0 {
 		return ErrWorkerNotFound
 	}
+	s.notifySessionActivity()
 	return nil
 }
 
@@ -341,6 +346,7 @@ func (s *Store) RotateWorkerToken(ctx context.Context, workerID uuid.UUID, token
 	if ct.RowsAffected() == 0 {
 		return ErrWorkerNotFound
 	}
+	s.notifySessionActivity()
 	return nil
 }
 

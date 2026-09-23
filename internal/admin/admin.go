@@ -18,6 +18,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/iaia/telegramgw/internal/auth"
 	"github.com/iaia/telegramgw/internal/config"
+	"github.com/iaia/telegramgw/internal/gateway"
 	"github.com/iaia/telegramgw/internal/httpguard"
 	"github.com/iaia/telegramgw/internal/registry"
 )
@@ -40,6 +41,7 @@ type Config struct {
 	AllowedUserCount int
 	AllowedChatCount int
 	Redactor         *auth.Redactor
+	WebUI            *gateway.Hub
 }
 
 type Server struct {
@@ -51,6 +53,7 @@ type Server struct {
 	redactor      *auth.Redactor
 	loginBegins   *httpguard.Limiter
 	loginFinishes *httpguard.Limiter
+	webui         *gateway.Hub
 }
 
 // New builds an isolated admin handler. Origin must be the configured public
@@ -73,6 +76,7 @@ func New(store *registry.Store, cfg Config) (*Server, error) {
 	s.loginFinishes = httpguard.NewLimiter(20, 240, time.Minute)
 	s.bot = newBotMonitor(cfg)
 	s.redactor = cfg.Redactor
+	s.webui = cfg.WebUI
 	s.routes()
 	return s, nil
 }
@@ -81,21 +85,22 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	s.mux.ServeHTTP(w, r)
 }
 func (s *Server) routes() {
-	s.mux.HandleFunc("/tgadmin/", s.ui)
-	s.mux.HandleFunc("/tgadmin/static/app.css", s.css)
-	s.mux.HandleFunc("/tgadmin/static/app.js", s.js)
-	s.mux.HandleFunc("/tgapi/v1/admin/bootstrap", s.bootstrapBegin)
-	s.mux.HandleFunc("/tgapi/v1/admin/passkeys/register/begin", s.registrationBegin)
-	s.mux.HandleFunc("/tgapi/v1/admin/passkeys/register/finish", s.registrationFinish)
-	s.mux.HandleFunc("/tgapi/v1/admin/login/begin", s.loginBegin)
-	s.mux.HandleFunc("/tgapi/v1/admin/login/finish", s.loginFinish)
-	s.mux.HandleFunc("/tgapi/v1/admin/session", s.session)
-	s.mux.HandleFunc("/tgapi/v1/admin/logout", s.logout)
-	s.mux.HandleFunc("/tgapi/v1/admin/passkeys", s.passkeys)
-	s.mux.HandleFunc("/tgapi/v1/admin/passkeys/", s.passkey)
-	s.mux.HandleFunc("/tgapi/v1/admin/dashboard", s.dashboard)
-	s.mux.HandleFunc("/tgapi/v1/admin/workers", s.workers)
-	s.mux.HandleFunc("/tgapi/v1/admin/workers/", s.worker)
+	s.webuiRoutes()
+	s.mux.HandleFunc("/tgw/admin/", s.ui)
+	s.mux.HandleFunc("/tgw/admin/static/app.css", s.css)
+	s.mux.HandleFunc("/tgw/admin/static/app.js", s.js)
+	s.mux.HandleFunc("/tgw/api/v1/admin/bootstrap", s.bootstrapBegin)
+	s.mux.HandleFunc("/tgw/api/v1/admin/passkeys/register/begin", s.registrationBegin)
+	s.mux.HandleFunc("/tgw/api/v1/admin/passkeys/register/finish", s.registrationFinish)
+	s.mux.HandleFunc("/tgw/api/v1/admin/login/begin", s.loginBegin)
+	s.mux.HandleFunc("/tgw/api/v1/admin/login/finish", s.loginFinish)
+	s.mux.HandleFunc("/tgw/api/v1/admin/session", s.session)
+	s.mux.HandleFunc("/tgw/api/v1/admin/logout", s.logout)
+	s.mux.HandleFunc("/tgw/api/v1/admin/passkeys", s.passkeys)
+	s.mux.HandleFunc("/tgw/api/v1/admin/passkeys/", s.passkey)
+	s.mux.HandleFunc("/tgw/api/v1/admin/dashboard", s.dashboard)
+	s.mux.HandleFunc("/tgw/api/v1/admin/workers", s.workers)
+	s.mux.HandleFunc("/tgw/api/v1/admin/workers/", s.worker)
 }
 func (s *Server) securityHeaders(w http.ResponseWriter) {
 	w.Header().Set("Content-Security-Policy", "default-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'; object-src 'none'; connect-src 'self'; script-src 'self'; style-src 'self'")
@@ -105,7 +110,7 @@ func (s *Server) securityHeaders(w http.ResponseWriter) {
 	w.Header().Set("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
 }
 func (s *Server) ui(w http.ResponseWriter, r *http.Request) {
-	if r.URL.Path != "/tgadmin/" {
+	if r.URL.Path != "/tgw/admin/" {
 		http.NotFound(w, r)
 		return
 	}
@@ -462,7 +467,7 @@ func (s *Server) worker(w http.ResponseWriter, r *http.Request) {
 	if _, ok := s.requireAuth(w, r, true); !ok {
 		return
 	}
-	parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/tgapi/v1/admin/workers/"), "/")
+	parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/tgw/api/v1/admin/workers/"), "/")
 	if len(parts) < 1 || parts[0] == "" {
 		bad(w)
 		return
@@ -540,7 +545,7 @@ func (s *Server) passkey(w http.ResponseWriter, r *http.Request) {
 	if _, ok := s.requireAuth(w, r, true); !ok {
 		return
 	}
-	id, err := base64.RawURLEncoding.DecodeString(strings.TrimPrefix(r.URL.Path, "/tgapi/v1/admin/passkeys/"))
+	id, err := base64.RawURLEncoding.DecodeString(strings.TrimPrefix(r.URL.Path, "/tgw/api/v1/admin/passkeys/"))
 	if err != nil || len(id) == 0 {
 		bad(w)
 		return
