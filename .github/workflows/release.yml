@@ -103,7 +103,11 @@ jobs:
           fi
       - name: Upload and verify draft before publishing
         run: |
-          gh release create "$RELEASE_TAG" --draft --verify-tag --title "$RELEASE_TAG" --generate-notes
+          if [[ -f "docs/releases/$RELEASE_TAG.md" ]]; then
+            gh release create "$RELEASE_TAG" --draft --verify-tag --title "$RELEASE_TAG" --notes-file "docs/releases/$RELEASE_TAG.md"
+          else
+            gh release create "$RELEASE_TAG" --draft --verify-tag --title "$RELEASE_TAG" --generate-notes
+          fi
           gh release upload "$RELEASE_TAG" dist/*.tar.gz dist/SHA256SUMS dist/SHA256SUMS.sigstore.json dist/codex-telegramgw-linux-* dist/codex-telegramgw-darwin-* dist/install.sh
           verify_dir=$(mktemp -d)
           trap 'rm -rf -- "$verify_dir"' EXIT

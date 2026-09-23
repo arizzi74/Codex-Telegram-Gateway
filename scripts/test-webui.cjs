@@ -1586,6 +1586,23 @@ turns['thread-d'] = [{ id: 'short-d', status: 'completed', startedAt: now - 500,
     await choose('c');
     await page.waitForFunction(() => document.querySelectorAll('#messages article').length === 20);
     const historyIDs = () => page.locator('#messages article').evaluateAll(items => items.map(item => item.dataset.itemId));
+    const historyDiagnostics = async expected => {
+      const diagnostics = await page.evaluate(() => {
+        const scroller = document.querySelector('#transcript');
+        const articles = [...document.querySelectorAll('#messages article')];
+        return { count: articles.length, first: articles[0]?.dataset.itemId, last: articles.at(-1)?.dataset.itemId,
+          scroll: { top: scroller.scrollTop, height: scroller.scrollHeight, visible: scroller.clientHeight },
+          older: { hidden: document.querySelector('#older').hidden, disabled: document.querySelector('#older').disabled },
+          connection: document.querySelector('#connection').dataset.state, questionsHidden: document.querySelector('#questions').hidden,
+          paging: window.testSent.filter(frame => frame.method === 'thread/items/list').slice(-8).map(frame => ({ session: frame.session, thread: frame.params.threadId, cursor: frame.params.cursor || null, limit: frame.params.limit })),
+          held: !!window.testSockets.at(-1)?.heldOlderItems, trace: window.testScrollTrace?.slice(-20) };
+      });
+      console.error('History pagination diagnostics:', JSON.stringify({ expected, ...diagnostics }));
+    };
+    const waitHistoryCount = async expected => {
+      try { await page.waitForFunction(count => document.querySelectorAll('#messages article').length === count, expected); }
+      catch (error) { await historyDiagnostics(expected); throw error; }
+    };
     assert.deepEqual(await historyIDs(), Array.from({ length: 20 }, (_, index) => 'history-' + (index + 65)), 'The initial page contains the latest 20 transcript items in chronological order');
     assert.ok(await page.evaluate(() => window.testSent.some(frame => frame.method === 'thread/items/list' && frame.params.threadId === 'thread-c' && frame.params.limit === 20 && frame.params.sortDirection === 'desc')), 'Transcript paging uses the native 20-item history API');
     assert.ok(await page.evaluate(() => window.testSent.filter(frame => frame.method === 'thread/turns/list' && frame.params.threadId === 'thread-c').every(frame => frame.params.itemsView === 'notLoaded' && frame.params.limit === 20)), 'Initial turn reads fetch bounded metadata only, without reloading historical turn bodies');
@@ -1617,13 +1634,25 @@ turns['thread-d'] = [{ id: 'short-d', status: 'completed', startedAt: now - 500,
     await page.getByRole('button', { name: 'Send answer', exact: true }).click();
     await page.waitForFunction(() => document.querySelector('#questions').hidden);
     assert.ok(await page.evaluate(() => window.testSent.some(frame => frame.method === 'gateway/answer' && frame.params.approvalId === 'approval-replacement-c' && frame.params.result.answers['question-c'].answers[0] === 'Recovered from the worker snapshot.')), 'The replacement question outside the visible history is answered through the worker');
+    assert.equal(await page.locator('#messages article').count(), 20, 'Closing the question panel does not automatically fetch older history');
     for (const count of [40, 60]) {
+      // Use a real reader gesture. Assigning scrollTop alone after the question
+      // panel collapses can race its layout-driven bottom-follow animation and
+      // never represents the synchronous wheel/key/touch intent in the UI.
+      // Hold the reply so the anchor is captured before a fast mock can prepend.
+      await page.evaluate(() => { window.testHoldOlderItems = true; });
+      await page.locator('#transcript').focus();
+      await page.keyboard.press('Home');
+      await page.waitForFunction(() => Boolean(window.testSockets.at(-1).heldOlderItems)).catch(async error => {
+        await historyDiagnostics(count); throw error;
+      });
+      await page.waitForFunction(() => document.querySelector('#transcript').scrollTop === 0);
       await page.locator('#transcript').evaluate(scroller => {
-        scroller.scrollTop = 0;
         const first = document.querySelector('#messages article');
         window.historyAnchor = { id: first.dataset.itemId, top: first.getBoundingClientRect().top };
       });
-      await page.waitForFunction(count => document.querySelectorAll('#messages article').length === count, count);
+      await page.evaluate(() => { const socket = window.testSockets.at(-1), reply = socket.heldOlderItems; window.testHoldOlderItems = false; socket.heldOlderItems = null; socket.emit({ id: reply.frame.id, result: reply.result }); });
+      await waitHistoryCount(count);
       assert.deepEqual(await historyIDs(), Array.from({ length: count }, (_, index) => 'history-' + (index + 85 - count)), 'Scrolling to the top adds exactly 20 older items without reordering or duplicates');
       const drift = await page.evaluate(() => document.querySelector('[data-item-id="' + window.historyAnchor.id + '"]').getBoundingClientRect().top - window.historyAnchor.top);
       assert.ok(Math.abs(drift) < 3, 'Prepending older history preserves the reading anchor instead of jumping: ' + drift);
