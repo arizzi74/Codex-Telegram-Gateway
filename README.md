@@ -11,6 +11,50 @@ private Codex app-server processes and support local terminal attachment.
 
 [![Desktop browser interface with a session list, conversation and live tool activity. Screenshot uses fictional demo data.](site/assets/screenshots/webui-desktop.png)](https://arizzi74.github.io/Codex-Telegram-Gateway/#screenshots)
 
+## Architecture
+
+One gateway connects Telegram and the web UI to sessions on multiple machines.
+Each worker opens an authenticated outbound WSS connection to the gateway;
+commands and events travel over that connection.
+
+```mermaid
+flowchart TB
+  telegram["Telegram"]
+  browser["Web UI in browser"]
+  gateway["Go gateway"]
+  registry[("SQLite registry")]
+
+  telegram -->|"HTTPS webhook"| gateway
+  gateway -->|"Telegram Bot API"| telegram
+  browser <-->|"HTTPS / WebSocket"| gateway
+  gateway <--> registry
+
+  subgraph machine_a["Worker A · Linux / macOS"]
+    direction TB
+    worker_a["Go worker"]
+    codex_a["Codex app-server"]
+    session_a1["Session 1"]
+    session_a2["Session 2"]
+    worker_a <--> codex_a
+    codex_a --- session_a1
+    codex_a --- session_a2
+  end
+
+  subgraph machine_b["Worker B · Linux / macOS"]
+    direction TB
+    worker_b["Go worker"]
+    codex_b["Codex app-server"]
+    session_b1["Session 1"]
+    session_b2["Session 2"]
+    worker_b <--> codex_b
+    codex_b --- session_b1
+    codex_b --- session_b2
+  end
+
+  gateway <-->|"Authenticated WSS; worker-initiated"| machine_a
+  gateway <-->|"Authenticated WSS; worker-initiated"| machine_b
+```
+
 ## Quick install
 
 Requires curl and `sha256sum` or `shasum`. Downloads are verified native Go
