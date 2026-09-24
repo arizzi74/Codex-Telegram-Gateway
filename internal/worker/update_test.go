@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -192,26 +193,94 @@ func TestUpdatePreparationRefusesInFlightTurnStart(t *testing.T) {
 	}
 }
 
-func TestUpdatePreparationRefusesPreviouslyTimedOutRuntimeRPC(t *testing.T) {
+func TestUpdatePreparationRecoversCancelledMetadataReadAndStillChecksTurns(t *testing.T) {
+	for _, active := range []bool{false, true} {
+		t.Run(fmt.Sprint("active=", active), func(t *testing.T) {
+			a, runtime, server, cleanup := testAgent(t)
+			defer cleanup()
+			client := mustClient(t, a, runtime)
+			server.SetResponseDelay("thread/read", 100*time.Millisecond)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			done := make(chan error, 1)
+			go func() { _, err := client.ReadThread(ctx, "native-timeout", false); done <- err }()
+			waitFor(t, func() bool { return hasCall(server.Calls(), "thread/read") })
+			cancel()
+			if err := <-done; !errors.Is(err, context.Canceled) {
+				t.Fatalf("cancelled read = %v", err)
+			}
+			// A later reply and successful read must not leave a permanent blocker.
+			if _, err := client.LoadedThreads(context.Background(), "", 1); err != nil {
+				t.Fatal(err)
+			}
+			server.SetResponseDelay("thread/read", 0)
+			if active {
+				server.SetThreads([]map[string]any{{"id": "outside-inventory", "status": "active", "turns": []map[string]any{{"id": "turn-live", "status": "inProgress"}}}}, []string{"outside-inventory"})
+			}
+			lease, err := a.prepareUpdate(context.Background(), time.Minute)
+			if err == nil {
+				defer a.abortUpdate(lease.Token)
+			}
+			if active && err == nil {
+				t.Fatal("metadata-read recovery bypassed live turn verification")
+			}
+			if !active && err != nil {
+				t.Fatalf("cancelled metadata read blocked idle update: %v", err)
+			}
+		})
+	}
+}
+
+func TestUpdatePreparationRetainsCancelledMutationAndPublishesSafeDiagnostics(t *testing.T) {
 	a, runtime, server, cleanup := testAgent(t)
 	defer cleanup()
 	client := mustClient(t, a, runtime)
-	server.SetResponseDelay("thread/read", 40*time.Millisecond)
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	server.SetResponseDelay("thread/name/set", 100*time.Millisecond)
+	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	if _, err := client.ReadThread(ctx, "native-timeout", true); !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("delayed RPC = %v", err)
+	done := make(chan error, 1)
+	go func() { done <- client.RenameThread(ctx, "private-thread-id", "private-session-name") }()
+	waitFor(t, func() bool { return hasCall(server.Calls(), "thread/name/set") })
+	cancel()
+	if err := <-done; !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled mutation = %v", err)
 	}
-	// A subsequent successful read proves the connection recovered, without
-	// proving whether timed-out server work can start in the future.
+	// Even a late success plus an unrelated healthy read cannot establish
+	// completion of arbitrary accepted work from the caller's point of view.
 	if _, err := client.LoadedThreads(context.Background(), "", 1); err != nil {
 		t.Fatal(err)
 	}
 	if lease, err := a.prepareUpdate(context.Background(), time.Minute); err == nil {
 		_ = a.abortUpdate(lease.Token)
-		t.Fatal("worker allowed restart after an unconfirmed runtime RPC")
-	} else if !strings.Contains(err.Error(), "unconfirmed RPCs") {
-		t.Fatalf("unexpected uncertainty refusal: %v", err)
+		t.Fatal("cancelled mutation allowed restart")
+	} else if !strings.Contains(err.Error(), "unconfirmed mutating requests") {
+		t.Fatalf("unexpected refusal: %v", err)
+	}
+	a.cfg.StateFile = filepath.Join(t.TempDir(), "diagnostics.db")
+	if err := a.writeStatus(true); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(a.cfg.StateFile + ".status.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var status Status
+	if err := json.Unmarshal(data, &status); err != nil {
+		t.Fatal(err)
+	}
+	if len(status.RPCUpdateSafety) != 1 {
+		t.Fatalf("missing runtime diagnostics: %+v", status.RPCUpdateSafety)
+	}
+	rpc := status.RPCUpdateSafety[0]
+	if rpc.RuntimeID != runtime.ID || rpc.Generation != runtime.Generation || rpc.UnconfirmedRequests != 1 || len(rpc.Blockers) != 1 || rpc.Blockers[0].Method != "thread/name/set" || rpc.Blockers[0].StartedAt.IsZero() {
+		t.Fatalf("incorrect RPC diagnostics: %+v", rpc)
+	}
+	metadata, err := json.Marshal(rpc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(metadata), "private-thread-id") || strings.Contains(string(metadata), "private-session-name") {
+		t.Fatalf("diagnostics leaked RPC parameters: %s", metadata)
 	}
 }
 

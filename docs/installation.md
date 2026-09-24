@@ -465,6 +465,24 @@ and unsupported asynchronous operations still block a restart; an idle snapshot
 alone cannot prove those operations finished. Deferred-update logs include the
 kind of protocol problem without recording prompts or RPC payloads.
 
+Canceled or timed-out known metadata reads do not leave a permanent runtime
+update blocker once their transport write has settled. A matching, explicit
+protocol rejection can settle a canceled mutation; a late success alone does
+not prove that accepted work has completed. Unknown or unconfirmed mutations
+remain protected, and an idle thread snapshot does not clear them.
+`codex-worker status` includes bounded RPC blocker
+diagnostics in `rpc_update_safety`, with sanitized method names, request start
+times, and pending/writing/unconfirmed phases, without request parameters or message
+contents. If `jq` is installed, show just this part with:
+
+```sh
+codex-worker status | jq '.rpc_update_safety'
+```
+
+This snapshot describes the RPC guard only. It is not an update reservation or
+proof that active turns, native clients, and durable work are idle; the live
+update preparation still checks those separately.
+
 The worker publishes a stable private attachment socket across restarts. Compatible
 Codex TUIs can use their native reconnect/resume handling at that address; the
 gateway never replays prompts or RPCs. If the terminal cannot reconnect, attach
@@ -479,20 +497,59 @@ Workers already stuck on `native CLI activity could not be verified` from an
 older version also need this one-time upgrade: the running process must load the
 new guard before it can recover automatically.
 
-On Linux, run these commands in a separate terminal after finishing worker tasks:
+The same applies to an older worker permanently reporting
+`runtime has pending or unconfirmed requests` after a canceled metadata read.
+Installing a newer binary alone cannot repair the state of the old running
+process. Finish all turns and pending approvals, exit attached CLIs, and use a
+separate terminal or SSH shell owned by the worker's user. Stopping the worker
+ends its app-server processes, so do not run this from a Codex turn hosted by
+that worker.
+
+On Linux, the following block stops scheduled and requested updaters before the
+manual update. It restores the worker even if the update fails, and restores the
+timer only if it was active before the procedure:
 
 ```sh
-systemctl --user stop codex-worker.service
-codex-telegramgw update worker
+(
+  set -eu
+  resume_worker_timer=0
+  if systemctl --user is-active --quiet codex-worker-update.timer; then
+    resume_worker_timer=1
+  fi
+  restore_worker() {
+    update_status=$?
+    trap - EXIT
+    systemctl --user start codex-worker.service || update_status=1
+    if [ "$resume_worker_timer" -eq 1 ]; then
+      systemctl --user start codex-worker-update.timer || update_status=1
+    fi
+    exit "$update_status"
+  }
+  trap restore_worker EXIT
+  trap 'exit 129' HUP
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  systemctl --user stop codex-worker-update.timer codex-worker-update.service \
+    'codex-worker-request-update-*.service' codex-worker.service
+  # Catch an updater the old worker recreated while the stop jobs ran.
+  systemctl --user stop 'codex-worker-request-update-*.service'
+  "$HOME/.local/bin/codex-telegramgw" update worker --version v0.5.59
+)
 ```
 
-The updater starts the worker after installing the new version. On macOS, stop
-it with `launchctl bootout "gui/$(id -u)/com.iaia.codex-worker"` before running
-the same update command. Stopping the worker ends its current app-server
-processes, so do not run this from a Codex turn hosted by that worker.
-If a download fails after you manually stop the worker, start it again with
-`systemctl --user start codex-worker.service` on Linux, or load its LaunchAgent
-again on macOS, before retrying the update.
+The updater starts the new worker and checks readiness. The command also performs
+normal daily Codex runtime maintenance; `--version` selects the gateway-project
+release, not the Codex runtime version. There is no force-update flag.
+Keep the durable update request files: after restart, the worker resumes queued
+requests and reports that it is up to date once it confirms the installed release.
+Do not run another manual updater concurrently. If the command fails, inspect its
+error and the worker journal before retrying; the cleanup starts the installed
+worker but does not hide an update failure or guarantee that readiness succeeded.
+
+On macOS, stop the worker with
+`launchctl bootout "gui/$(id -u)/com.iaia.codex-worker"` before running the worker
+update command. If a download fails after the manual stop, load its LaunchAgent
+again before retrying. Then attach again with `codex-worker attach SESSION`.
 
 ## Automatic updates
 

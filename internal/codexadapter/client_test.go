@@ -275,7 +275,7 @@ func TestTimeoutDoesNotPoisonLaterRequests(t *testing.T) {
 	if err := <-done; !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("timeout error = %v", err)
 	}
-	// A late answer must be quarantined as an unmatched response, while later
+	// A late metadata answer is reconciled by its retained ID, while later
 	// work still receives its own response.
 	fake.respond(t, timedOut, map[string]any{"thread": map[string]any{"id": "thr_1"}})
 	nextDone := make(chan error, 1)
@@ -287,11 +287,8 @@ func TestTimeoutDoesNotPoisonLaterRequests(t *testing.T) {
 	}
 	select {
 	case event := <-client.Events():
-		if event.Method != "adapter/unmatchedResponse" {
-			t.Fatalf("late reply event = %#v", event)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("missing unmatched late response event")
+		t.Fatalf("late read reply leaked an unmatched event: %#v", event)
+	default:
 	}
 }
 

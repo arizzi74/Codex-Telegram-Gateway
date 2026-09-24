@@ -480,6 +480,18 @@ func workerPrepareFailure(output []byte) string {
 		return "worker update deferred: the installed worker cannot verify a runtime previously used by a native CLI"
 	case "worker update: runtime has pending or unconfirmed RPCs; finish work and stop the worker service before updating":
 		return "worker update deferred: runtime has pending or unconfirmed requests"
+	case "worker update: runtime RPC transport is closed":
+		return "worker update deferred: runtime RPC transport is closed"
+	case "worker update: runtime RPC client is not initialized":
+		return "worker update deferred: runtime RPC client is still initializing"
+	case "worker update: runtime RPC tracking capacity was exceeded":
+		return "worker update deferred: runtime RPC tracking capacity was exceeded; inspect worker status before a controlled restart"
+	case "worker update: runtime has unconfirmed mutating requests":
+		return "worker update deferred: runtime has unconfirmed mutating requests; inspect worker status before a controlled restart"
+	case "worker update: runtime approvals or input are pending":
+		return "worker update deferred: runtime approvals or input are pending"
+	case "worker update: runtime RPC requests are still in flight":
+		return "worker update deferred: runtime RPC requests are still in flight"
 	case "worker update: native CLI requests are still in flight":
 		return "worker update deferred: native CLI requests are still in flight"
 	case "worker update: native CLI approvals or input are pending":

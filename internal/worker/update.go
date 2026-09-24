@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/iaia/telegramgw/internal/codexadapter"
 	"github.com/iaia/telegramgw/internal/config"
 	"github.com/iaia/telegramgw/internal/protocol"
 	"github.com/iaia/telegramgw/internal/workerdb"
@@ -369,6 +370,28 @@ func (m *RuntimeManager) verifyUpdateIdle(ctx context.Context) error {
 	return m.verifyUpdateIdleWithQueues(ctx, nil)
 }
 
+// Return fixed diagnostics only. The private status snapshot carries bounded
+// request metadata; request parameters and server error messages must never be
+// forwarded through the updater's error channel.
+func runtimeRPCUpdateError(status codexadapter.UpdateSafetyStatus) error {
+	switch {
+	case status.Closed:
+		return errors.New("worker update: runtime RPC transport is closed")
+	case !status.Ready:
+		return errors.New("worker update: runtime RPC client is not initialized")
+	case status.Overflow:
+		return errors.New("worker update: runtime RPC tracking capacity was exceeded")
+	case status.UnconfirmedRequests > 0:
+		return errors.New("worker update: runtime has unconfirmed mutating requests")
+	case status.PendingApprovals > 0:
+		return errors.New("worker update: runtime approvals or input are pending")
+	case status.PendingRequests > 0:
+		return errors.New("worker update: runtime RPC requests are still in flight")
+	default:
+		return nil
+	}
+}
+
 func (m *RuntimeManager) verifyUpdateIdleWithQueues(ctx context.Context, nativeQueues map[string][]string) error {
 	m.mu.RLock()
 	runtimes := make([]*managedRuntime, 0, len(m.runtimes))
@@ -380,8 +403,8 @@ func (m *RuntimeManager) verifyUpdateIdleWithQueues(ctx context.Context, nativeQ
 		if runtime.client == nil {
 			continue
 		}
-		if !runtime.client.UpdateQuiescent() {
-			return errors.New("worker update: runtime has pending or unconfirmed RPCs; finish work and stop the worker service before updating")
+		if err := runtimeRPCUpdateError(runtime.client.UpdateSafety()); err != nil {
+			return err
 		}
 		queues := nativeQueues[runtime.runtime.ID]
 		if len(queues) > discoveryLimit {
@@ -431,8 +454,8 @@ func (m *RuntimeManager) verifyUpdateIdleWithQueues(ctx context.Context, nativeQ
 			seen[page.NextCursor] = true
 			cursor = page.NextCursor
 		}
-		if !runtime.client.UpdateQuiescent() {
-			return errors.New("worker update: runtime RPC state changed while checking idle")
+		if err := runtimeRPCUpdateError(runtime.client.UpdateSafety()); err != nil {
+			return err
 		}
 	}
 	return nil

@@ -119,7 +119,7 @@ type Client struct {
 	done      chan struct{}
 
 	mu                     sync.Mutex
-	pending                map[int64]chan rpcResponse
+	pending                map[int64]*pendingRPC
 	active                 map[string]string
 	cause                  error
 	ready                  bool
@@ -128,7 +128,12 @@ type Client struct {
 	serverRequests         map[string]Request
 	pid                    int
 	localSocket            string
-	updateUncertain        bool
+	updateUnconfirmed      map[int64]*pendingRPC
+	updateWriting          map[int64]*pendingRPC
+	updateReadTombstones   map[int64]struct{}
+	updateReadIDs          [maxUpdateReadTombstones]int64
+	updateReadNext         int
+	updateOverflow         bool
 	stateDBListUnsupported bool
 	nextID                 atomic.Int64
 	stop                   sync.Once
@@ -137,6 +142,7 @@ type Client struct {
 type outbound struct {
 	v   any
 	err chan error
+	rpc *pendingRPC
 }
 
 type rpcRequest struct {
@@ -232,7 +238,8 @@ func New(t Transport, config Config) *Client {
 		config: config, t: t,
 		writeCh: make(chan outbound), eventIn: make(chan Event), events: make(chan Event, config.EventBuffer),
 		requestIn: make(chan Request), reqs: make(chan Request, config.RequestBuffer), done: make(chan struct{}),
-		pending: make(map[int64]chan rpcResponse), active: make(map[string]string), methods: defaultMethods(), serverRequests: make(map[string]Request),
+		pending: make(map[int64]*pendingRPC), active: make(map[string]string), methods: defaultMethods(), serverRequests: make(map[string]Request),
+		updateUnconfirmed: make(map[int64]*pendingRPC), updateWriting: make(map[int64]*pendingRPC), updateReadTombstones: make(map[int64]struct{}),
 	}
 	go c.writer()
 	go c.eventDispatcher()
@@ -313,15 +320,12 @@ func (c *Client) LocalSocket() string {
 	return c.localSocket
 }
 
-// UpdateQuiescent reports whether the transport has no unanswered RPCs or
-// approval requests and every submitted request had a confirmed response.
-// A timeout cannot cancel work already queued inside app-server. Keep that
-// uncertainty for this client's lifetime even if a later read reports idle;
-// only replacing the owned runtime safely resets it.
+// UpdateQuiescent checks RPC delivery and approvals. The worker must still
+// fence admission and independently verify active turns and queued work.
 func (c *Client) UpdateQuiescent() bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return c.ready && c.cause == nil && !c.updateUncertain && len(c.pending) == 0 && len(c.serverRequests) == 0
+	return c.ready && c.cause == nil && !c.updateOverflow && len(c.updateUnconfirmed) == 0 && len(c.updateWriting) == 0 && len(c.pending) == 0 && len(c.serverRequests) == 0
 }
 
 // ExecutableVersion returns the installed CLI's version text. It is separate
@@ -349,11 +353,16 @@ func (c *Client) writer() {
 				data = append(data, '\n')
 				_, err = c.t.In.Write(data)
 			}
+			if err != nil {
+				c.fail(fmt.Errorf("write codex app-server message: %w", err))
+			}
+			if item.rpc != nil {
+				c.finishRPCWrite(item.rpc)
+			}
 			if item.err != nil {
 				item.err <- err
 			}
 			if err != nil {
-				c.fail(fmt.Errorf("write codex app-server message: %w", err))
 				return
 			}
 		}
@@ -473,19 +482,19 @@ func (c *Client) handleLine(line []byte) {
 		c.emitEvent(Event{Method: "adapter/malformed", Raw: json.RawMessage(line), Unknown: true, Err: errors.New("message has neither method nor id")})
 		return
 	}
+	valid, rejection := validateRPCResponse(line)
+	if !valid {
+		c.emitEvent(Event{Method: "adapter/malformed", Raw: json.RawMessage(line), Unknown: true, Err: errors.New("invalid or ambiguous RPC response")})
+		return
+	}
 	var id int64
 	if err := json.Unmarshal(message.ID, &id); err != nil {
 		c.emitEvent(Event{Method: "adapter/unmatchedResponse", Raw: json.RawMessage(line), Unknown: true, Err: fmt.Errorf("non-numeric response id: %w", err)})
 		return
 	}
-	c.mu.Lock()
-	pending := c.pending[id]
-	c.mu.Unlock()
-	if pending == nil {
+	if !c.acceptRPCResponse(id, rpcResponse{ID: message.ID, Result: message.Result, Error: message.Error}, rejection) {
 		c.emitEvent(Event{Method: "adapter/unmatchedResponse", Raw: json.RawMessage(line), Unknown: true})
-		return
 	}
-	pending <- rpcResponse{ID: message.ID, Result: message.Result, Error: message.Error}
 }
 
 func (c *Client) fail(err error) {
@@ -495,13 +504,15 @@ func (c *Client) fail(err error) {
 	c.stop.Do(func() {
 		c.mu.Lock()
 		c.cause = err
-		pending := c.pending
-		c.pending = make(map[int64]chan rpcResponse)
+		for _, pending := range c.pending {
+			if pending.reply == nil {
+				pending.responseSeen = true
+				pending.reply = &rpcResponse{Error: &RPCError{Code: -32000, Message: err.Error()}}
+				close(pending.done)
+			}
+		}
 		c.mu.Unlock()
 		close(c.done)
-		for _, response := range pending {
-			response <- rpcResponse{Error: &RPCError{Code: -32000, Message: err.Error()}}
-		}
 		if c.t.Close != nil {
 			_ = c.t.Close()
 		}
@@ -515,22 +526,32 @@ func (c *Client) Close() error {
 }
 
 func (c *Client) send(ctx context.Context, value any) error {
+	_, err := c.sendRPC(ctx, value, nil)
+	return err
+}
+
+// Admission means the writer may have delivered the message even if its
+// acknowledgement or the eventual app-server response loses a cancellation race.
+func (c *Client) sendRPC(ctx context.Context, value any, rpc *pendingRPC) (bool, error) {
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
 	ack := make(chan error, 1)
-	item := outbound{v: value, err: ack}
+	item := outbound{v: value, err: ack, rpc: rpc}
 	select {
 	case <-c.done:
-		return c.closedErr()
+		return false, c.closedErr()
 	case <-ctx.Done():
-		return ctx.Err()
+		return false, ctx.Err()
 	case c.writeCh <- item:
 	}
 	select {
 	case <-c.done:
-		return c.closedErr()
+		return true, c.closedErr()
 	case <-ctx.Done():
-		return ctx.Err()
+		return true, ctx.Err()
 	case err := <-ack:
-		return err
+		return true, err
 	}
 }
 
@@ -542,6 +563,9 @@ func (c *Client) closedErr() error {
 }
 
 func (c *Client) request(ctx context.Context, method string, params any, result any, allowUninitialized bool) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if !allowUninitialized {
 		c.mu.Lock()
 		ready := c.ready
@@ -553,27 +577,28 @@ func (c *Client) request(ctx context.Context, method string, params any, result 
 	ctx, cancel := c.withTimeout(ctx)
 	defer cancel()
 	id := c.nextID.Add(1)
-	response := make(chan rpcResponse, 1)
+	pending := &pendingRPC{id: id, method: updateMethodName(method), readOnly: updateReadOnlyMethod(method), startedAt: time.Now().UTC(), done: make(chan struct{})}
 	c.mu.Lock()
 	if c.cause != nil {
 		err := c.cause
 		c.mu.Unlock()
 		return err
 	}
-	c.pending[id] = response
-	c.mu.Unlock()
-	confirmed := false
-	defer func() {
-		c.mu.Lock()
-		if !confirmed {
-			// A cancelled send may already have reached the writer. Withholding
-			// automatic restart is safer than assuming the operation was absent.
-			c.updateUncertain = true
-		}
-		delete(c.pending, id)
+	if len(c.pending) >= maxPendingRPCs {
 		c.mu.Unlock()
-	}()
-	if err := c.send(ctx, rpcRequest{Method: method, ID: id, Params: params}); err != nil {
+		return errors.New("codex app-server request limit reached")
+	}
+	if err := ctx.Err(); err != nil {
+		c.mu.Unlock()
+		return err
+	}
+	c.pending[id] = pending
+	c.mu.Unlock()
+	admitted, consumed := false, false
+	defer func() { c.finishRPCCall(pending, admitted, consumed) }()
+	var err error
+	admitted, err = c.sendRPC(ctx, rpcRequest{Method: method, ID: id, Params: params}, pending)
+	if err != nil {
 		return err
 	}
 	select {
@@ -581,8 +606,11 @@ func (c *Client) request(ctx context.Context, method string, params any, result 
 		return c.closedErr()
 	case <-ctx.Done():
 		return ctx.Err()
-	case reply := <-response:
-		confirmed = true
+	case <-pending.done:
+		c.mu.Lock()
+		reply := *pending.reply
+		c.mu.Unlock()
+		consumed = true
 		if reply.Error != nil {
 			if reply.Error.Code == -32601 {
 				c.mu.Lock()
@@ -594,6 +622,7 @@ func (c *Client) request(ctx context.Context, method string, params any, result 
 		}
 		if result != nil && len(reply.Result) != 0 {
 			if err := json.Unmarshal(reply.Result, result); err != nil {
+				consumed = false
 				return fmt.Errorf("decode %s response: %w", method, err)
 			}
 		}

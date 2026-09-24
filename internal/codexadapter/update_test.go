@@ -29,7 +29,7 @@ func TestUpdateQuiescenceTracksPendingAndConfirmedRPCError(t *testing.T) {
 	}
 }
 
-func TestUpdateQuiescenceKeepsTimedOutRPCUncertainAfterLateResponse(t *testing.T) {
+func TestUpdateQuiescenceRecoversTimedOutReadAndReconcilesLateResponse(t *testing.T) {
 	client, fake := newFake(t)
 	initialize(t, client, fake)
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
@@ -40,8 +40,8 @@ func TestUpdateQuiescenceKeepsTimedOutRPCUncertainAfterLateResponse(t *testing.T
 	if err := <-done; !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("timeout = %v", err)
 	}
-	if client.UpdateQuiescent() {
-		t.Fatal("timed-out RPC permitted update")
+	if !client.UpdateQuiescent() {
+		t.Fatal("abandoned metadata read permanently blocked update")
 	}
 	fake.respond(t, request, map[string]any{"thread": map[string]any{"id": "thread-timeout", "status": "idle"}})
 	go func() { _, err := client.ReadThread(context.Background(), "thread-next", false); done <- err }()
@@ -50,20 +50,21 @@ func TestUpdateQuiescenceKeepsTimedOutRPCUncertainAfterLateResponse(t *testing.T
 	if err := <-done; err != nil {
 		t.Fatal(err)
 	}
-	if client.UpdateQuiescent() {
-		t.Fatal("later idle read erased uncertainty about a previously submitted RPC")
+	if !client.UpdateQuiescent() {
+		t.Fatal("late metadata read response blocked update")
 	}
 }
 
-func TestUpdateQuiescenceTreatsCancelledSendConservatively(t *testing.T) {
+func TestUpdateQuiescenceRejectsAlreadyCancelledCallBeforeRegistration(t *testing.T) {
 	client, fake := newFake(t)
 	initialize(t, client, fake)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
+	before := client.nextID.Load()
 	if _, err := client.ReadThread(ctx, "thread-cancelled", false); !errors.Is(err, context.Canceled) {
 		t.Fatalf("cancelled call = %v", err)
 	}
-	if client.UpdateQuiescent() {
-		t.Fatal("cancelled send allowed automatic restart without delivery confirmation")
+	if !client.UpdateQuiescent() || client.nextID.Load() != before {
+		t.Fatal("already cancelled call was registered or blocked update")
 	}
 }
