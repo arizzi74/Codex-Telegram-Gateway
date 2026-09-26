@@ -328,9 +328,50 @@ turns['thread-d'] = [{ id: 'short-d', status: 'completed', startedAt: now - 500,
     const url = new URL(response.url());
     return url.pathname === '/tgw/api/v1/webui/commands' && url.searchParams.get('command') === 'tgstatus' && response.request().method() === 'GET';
   });
+  const settingsLayout = async label => {
+    const geometry = await page.evaluate(() => {
+      const box = selector => { const rect = document.querySelector(selector).getBoundingClientRect(); return { top: rect.top, bottom: rect.bottom, left: rect.left, right: rect.right, height: rect.height }; };
+      return { sidebar: box('#sidebar'), list: box('#session-list'), footer: box('.sidebar-footer') };
+    });
+    assert.ok(geometry.footer.height <= 64, label + ' keeps the Settings footer compact');
+    assert.ok(geometry.list.height > geometry.sidebar.height * .6, label + ' reserves most sidebar height for sessions');
+    assert.ok(geometry.footer.top - geometry.list.bottom >= -1 && geometry.footer.top - geometry.list.bottom <= 20, label + ' fills the available space above Settings with the session list');
+  };
+  const settingsFits = async label => {
+    const fits = await page.locator('#settings-dialog').evaluate(element => {
+      const rect = element.getBoundingClientRect();
+      return rect.left >= 0 && rect.top >= 0 && rect.right <= innerWidth && rect.bottom <= innerHeight && element.scrollWidth <= element.clientWidth;
+    });
+    assert.equal(fits, true, label + ' Settings fits the viewport without horizontal scrolling');
+  };
   try {
     await page.goto('https://webui.test/tgw/webui/');
     await page.waitForSelector('[data-session-id="a"]');
+    assert.equal((await page.locator('.sidebar-footer').textContent()).trim(), 'Settings', 'Only Settings remains in the sidebar footer');
+    assert.equal(await page.locator('#open-settings').getAttribute('aria-haspopup'), 'dialog');
+    assert.equal(await page.locator('#settings-dialog').isHidden(), true);
+    await settingsLayout('Desktop');
+    await page.locator('#open-settings').click();
+    assert.equal(await page.getByRole('dialog', { name: 'Settings', exact: true }).isVisible(), true);
+    await settingsFits('Desktop');
+    assert.equal(await page.locator('#close-settings').evaluate(element => document.activeElement === element), true, 'Settings initially focuses its close button');
+    assert.equal(await page.locator('#settings-dialog #draft-recovery-enabled').isVisible(), true);
+    assert.equal(await page.locator('#settings-dialog #toggle-notifications').isVisible(), true);
+    assert.equal(await page.locator('#settings-dialog #notifications-status').isVisible(), true);
+    assert.equal(await page.locator('#settings-dialog').getByRole('link', { name: 'Open operations console ↗', exact: true }).getAttribute('href'), '/tgw/admin/');
+    await page.keyboard.press('Tab');
+    assert.equal(await page.locator('#draft-recovery-enabled').evaluate(element => document.activeElement === element), true, 'Settings preferences are reachable by keyboard');
+    await page.keyboard.press('Shift+Tab');
+    assert.equal(await page.locator('#close-settings').evaluate(element => document.activeElement === element), true);
+    await page.locator('#session-search').focus();
+    assert.equal(await page.locator('#settings-dialog').evaluate(element => element.contains(document.activeElement)), true, 'Background controls cannot take focus while Settings is modal');
+    await page.keyboard.press('Escape');
+    await page.waitForSelector('#settings-dialog', { state: 'hidden' });
+    assert.equal(await page.locator('#open-settings').evaluate(element => document.activeElement === element), true, 'Escape returns focus to desktop Settings');
+    await page.locator('#open-settings').click();
+    await page.mouse.click(8, 8);
+    await page.waitForSelector('#settings-dialog', { state: 'hidden' });
+    assert.equal(await page.locator('#open-settings').evaluate(element => document.activeElement === element), true, 'Backdrop dismissal returns focus to desktop Settings');
     if (process.env.WEBUI_SCREENSHOTS) {
       fs.mkdirSync(process.env.WEBUI_SCREENSHOTS, { recursive: true });
       await page.screenshot({ path: path.join(process.env.WEBUI_SCREENSHOTS, 'webui-connect.png') });
@@ -699,7 +740,7 @@ turns['thread-d'] = [{ id: 'short-d', status: 'completed', startedAt: now - 500,
     });
     assert.ok(footerItems.some(item => item.label === 'model-controls'), 'Model controls share the status bar');
     assert.equal(await page.locator('.sidebar-footer').getByText('Powered by Codex', { exact: true }).count(), 0, 'The sidebar omits the redundant Powered by Codex caption');
-    assert.equal(await page.locator('.sidebar-footer').getByRole('link', { name: /Operations console/ }).count(), 1, 'The sidebar keeps the operations console link');
+    assert.equal(await page.locator('.sidebar-footer').getByRole('button', { name: 'Settings', exact: true }).count(), 1, 'The sidebar exposes its compact Settings entry');
     for (const item of footerItems) assert.ok(Math.abs(item.middle - footerItems[0].middle) < 2, `Wide desktop status item ${item.label} shares one row`);
     assert.ok(footerItems.find(item => item.label === 'usage').font >= 12, 'Desktop metrics use readable text rather than tiny metadata');
     assert.equal(await page.locator('#usage').textContent(), '9% context', 'Desktop status retains the context percentage without displaying a token count');
@@ -1483,6 +1524,21 @@ turns['thread-d'] = [{ id: 'short-d', status: 'completed', startedAt: now - 500,
     for (const width of [390, 320]) {
       await page.setViewportSize({ width, height: 844 });
       await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+      await page.locator('#show-sessions').click();
+      await settingsLayout(width + 'px mobile');
+      await page.locator('#session-search').focus();
+      await page.locator('#open-settings').click();
+      await settingsFits(width + 'px mobile');
+      assert.equal(await page.locator('#show-sessions').getAttribute('aria-expanded'), 'false', 'Opening Settings closes the mobile session drawer');
+      assert.equal(await page.locator('#sidebar-backdrop').isHidden(), true);
+      assert.equal(await page.evaluate(() => document.activeElement?.matches('input,textarea,[contenteditable=true]') || false), false, 'Opening Settings dismisses the session search keyboard');
+      assert.equal(await page.locator('#draft-recovery-enabled').isVisible(), true);
+      assert.equal(await page.locator('#toggle-notifications').isVisible(), true);
+      await page.locator('#close-settings').click();
+      await page.waitForSelector('#settings-dialog', { state: 'hidden' });
+      await page.waitForFunction(() => document.activeElement === document.querySelector('#show-sessions'));
+      assert.equal(await page.locator('#show-sessions').evaluate(element => document.activeElement === element), true, 'Closing mobile Settings returns focus to the session menu button');
+      assert.equal(await page.locator('#show-sessions').getAttribute('aria-expanded'), 'false');
       assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true, 'Mobile must not overflow at ' + width);
       assert.equal(await page.locator('#model').isVisible(), true);
       assert.equal(await page.locator('#effort').isVisible(), true);
@@ -2011,7 +2067,7 @@ turns['thread-d'] = [{ id: 'short-d', status: 'completed', startedAt: now - 500,
     assert.equal(await page.evaluate(() => Object.keys(sessionStorage).length), 0);
     assert.ok(paths.every(value => value.startsWith('/tgw/')), 'All gateway routes use /tgw');
     assert.deepEqual(errors, []);
-    console.log('Web UI browser checks passed: slash autocomplete and CLI choices with keyboard/touch/current markers, successful setting auto-close without mobile autofocus, errors/read-only results remain visible, typed worker and gateway commands without a session, permission confirmation/stale-button isolation, unavailable commands never become prompts, native and global v2 model/effort changes with inventory/resume/command-ack isolation, read-only model status, clipboard images/text+image/image-only/per-session drafts/navigation races/no replay, tool colors in both themes, safe formatting/nonempty reasoning/native sub-agent activity, chronology/pagination, independent global activity events/sequence gaps/resync/heartbeat and handshake recovery/inventory races, static Working label plus matching green activity pulse/reduced motion, worker heading background/sidebar footer, desktop font controls/persistence/mobile isolation, full-width responsive status, live quotas/reset tooltips/no polling/session isolation/unavailable fallback, responsive layout and bottom following through late layout changes, keyboard resize/pan/page scroll/delayed focus/dismissal/mobile menu without autofocus, native inner scrolling, blocking/async questions, rejected-answer recovery, approvals, live external prompts, session isolation, disconnect/reconnect, prompt and command drafts/no replay, scoped connection/history/retry error recovery without hiding uncertain-send or runtime warnings, ACK-only ephemeral queued-steer feedback/timer/switch/end/rejection/isolation, mobile status grid alignment/empty rows, failed resume, sidebar deletion confirmation/desktop/mobile/cancel/CSRF/scope/delayed result/failure/lost acknowledgement/unknown outcome/no POST replay, idle heartbeat, auth expiry.');
+    console.log('Web UI browser checks passed: slash autocomplete and CLI choices with keyboard/touch/current markers, successful setting auto-close without mobile autofocus, errors/read-only results remain visible, typed worker and gateway commands without a session, permission confirmation/stale-button isolation, unavailable commands never become prompts, native and global v2 model/effort changes with inventory/resume/command-ack isolation, read-only model status, clipboard images/text+image/image-only/per-session drafts/navigation races/no replay, tool colors in both themes, safe formatting/nonempty reasoning/native sub-agent activity, chronology/pagination, independent global activity events/sequence gaps/resync/heartbeat and handshake recovery/inventory races, static Working label plus matching green activity pulse/reduced motion, worker heading background/compact Settings footer/dialog/desktop/mobile/keyboard/focus, desktop font controls/persistence/mobile isolation, full-width responsive status, live quotas/reset tooltips/no polling/session isolation/unavailable fallback, responsive layout and bottom following through late layout changes, keyboard resize/pan/page scroll/delayed focus/dismissal/mobile menu without autofocus, native inner scrolling, blocking/async questions, rejected-answer recovery, approvals, live external prompts, session isolation, disconnect/reconnect, prompt and command drafts/no replay, scoped connection/history/retry error recovery without hiding uncertain-send or runtime warnings, ACK-only ephemeral queued-steer feedback/timer/switch/end/rejection/isolation, mobile status grid alignment/empty rows, failed resume, sidebar deletion confirmation/desktop/mobile/cancel/CSRF/scope/delayed result/failure/lost acknowledgement/unknown outcome/no POST replay, idle heartbeat, auth expiry.');
   } catch (error) {
     if (process.env.WEBUI_SCREENSHOTS) {
       fs.mkdirSync(process.env.WEBUI_SCREENSHOTS, { recursive: true });

@@ -109,6 +109,14 @@
     const active = document.activeElement;
     if (active?.matches('input, textarea, select, [contenteditable="true"]')) active.blur();
   }
+  function openSettings() {
+    blurEditable();
+    showSessions(false);
+    const dialog = $('settings-dialog');
+    if (!dialog.open) dialog.showModal();
+    $('open-settings').setAttribute('aria-expanded', 'true');
+    $('close-settings').focus({ preventScroll: true });
+  }
   function sessionActivity(session) {
     const current = { ...session, ...activity.sessions.get(session.session_id) };
     const selected = state.selected?.session_id === session.session_id && state.connected && !state.loading;
@@ -418,6 +426,7 @@
     state.stopped = true;
     closeSocket();
     state.authenticated = false;
+    if ($('settings-dialog').open) $('settings-dialog').close();
     notificationUI?.setAuthenticated(false);
     closeActivity(); activity.sessions.clear(); activity.attempts = 0; activityStatus('disconnected', 'Sign in for live updates');
     sessionSettings.clear(); activitySettingsRevisions.clear();
@@ -1463,6 +1472,19 @@
   $('empty-sessions').addEventListener('click', () => showSessions(true));
   $('close-sessions').addEventListener('click', () => showSessions(false));
   $('sidebar-backdrop').addEventListener('click', () => showSessions(false));
+  $('open-settings').addEventListener('click', openSettings);
+  $('close-settings').addEventListener('click', () => $('settings-dialog').close());
+  $('settings-dialog').addEventListener('close', () => {
+    $('open-settings').setAttribute('aria-expanded', 'false');
+    const target = !state.authenticated ? $('auth-login') : matchMedia('(max-width:650px)').matches ? $('show-sessions') : $('open-settings');
+    if (target.getClientRects().length) target.focus({ preventScroll: true });
+  });
+  $('settings-dialog').addEventListener('click', event => {
+    const dialog = $('settings-dialog');
+    if (event.target !== dialog) return;
+    const bounds = dialog.getBoundingClientRect();
+    if (event.clientX < bounds.left || event.clientX > bounds.right || event.clientY < bounds.top || event.clientY > bounds.bottom) dialog.close();
+  });
   $('session-search').addEventListener('input', renderSessions);
   $('refresh-sessions').addEventListener('click', refreshSessions);
   $('delete-session-confirm').addEventListener('click', confirmSessionDeletion);
@@ -1535,7 +1557,7 @@
     if (source.origin !== location.origin || source.pathname !== '/tgw/webui/sw.js') return;
     if (openNotification(event.data.url)) event.ports?.[0]?.postMessage({ type: 'notification-handled' });
   });
-  document.addEventListener('keydown', event => { if (event.key === 'Escape' && document.body.classList.contains('sessions-open')) { showSessions(false); $('show-sessions').focus({ preventScroll: true }); } });
+  document.addEventListener('keydown', event => { if (event.key === 'Escape' && !event.defaultPrevented && !document.querySelector('dialog[open]') && document.body.classList.contains('sessions-open')) { showSessions(false); $('show-sessions').focus({ preventScroll: true }); } });
   // Safari permits manual pinch despite viewport limits; keep one-finger
   // scrolling and text editing native, and cancel only zoom gestures.
   for (const type of ['gesturestart', 'gesturechange']) {

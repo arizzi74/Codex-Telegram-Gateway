@@ -121,9 +121,11 @@ const selected = { session_id: sessionID, codex_thread_id: 'thread', worker_name
     assert.equal(posts.at(-1).body.credential.response.signature, 'BQ');
     assert.equal(await page.evaluate(() => document.cookie.includes('csrf-2')), true);
 
+    await page.locator('#open-settings').click();
     auth = false;
     await page.evaluate(() => window.visibility(false));
     await page.waitForSelector('#auth:not([hidden])');
+    assert.equal(await page.locator('#settings-dialog').isHidden(), true, 'Expired authentication closes Settings so sign-in remains reachable');
     assert.equal(await page.locator('#messages article').count(), 0);
     assert.equal(await page.locator('#prompt').inputValue(), '');
     assert.equal(await page.locator('.session-button').count(), 0);
@@ -146,8 +148,12 @@ const selected = { session_id: sessionID, codex_thread_id: 'thread', worker_name
     assert.equal(await page.locator('#prompt').inputValue(), '');
 
     await page.locator('#prompt').fill('A draft explicitly saved for recovery');
+    await page.locator('#open-settings').click();
     await page.locator('#draft-recovery-enabled').check();
     await page.waitForFunction(() => document.querySelector('#draft-recovery-status').textContent.includes('is on'));
+    await page.locator('#close-settings').click();
+    await page.locator('#open-settings').click();
+    assert.equal(await page.locator('#draft-recovery-enabled').isChecked(), true, 'Closing and reopening Settings preserves the recovery preference');
     while (!drafts.size) await new Promise(resolve => setTimeout(resolve, 10));
     const encrypted = [...drafts.values()][0].ciphertext;
     assert.ok(!encrypted.includes('explicitly saved'));
@@ -155,6 +161,9 @@ const selected = { session_id: sessionID, codex_thread_id: 'thread', worker_name
     auth = false; await page.evaluate(() => window.visibility(false)); await page.waitForSelector('#auth:not([hidden])');
     await page.locator('#auth-login').click(); await ready(page);
     await page.waitForSelector('#draft-recovery-offer:not([hidden])');
+    await page.locator('#open-settings').click();
+    assert.equal(await page.locator('#draft-recovery-enabled').isChecked(), true, 'The Settings recovery preference survives renewed authentication');
+    await page.locator('#close-settings').click();
     assert.equal(await page.locator('#prompt').inputValue(), '', 'Recovery always waits for an explicit restore action');
     await page.locator('#restore-drafts').click();
     assert.equal(await page.locator('#prompt').inputValue(), 'A draft explicitly saved for recovery');
@@ -166,7 +175,9 @@ const selected = { session_id: sessionID, codex_thread_id: 'thread', worker_name
     await page.locator('#auth-login').click(); await ready(page);
     assert.equal(await page.locator('#prompt').inputValue(), '');
     assert.equal(await page.locator('#draft-recovery-offer').isHidden(), true, 'A send with unknown outcome cannot reappear as a saved unsent draft');
+    await page.locator('#open-settings').click();
     await page.locator('#draft-recovery-enabled').uncheck();
+    await page.locator('#close-settings').click();
 
     const other = await context.newPage(); other.on('pageerror', error => errors.push(error.message));
     await other.clock.install({ time: now }); await other.goto('https://auth.test/tgw/webui/?session_id=' + sessionID); await ready(other);
@@ -202,6 +213,6 @@ const selected = { session_id: sessionID, codex_thread_id: 'thread', worker_name
     await page.waitForSelector('#auth:not([hidden])');
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
     assert.deepEqual(errors, []);
-    console.log('Web UI auth checks passed: warning, passkey cancel/finish-failure/rotation-race/renewal, CSRF rotation, history anchor restore, expiry erasure, encrypted opt-in/explicit recovery/no uncertain-send replay, cross-tab renewal/logout, mobile foreground and suspended-clock expiry.');
+    console.log('Web UI auth checks passed: warning, passkey cancel/finish-failure/rotation-race/renewal, CSRF rotation, history anchor restore, expiry erasure/Settings dismissal, encrypted opt-in/Settings preference persistence/explicit recovery/no uncertain-send replay, cross-tab renewal/logout, mobile foreground and suspended-clock expiry.');
   } finally { await browser.close(); }
 })().catch(error => { console.error(error); process.exitCode = 1; });

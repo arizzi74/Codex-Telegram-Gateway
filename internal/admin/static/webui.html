@@ -30,7 +30,7 @@
       <p id="sessions-status" class="muted small" role="status">Loading sessions…</p>
       <p id="activity-status" class="muted small" role="status" data-state="connecting">Connecting live updates…</p>
       <nav id="session-list" aria-label="Available sessions"></nav>
-      <footer class="sidebar-footer"><div class="draft-recovery-control"><label><input id="draft-recovery-enabled" type="checkbox"> Recover encrypted text drafts after sign-in</label><p id="draft-recovery-status" class="small muted" role="status">Optional · kept for 30 minutes · images excluded.</p></div><div class="notifications-control"><button id="toggle-notifications" class="quiet" type="button" aria-describedby="notifications-status" aria-pressed="false" disabled>Notifications</button><p id="notifications-status" role="status">Sign in to manage notifications.</p></div><a href="/tgw/admin/">Operations console ↗</a></footer>
+      <footer class="sidebar-footer"><button id="open-settings" type="button" aria-haspopup="dialog" aria-controls="settings-dialog" aria-expanded="false">Settings</button></footer>
     </aside>
     <button id="sidebar-backdrop" aria-label="Close sessions" hidden></button>
     <section id="workspace" aria-label="Conversation">
@@ -72,6 +72,18 @@
       </form>
     </section>
   </main>
+  <dialog id="settings-dialog" aria-labelledby="settings-title">
+    <div class="settings-heading"><h2 id="settings-title">Settings</h2><button id="close-settings" type="button" class="quiet" aria-label="Close settings" autofocus>×</button></div>
+    <section class="settings-section" aria-labelledby="draft-settings-title">
+      <h3 id="draft-settings-title">Draft recovery</h3>
+      <div class="draft-recovery-control"><label><input id="draft-recovery-enabled" type="checkbox" aria-describedby="draft-recovery-status"> Recover encrypted text drafts after sign-in</label><p id="draft-recovery-status" class="small muted" role="status">Optional · kept for 30 minutes · images excluded.</p></div>
+    </section>
+    <section class="settings-section" aria-labelledby="notification-settings-title">
+      <h3 id="notification-settings-title">Notifications</h3>
+      <div class="notifications-control"><button id="toggle-notifications" class="quiet" type="button" aria-describedby="notifications-status" aria-pressed="false" disabled>Notifications</button><p id="notifications-status" role="status">Sign in to manage notifications.</p></div>
+    </section>
+    <div class="settings-console"><a href="/tgw/admin/">Open operations console ↗</a></div>
+  </dialog>
   <dialog id="delete-session-dialog" aria-labelledby="delete-session-title" aria-describedby="delete-session-description">
     <h2 id="delete-session-title">Delete session?</h2>
     <p id="delete-session-name"></p>

@@ -64,3 +64,23 @@
 }
 
 .draft-recovery-control{font-size:.75rem;line-height:1.5;margin-bottom:12px}.draft-recovery-control label{display:flex;align-items:flex-start;gap:8px}.draft-recovery-control input{width:auto;flex-shrink:0;margin-top:3px}.draft-recovery-control p{font-size:.9em;margin:6px 0 0}#draft-recovery-offer{padding:10px 20px;background:var(--panel);border-top:1px solid var(--border);font-size:.85rem;flex-shrink:0}#draft-recovery-offer p{margin:0 0 8px;line-height:1.5}#draft-recovery-offer button{margin:0 8px 0 0;font-size:inherit}#auth-status{white-space:pre-wrap;overflow-wrap:anywhere}#auth a{display:block;margin-top:18px}
+/* Keep the session list tall; optional controls live in the Settings modal. */
+.sidebar-footer{flex-shrink:0;margin-top:8px;padding:4px 0 0;border-top:1px solid var(--border)}
+#open-settings{align-self:flex-start;min-height:40px;padding:6px 8px;border:0;background:transparent;color:var(--accent);font-size:.9rem;text-align:left}
+#open-settings:hover{text-decoration:underline;background:var(--surface)}
+#settings-dialog{position:fixed;inset:0;width:min(520px,calc(100% - 32px));max-height:calc(var(--viewport-height,100dvh) - 32px);overflow:auto;margin:auto;padding:20px 24px;border:1px solid var(--border);border-radius:12px;background:var(--panel);color:var(--text);font:inherit;line-height:1.6;overscroll-behavior:contain;overflow-wrap:anywhere}
+#settings-dialog::backdrop{background:#000a}
+.settings-heading{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:6px}
+.settings-heading h2{font-size:1.2rem;margin:0}
+#close-settings{min-height:44px;min-width:44px;padding:4px 10px;font-size:1.3rem;line-height:1}
+.settings-section{border-top:1px solid var(--border);padding:18px 0}
+.settings-section h3{margin:0 0 10px;color:var(--accent);font-size:.95rem}
+#settings-dialog .draft-recovery-control{font-size:.93rem;margin:0}
+#settings-dialog .draft-recovery-control label{gap:10px;cursor:pointer}
+#settings-dialog .draft-recovery-control input{width:18px;height:18px;margin-top:2px;accent-color:var(--accent)}
+#settings-dialog .draft-recovery-control p,#settings-dialog #notifications-status{font-size:.85rem;line-height:1.6;margin-top:10px;color:var(--muted)}
+#settings-dialog .notifications-control button{font-size:.93rem;min-height:44px}
+.settings-console{padding-top:14px;border-top:1px solid var(--border);font-size:.93rem}
+.settings-console a{display:inline-flex;align-items:center;min-height:44px;text-decoration:none}
+.settings-console a:hover{text-decoration:underline}
+@media(max-width:650px){#settings-dialog{padding:16px 18px}.settings-section{padding:16px 0}}

@@ -147,9 +147,11 @@ Connection progress distinguishes the live connection from session restoration
 and history loading. On mobile, the session menu turns green while any session
 is working; a pending question takes priority with a yellow question mark.
 
-Enable notifications in the session sidebar to receive turn-completion alerts
-from all sessions, including while the web app is closed. On iPhone or iPad,
-first add the web UI to the Home Screen and open it from there.
+Open **Settings** at the bottom of the session sidebar to manage draft recovery
+and notifications, or open the operations console. Enable notifications there
+to receive turn-completion alerts from all sessions, including while the web app
+is closed. On iPhone or iPad, first add the web UI to the Home Screen and open it
+from there.
 
 Disconnecting closes the viewer while accepted turns keep running. Reconnecting
 loads current history without resending prompts. Drafts remain in browser memory

@@ -2,6 +2,8 @@
 
 Open `https://gateway.example.com/tgw/webui/` and sign in with the gateway's admin passkey. Select a worker/session in the sidebar. On a phone, use the menu button to open the session picker. Admin enrollment and worker management remain at `/tgw/admin/`.
 
+The sidebar reserves its space for sessions. **Settings** at the bottom opens a dialog with draft recovery, notification controls, and **Open operations console**. Close it with its close button, Escape, or a tap outside the dialog. On phones, opening Settings closes the session drawer and keeps the keyboard closed.
+
 The existing Go gateway serves the interface and relays its authenticated connection to the selected worker. The worker attaches to the existing Codex app-server. No additional Codex CLI, pseudo-terminal, Python service, Node.js service, CDN, or public worker port is needed. Browser JavaScript and CSS are embedded in the gateway binary.
 
 ## Sign-in and recovery
@@ -14,7 +16,7 @@ running turns continue on the worker. On phones, returning to the foreground
 checks authentication again instead of relying on background timers. Other open
 tabs recheck their login after renewal or sign-out.
 
-**Recover encrypted text drafts after sign-in** is optional and off by default.
+**Recover encrypted text drafts after sign-in**, available in **Settings**, is optional and off by default.
 When enabled, the browser encrypts per-session text drafts with AES-GCM before
 sending them to the gateway. The gateway stores only ciphertext, with a maximum
 of 256 KiB per recovery copy and a 30-minute expiry after its latest save. The
@@ -87,13 +89,13 @@ The update panel follows each queued request through read-only status requests, 
 
 ## Mobile notifications
 
-Turn-completion notifications cover all visible user sessions, including sessions on other workers. They use Web Push and can arrive while the installed web app is closed. Enable notifications separately on each device from the session sidebar.
+Turn-completion notifications cover all visible user sessions, including sessions on other workers. They use Web Push and can arrive while the installed web app is closed. Enable notifications separately on each device from **Settings** at the bottom of the session sidebar.
 
 On iPhone or iPad with iOS/iPadOS 16.4 or newer:
 
 1. Open the web UI in Safari, choose **Share → Add to Home Screen**, then open the new icon.
 2. Sign in with your gateway passkey.
-3. Tap **Enable notifications** in the sidebar and allow the system permission request.
+3. Open **Settings**, tap **Enable notifications**, and allow the system permission request.
 
 Apple requires a Home Screen web app and a direct button press before requesting notification permission. Supported Android and desktop browsers use the same notification control. See [WebKit's Web Push requirements](https://webkit.org/blog/13878/web-push-for-web-apps-on-ios-and-ipados/).
 

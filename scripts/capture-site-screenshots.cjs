@@ -44,7 +44,7 @@ async function prepare(page, pendingQuestions = true) {
     if (url.pathname === '/tgw/api/v1/webui/sessions') return json({ sessions });
     if (url.pathname === '/tgw/api/v1/webui/push/config') return json({ supported: true, public_key: 'fictional-demo-public-key', subscribed: false, scope: 'all' });
     let name = url.pathname === '/tgw/webui/' ? 'webui.html' : url.pathname.endsWith('/manifest.webmanifest') ? 'webui-manifest.webmanifest' : path.basename(url.pathname);
-    if (!/^webui[\w.-]*\.(html|js|css|svg|png|webmanifest)$/.test(name) || !fs.existsSync(path.join(assets, name))) return route.fulfill({ status: 404, body: 'Not part of the demo fixture' });
+    if (!/^(webui[\w.-]*|session-auth)\.(html|js|css|svg|png|webmanifest)$/.test(name) || !fs.existsSync(path.join(assets, name))) return route.fulfill({ status: 404, body: 'Not part of the demo fixture' });
     const mime = { html: 'text/html', js: 'text/javascript', css: 'text/css', svg: 'image/svg+xml', png: 'image/png', webmanifest: 'application/manifest+json' }[name.split('.').pop()];
     return route.fulfill({ contentType: mime, body: fs.readFileSync(path.join(assets, name)) });
   });
@@ -88,7 +88,7 @@ async function prepare(page, pendingQuestions = true) {
   await page.locator('#rate-limits .rate-limit').first().waitFor();
   await page.waitForFunction(() => !document.querySelector('#connection-text').textContent.includes('Checking questions'));
   await page.waitForFunction(() => !document.querySelector('#toggle-notifications').textContent.includes('Updating'));
-  assert.equal(await page.locator('#toggle-notifications').innerText(), 'Enable notifications', await page.locator('#notifications-status').innerText());
+  assert.equal(await page.locator('#toggle-notifications').textContent(), 'Enable notifications', await page.locator('#notifications-status').textContent());
   assert.equal(await page.locator('#turn-state').innerText(), 'Working');
   assert.deepEqual(errors, []);
   return errors;
