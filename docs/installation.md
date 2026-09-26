@@ -586,6 +586,13 @@ or reading production conversations. It then verifies fresh worker readiness
 and the actual runtime versions.
 
 Runtime maintenance records the previous standalone release before installation.
+Owned release directories and files may be group-writable, including installations
+created with a group-writable umask. Validation still requires ownership by the
+updater's account, the expected file types, and no world-write permission. A
+failure identifies the affected installation component and the reason; it does
+not imply that ownership changed. The recovery journal remains private to its
+owner, and retained executable and metadata hashes are checked before rollback.
+
 If installation, compatibility testing, or readiness fails, recovery restores
 the previous release and checks the worker again. Once a candidate worker has
 started, recovery must obtain a new idle reservation before stopping it; active

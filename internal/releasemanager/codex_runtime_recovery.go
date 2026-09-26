@@ -82,7 +82,7 @@ func loadCodexRecovery(l *Layout) (*codexRecovery, error) {
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, nil
 	}
-	if err != nil || !codexRollbackOwnedPath(path, false) || info.Mode().Perm()&0077 != 0 || info.Size() > 64<<10 {
+	if err != nil || !codexOwnedPath(path, false) || info.Mode().Perm()&0077 != 0 || info.Size() > 64<<10 {
 		return nil, errors.New("cannot safely read Codex recovery journal")
 	}
 	data, err := os.ReadFile(path)
@@ -129,26 +129,19 @@ func snapshotCodexRuntime(distribution *codexDistribution, profiles map[string]b
 		return snapshot, errors.New("cannot preserve the current Codex release")
 	}
 	snapshot.ReleaseDir = release
-	snapshot.BinarySHA256, err = codexFileHash(filepath.Join(release, "bin", "codex"))
+	snapshot.BinarySHA256, err = codexFileHash(filepath.Join(release, "bin", "codex"), "previous release binary")
 	if err != nil {
 		return snapshot, err
 	}
-	snapshot.MetadataSHA256, err = codexFileHash(filepath.Join(release, "codex-package.json"))
+	snapshot.MetadataSHA256, err = codexFileHash(filepath.Join(release, "codex-package.json"), "previous release metadata")
 	if err != nil {
 		return snapshot, err
 	}
 	return snapshot, validateCodexSnapshot(snapshot)
 }
-func codexRollbackOwnedPath(path string, directory bool) bool {
-	if !codexOwnedPath(path, directory) {
-		return false
-	}
-	info, err := os.Lstat(path)
-	return err == nil && info.Mode().Perm()&0022 == 0
-}
-func codexFileHash(path string) (string, error) {
-	if !codexRollbackOwnedPath(path, false) {
-		return "", errors.New("previous Codex release is not a trusted owned file")
+func codexFileHash(path, role string) (string, error) {
+	if problem := codexOwnedPathProblem(path, false); problem != "" {
+		return "", errors.New("Codex recovery " + role + " " + problem)
 	}
 	file, err := os.Open(path)
 	if err != nil {
@@ -171,17 +164,25 @@ func validateCodexSnapshot(snapshot codexRuntimeSnapshot) error {
 	if filepath.Dir(snapshot.ReleaseDir) != releases || filepath.Clean(snapshot.ReleaseDir) != snapshot.ReleaseDir {
 		return errors.New("previous Codex release is outside its installation")
 	}
-	for _, dir := range []string{d.Home, filepath.Join(d.Home, "packages"), standalone, releases, snapshot.ReleaseDir, filepath.Join(snapshot.ReleaseDir, "bin"), d.InstallDir} {
-		if !codexOwnedPath(dir, true) || ((dir == snapshot.ReleaseDir || dir == filepath.Join(snapshot.ReleaseDir, "bin")) && !codexRollbackOwnedPath(dir, true)) {
-			return errors.New("previous Codex release ownership changed")
+	for _, dir := range []struct{ path, role string }{
+		{d.Home, "home directory"},
+		{filepath.Join(d.Home, "packages"), "packages directory"},
+		{standalone, "standalone directory"},
+		{releases, "releases directory"},
+		{snapshot.ReleaseDir, "previous release directory"},
+		{filepath.Join(snapshot.ReleaseDir, "bin"), "previous release bin directory"},
+		{d.InstallDir, "launcher directory"},
+	} {
+		if problem := codexOwnedPathProblem(dir.path, true); problem != "" {
+			return errors.New("Codex recovery " + dir.role + " " + problem)
 		}
 	}
 	metadataPath := filepath.Join(snapshot.ReleaseDir, "codex-package.json")
-	binaryHash, err := codexFileHash(filepath.Join(snapshot.ReleaseDir, "bin", "codex"))
+	binaryHash, err := codexFileHash(filepath.Join(snapshot.ReleaseDir, "bin", "codex"), "previous release binary")
 	if err != nil {
 		return err
 	}
-	metadataHash, err := codexFileHash(metadataPath)
+	metadataHash, err := codexFileHash(metadataPath, "previous release metadata")
 	if err != nil {
 		return err
 	}

@@ -134,11 +134,17 @@ func codexDistributionFixture(t *testing.T) (*Manager, string, string, string) {
 }
 
 func TestCodexDistributionInspectsStableStandaloneLauncher(t *testing.T) {
-	m, binary, home, _ := codexDistributionFixture(t)
+	m, binary, home, release := codexDistributionFixture(t)
 	// The official installer follows the user's umask; group-writable owned
-	// directories are normal and do not make it a different installation.
-	if err := os.Chmod(home, 0775); err != nil {
-		t.Fatal(err)
+	// directories and files do not make it a different installation.
+	for _, path := range []string{home, release, filepath.Join(release, "bin"), filepath.Join(release, "bin", "codex"), filepath.Join(release, "codex-package.json")} {
+		mode := os.FileMode(0775)
+		if filepath.Base(path) == "codex-package.json" {
+			mode = 0664
+		}
+		if err := os.Chmod(path, mode); err != nil {
+			t.Fatal(err)
+		}
 	}
 	distribution, err := m.inspectCodexDistribution(t.Context(), binary)
 	if err != nil {

@@ -11,10 +11,107 @@ import (
 	"time"
 )
 
+func makeCodexReleaseGroupWritable(f *codexApplyFixture) {
+	f.t.Helper()
+	release := filepath.Join(f.plan.Distribution.Home, "packages", "standalone", "releases", "0.154.0-aarch64-unknown-linux-musl")
+	for _, path := range []string{release, filepath.Join(release, "bin"), filepath.Join(release, "bin", "codex"), filepath.Join(release, "codex-package.json")} {
+		mode := os.FileMode(0775)
+		if filepath.Base(path) == "codex-package.json" {
+			mode = 0664
+		}
+		if err := os.Chmod(path, mode); err != nil {
+			f.t.Fatal(err)
+		}
+	}
+}
+
+func TestCodexGroupWritableReleaseUpdatesAndPreservesRollbackSnapshot(t *testing.T) {
+	f := newCodexApplyFixture(t)
+	makeCodexReleaseGroupWritable(f)
+	snapshot, err := codexRecoveryFixtureSnapshot(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = f.manager.applyCodexRuntimeUpdates(t.Context(), f.layout, []codexRuntimePlan{f.plan}, false, f.record); err != nil {
+		t.Fatal(err)
+	}
+	if !f.running || f.installedVersion() != "0.157.0" || countCodexEvent(f.events, "native-update") != 1 {
+		t.Fatalf("group-writable update failed: %v", f.events)
+	}
+	if err = validateCodexSnapshot(snapshot); err != nil {
+		t.Fatalf("update changed the preserved release: %v", err)
+	}
+}
+
+func TestCodexRecoveryDiagnosticsIdentifyUnsafePathWithoutPrivatePaths(t *testing.T) {
+	for _, role := range []string{"home directory", "packages directory", "standalone directory", "releases directory", "previous release directory", "previous release bin directory", "launcher directory", "previous release binary", "previous release metadata"} {
+		for _, kind := range []string{"world-writable", "missing"} {
+			t.Run(role+"/"+kind, func(t *testing.T) {
+				f := newCodexApplyFixture(t)
+				snapshot, err := codexRecoveryFixtureSnapshot(f)
+				if err != nil {
+					t.Fatal(err)
+				}
+				d := snapshot.Distribution
+				paths := map[string]string{
+					"home directory":                 d.Home,
+					"packages directory":             filepath.Join(d.Home, "packages"),
+					"standalone directory":           filepath.Join(d.Home, "packages", "standalone"),
+					"releases directory":             filepath.Dir(snapshot.ReleaseDir),
+					"previous release directory":     snapshot.ReleaseDir,
+					"previous release bin directory": filepath.Join(snapshot.ReleaseDir, "bin"),
+					"launcher directory":             d.InstallDir,
+					"previous release binary":        filepath.Join(snapshot.ReleaseDir, "bin", "codex"),
+					"previous release metadata":      filepath.Join(snapshot.ReleaseDir, "codex-package.json"),
+				}
+				if kind == "missing" {
+					err = os.RemoveAll(paths[role])
+				} else {
+					err = os.Chmod(paths[role], 0777)
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+				want := "Codex recovery " + role + " is " + kind
+				if err = validateCodexSnapshot(snapshot); err == nil || err.Error() != want {
+					t.Fatalf("diagnostic = %v; want %q", err, want)
+				}
+			})
+		}
+	}
+}
+
+func TestCodexRecoveryJournalStillRequiresPrivatePermissions(t *testing.T) {
+	for _, mode := range []os.FileMode{0640, 0620, 0660, 0604, 0602} {
+		t.Run(mode.String(), func(t *testing.T) {
+			f := newCodexApplyFixture(t)
+			makeCodexReleaseGroupWritable(f)
+			snapshot, err := codexRecoveryFixtureSnapshot(f)
+			if err != nil {
+				t.Fatal(err)
+			}
+			journal := &codexRecovery{Schema: 1, Phase: "rollback", Snapshots: []codexRuntimeSnapshot{snapshot}}
+			if err = writeCodexRecovery(f.layout, journal); err != nil {
+				t.Fatal(err)
+			}
+			if _, err = loadCodexRecovery(f.layout); err != nil {
+				t.Fatalf("private journal was rejected: %v", err)
+			}
+			if err = os.Chmod(codexRecoveryPath(f.layout), mode); err != nil {
+				t.Fatal(err)
+			}
+			if loaded, err := loadCodexRecovery(f.layout); loaded != nil || err == nil || err.Error() != "cannot safely read Codex recovery journal" {
+				t.Fatalf("nonprivate journal accepted: %+v %v", loaded, err)
+			}
+		})
+	}
+}
+
 func TestCodexFailureRestoresActualReleaseAndVerifiesWorker(t *testing.T) {
 	for _, fault := range []string{"partial-failure", "partial-cancel", "removed-current", "preflight", "readiness"} {
 		t.Run(fault, func(t *testing.T) {
 			f := newCodexApplyFixture(t)
+			makeCodexReleaseGroupWritable(f)
 			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
 			f.cancel = cancel
@@ -48,6 +145,7 @@ func TestCodexFailureRestoresActualReleaseAndVerifiesWorker(t *testing.T) {
 }
 func TestCodexRollbackDefersWhenRestartedWorkerAcceptedWork(t *testing.T) {
 	f := newCodexApplyFixture(t)
+	makeCodexReleaseGroupWritable(f)
 	f.readinessFault = "version"
 	f.busyAfterStart = true
 	err := f.manager.applyCodexRuntimeUpdates(t.Context(), f.layout, []codexRuntimePlan{f.plan}, false, f.record)
@@ -71,6 +169,7 @@ func TestCodexInterruptedTransactionRecoversBeforePlanningOrNetworking(t *testin
 	for _, phase := range []string{"prepared", "installing", "starting", "rollback", "committed"} {
 		t.Run(phase, func(t *testing.T) {
 			f := newCodexApplyFixture(t)
+			makeCodexReleaseGroupWritable(f)
 			snapshot, err := codexRecoveryFixtureSnapshot(f)
 			if err != nil {
 				t.Fatal(err)
@@ -134,9 +233,10 @@ func TestCodexMultiInstallationFailureRollsBackEveryChangedRelease(t *testing.T)
 	}
 }
 func TestCodexRollbackRefusesTamperedPreviousReleaseAndPreservesJournal(t *testing.T) {
-	for _, kind := range []string{"binary", "metadata", "public-binary", "public-release", "escaped-release", "launcher-file"} {
+	for _, kind := range []string{"binary", "metadata", "public-binary", "public-metadata", "public-release", "public-bin-directory", "escaped-release", "launcher-file"} {
 		t.Run(kind, func(t *testing.T) {
 			f := newCodexApplyFixture(t)
+			makeCodexReleaseGroupWritable(f)
 			snapshot, err := codexRecoveryFixtureSnapshot(f)
 			if err != nil {
 				t.Fatal(err)
@@ -148,9 +248,13 @@ func TestCodexRollbackRefusesTamperedPreviousReleaseAndPreservesJournal(t *testi
 			case "metadata":
 				err = os.WriteFile(filepath.Join(snapshot.ReleaseDir, "codex-package.json"), []byte(`{}`), 0600)
 			case "public-binary":
-				err = os.Chmod(filepath.Join(snapshot.ReleaseDir, "bin", "codex"), 0775)
+				err = os.Chmod(filepath.Join(snapshot.ReleaseDir, "bin", "codex"), 0777)
+			case "public-metadata":
+				err = os.Chmod(filepath.Join(snapshot.ReleaseDir, "codex-package.json"), 0666)
 			case "public-release":
-				err = os.Chmod(snapshot.ReleaseDir, 0775)
+				err = os.Chmod(snapshot.ReleaseDir, 0777)
+			case "public-bin-directory":
+				err = os.Chmod(filepath.Join(snapshot.ReleaseDir, "bin"), 0777)
 			case "escaped-release":
 				snapshot.ReleaseDir = filepath.Dir(snapshot.ReleaseDir)
 			case "launcher-file":

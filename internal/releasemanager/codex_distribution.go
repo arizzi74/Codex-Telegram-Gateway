@@ -110,12 +110,41 @@ func (m *Manager) fetchCodexMetadata(ctx context.Context) ([]byte, error) {
 }
 
 func codexOwnedPath(path string, directory bool) bool {
+	return codexOwnedPathProblem(path, directory) == ""
+}
+
+// The standalone installer follows the owner's umask. Group write is allowed;
+// missing, redirected, foreign-owned or world-writable paths are not trusted.
+// Return bounded reasons so callers can identify a logical path role without
+// exposing installation paths or raw filesystem errors.
+func codexOwnedPathProblem(path string, directory bool) string {
 	info, err := os.Lstat(path)
-	if err != nil || info.Mode().Perm()&0002 != 0 || (directory && !info.IsDir()) || (!directory && !info.Mode().IsRegular()) {
-		return false
+	if errors.Is(err, os.ErrNotExist) {
+		return "is missing"
+	}
+	if err != nil {
+		return "cannot be inspected"
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return "is a symbolic link"
+	}
+	if directory && !info.IsDir() {
+		return "is not a directory"
+	}
+	if !directory && !info.Mode().IsRegular() {
+		return "is not a regular file"
 	}
 	stat, ok := info.Sys().(*syscall.Stat_t)
-	return ok && int(stat.Uid) == os.Geteuid()
+	if !ok {
+		return "owner cannot be verified"
+	}
+	if int(stat.Uid) != os.Geteuid() {
+		return "is not owned by the current user"
+	}
+	if info.Mode().Perm()&0002 != 0 {
+		return "is world-writable"
+	}
+	return ""
 }
 
 // Only the official standalone launcher is changed automatically. A direct path
