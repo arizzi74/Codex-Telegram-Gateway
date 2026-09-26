@@ -16,7 +16,7 @@ import (
 	"github.com/iaia/telegramgw/internal/workerupdate"
 )
 
-func TestRequestedWorkerAlreadyCurrentNeverTouchesServicesOrRuntime(t *testing.T) {
+func TestRequestedWorkerReleaseAlreadyCurrentNeverTouchesServices(t *testing.T) {
 	for _, installed := range []string{"1.2.3", "1.3.0"} {
 		t.Run(installed, func(t *testing.T) {
 			l, _, release := updateFixture(t, "worker")
@@ -30,7 +30,7 @@ func TestRequestedWorkerAlreadyCurrentNeverTouchesServicesOrRuntime(t *testing.T
 				}
 				return CommandResult{Output: []byte(installed)}, nil
 			}
-			result, err := m.requestedWorkerStep(t.Context(), l, &requestedWorkerPlan{release: release})
+			result, err := m.requestedWorkerReleaseStep(t.Context(), l, &requestedWorkerPlan{release: release})
 			if err != nil || result.State != "up_to_date" || result.Version != installed || calls != 1 {
 				t.Fatalf("result=%+v calls=%d err=%v", result, calls, err)
 			}
@@ -56,7 +56,7 @@ func TestRequestedWorkerBusyKeepsTurnsAndTimersUntouched(t *testing.T) {
 		}
 	}
 	for range 3 {
-		_, err := m.requestedWorkerStep(t.Context(), l, &requestedWorkerPlan{release: release, packages: packages})
+		_, err := m.requestedWorkerReleaseStep(t.Context(), l, &requestedWorkerPlan{release: release, packages: packages})
 		var busy *BusyError
 		if !errors.As(err, &busy) {
 			t.Fatalf("expected busy, got %v", err)
@@ -111,14 +111,14 @@ func TestRequestedWorkerAppliesOnlyAfterBusyTurnEnds(t *testing.T) {
 		return CommandResult{}, nil
 	}
 	plan := &requestedWorkerPlan{release: release, packages: packages}
-	if _, err := m.requestedWorkerStep(t.Context(), l, plan); err == nil {
+	if _, err := m.requestedWorkerReleaseStep(t.Context(), l, plan); err == nil {
 		t.Fatal("active turn did not defer")
 	}
 	if len(actions) != 0 || updateRead(t, l.Binary) != "old binary" {
 		t.Fatal("active worker changed")
 	}
 	busy = false
-	result, err := m.requestedWorkerStep(t.Context(), l, plan)
+	result, err := m.requestedWorkerReleaseStep(t.Context(), l, plan)
 	if err != nil || result.State != "completed" || result.Version != release.Tag {
 		t.Fatalf("result=%+v err=%v", result, err)
 	}

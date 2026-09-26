@@ -51,6 +51,10 @@ func TestControlPlaneWorkerUpdateQueuedOfflineWithoutSession(t *testing.T) {
 	slot := &gatewaySlot{}
 	slot.set(gw)
 	var commands, launches atomic.Int32
+	codexReport := &protocol.CodexUpdateReport{
+		State: "up_to_date", LatestVersion: "0.157.1", CheckedAt: time.Now().UTC().Truncate(time.Second),
+		Profiles: []protocol.CodexRuntimeVersion{{ProfileID: "primary", InstalledVersion: "0.157.1", RunningVersion: "0.157.1", Support: "supported"}},
+	}
 	c, err := dialTestServer(slot)(cfg, local, log, nil, func(context.Context, protocol.Command) (protocol.CommandAck, error) {
 		commands.Add(1)
 		return protocol.CommandAck{}, nil
@@ -69,7 +73,7 @@ func TestControlPlaneWorkerUpdateQueuedOfflineWithoutSession(t *testing.T) {
 			t.Errorf("supervisor started without durable worker request: %+v, %v", request, err)
 			return nil, err
 		}
-		err = workerupdate.Complete(cfg.StateFile, protocol.WorkerUpdateResult{RequestID: requestID, State: "up_to_date", Version: "0.5.29"})
+		err = workerupdate.Complete(cfg.StateFile, protocol.WorkerUpdateResult{RequestID: requestID, State: "up_to_date", Version: "0.5.61", Codex: codexReport})
 		select {
 		case c.updateWake <- struct{}{}:
 		default:
@@ -89,7 +93,8 @@ func TestControlPlaneWorkerUpdateQueuedOfflineWithoutSession(t *testing.T) {
 			t.Error("worker transport did not stop")
 		}
 	}()
-	waitControl(t, func() bool { return telegram.hasText("Offline worker", "Already up to date", "No restart") })
+	waitControl(t, func() bool { return telegram.hasText("Offline worker", "Worker binary up to date") })
+	waitControl(t, func() bool { return telegram.hasText("Codex", "0.157.1", "primary") })
 	waitControl(t, func() bool {
 		events, err := local.OutboxAfter(0)
 		return err == nil && len(events) == 0
@@ -104,11 +109,19 @@ func TestControlPlaneWorkerUpdateQueuedOfflineWithoutSession(t *testing.T) {
 	if err := probe.QueryRowContext(ctx, `SELECT state FROM worker_update_requests WHERE request_id=?`, requestID).Scan(&state); err != nil || state != "up_to_date" {
 		t.Fatalf("request outcome = %q, %v", state, err)
 	}
+	updates, err := registryStore.WorkerUpdateSnapshot(ctx)
+	if err != nil || len(updates) != 1 {
+		t.Fatalf("worker update snapshot = %+v, %v", updates, err)
+	}
+	report := updates[0].Codex
+	if report == nil || report.State != codexReport.State || report.LatestVersion != codexReport.LatestVersion || !report.CheckedAt.Equal(codexReport.CheckedAt) || len(report.Profiles) != 1 || report.Profiles[0] != codexReport.Profiles[0] {
+		t.Fatalf("Codex report lost through worker sidecar, outbox, or gateway persistence: %+v", report)
+	}
 	var bindings int
 	if err := probe.QueryRowContext(ctx, `SELECT count(*) FROM telegram_bindings`).Scan(&bindings); err != nil || bindings != 0 {
 		t.Fatalf("maintenance created session selection: %d, %v", bindings, err)
 	}
-	if count := telegram.countText("Already up to date"); count != 1 {
+	if count := telegram.countText("Worker binary up to date"); count != 1 {
 		t.Fatalf("completion messages = %d", count)
 	}
 	telegram.mu.Lock()

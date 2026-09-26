@@ -69,6 +69,12 @@ turns['thread-d'] = [{ id: 'short-d', status: 'completed', startedAt: now - 500,
   const gatewayCommands = [];
   let holdGatewayCommand = false;
   const heldGatewayCommands = [];
+  let gatewayStatusCode = 200;
+  let gatewayStatusText = 'Linux worker: waiting for active turns. Remote worker: checking update.';
+  let gatewayUpdateWorkers = [
+    { worker_id: 'w', request_id: 'update-local', name: 'Linux worker', state: 'pending' },
+    { worker_id: 'remote', request_id: 'update-remote', name: 'Remote worker', state: 'pending' },
+  ];
   let holdSessionInventory = false;
   let notifySessionInventoryHeld = () => {};
   const heldSessionInventories = [];
@@ -101,11 +107,11 @@ turns['thread-d'] = [{ id: 'short-d', status: 'completed', startedAt: now - 500,
     }
     if (url.pathname === '/tgw/api/v1/admin/session') return route.fulfill({ status: authStatus, contentType: 'application/json', body: '{}' });
     if (url.pathname === '/tgw/api/v1/webui/commands') {
-      const request = route.request().method() === 'POST' ? route.request().postDataJSON() : { command: url.searchParams.get('command') };
+      const request = route.request().method() === 'POST' ? route.request().postDataJSON() : Object.fromEntries(url.searchParams);
       gatewayCommands.push({ method: route.request().method(), csrf: route.request().headers()['x-csrf-token'], ...request });
       if (holdGatewayCommand) { heldGatewayCommands.push(route); return; }
       const command = request.command;
-      return route.fulfill({ status: authStatus, contentType: 'application/json', body: JSON.stringify({ command, text: command === 'tgupdateworkers' ? 'Linux worker: update queued after active turns finish.' : command === 'tginstances' ? 'Linux worker / Primary Codex · online' : 'Gateway connected. Linux worker: online.', workers: [{ worker_id: 'w', name: 'Linux worker', state: command === 'tgupdateworkers' ? 'queued' : 'online' }], gateway_version: '0.5.test' }) });
+      return route.fulfill({ status: authStatus !== 200 ? authStatus : command === 'tgstatus' ? gatewayStatusCode : 200, contentType: 'application/json', body: JSON.stringify({ command, text: command === 'tgupdateworkers' ? 'Linux worker: update queued after active turns finish.' : command === 'tginstances' ? 'Linux worker / Primary Codex · online' : gatewayStatusText, workers: command === 'tgupdateworkers' ? gatewayUpdateWorkers.map(worker => ({ ...worker, state: 'queued' })) : gatewayUpdateWorkers, gateway_version: '0.5.test' }) });
     }
     const staticFiles = ['webui-format.js', 'webui-commands.js', 'webui-command-ui.js', 'webui-notifications.js', 'webui.js', 'webui.css', 'webui-icon.svg', 'webui-icon-180.png', 'webui-icon-192.png', 'webui-icon-512.png'];
     const filename = url.pathname.endsWith('/manifest.webmanifest') ? 'webui-manifest.webmanifest' : staticFiles.find(name => url.pathname.endsWith('/' + name)) || 'webui.html';
@@ -317,6 +323,11 @@ turns['thread-d'] = [{ id: 'short-d', status: 'completed', startedAt: now - 500,
     await page.locator('[data-session-id="' + id + '"]').click(); await connected();
     await page.waitForFunction(() => ['Ready', 'Working'].includes(document.querySelector('#turn-state').textContent));
   };
+  const gatewayStatusReads = () => gatewayCommands.filter(request => request.command === 'tgstatus' && request.method === 'GET').length;
+  const nextGatewayStatus = () => page.waitForResponse(response => {
+    const url = new URL(response.url());
+    return url.pathname === '/tgw/api/v1/webui/commands' && url.searchParams.get('command') === 'tgstatus' && response.request().method() === 'GET';
+  });
   try {
     await page.goto('https://webui.test/tgw/webui/');
     await page.waitForSelector('[data-session-id="a"]');
@@ -332,6 +343,38 @@ turns['thread-d'] = [{ id: 'short-d', status: 'completed', startedAt: now - 500,
     assert.equal(gatewayCommands.filter(request => request.command === 'tgupdateworkers' && request.method === 'POST').length, 1, 'Worker updates can be requested without an active session');
     assert.equal(gatewayCommands.find(request => request.command === 'tgupdateworkers').csrf, 'browser-test-csrf', 'Update requests include the same-origin CSRF token');
     assert.equal(await page.evaluate(() => window.testSockets.length), 0, 'Gateway commands do not create a Codex connection');
+    await page.waitForFunction(() => !document.querySelector('#show-commands').disabled);
+    await page.evaluate(() => { window.updateStatusFocus = document.activeElement; });
+    await Promise.all([nextGatewayStatus(), page.clock.fastForward(2100)]);
+    await page.waitForFunction(() => document.querySelector('#command-content').textContent.includes('waiting for active turns'));
+    assert.equal(await page.locator('#command-title').textContent(), '/tgupdateworkers', 'Automatic progress remains in the update command panel');
+    assert.equal(await page.evaluate(() => document.activeElement === window.updateStatusFocus), true, 'Automatic progress never steals focus');
+    gatewayUpdateWorkers[0].state = 'completed';
+    gatewayStatusText = 'Linux worker: updated and restarted · 0.5.test. Remote worker: waiting for active turns.';
+    await Promise.all([nextGatewayStatus(), page.clock.fastForward(2100)]);
+    await page.waitForFunction(() => document.querySelector('#command-content').textContent.includes('updated and restarted'));
+    assert.doesNotMatch(await page.locator('#command-content').textContent(), /All worker update checks finished/, 'One completed worker does not hide another pending update');
+    // Hidden tabs stop polling, then read the latest result when visible.
+    await page.evaluate(() => { Object.defineProperty(document, 'hidden', { configurable: true, value: true }); document.dispatchEvent(new Event('visibilitychange')); });
+    const hiddenUpdateReads = gatewayStatusReads();
+    await page.clock.fastForward(180000);
+    assert.equal(gatewayStatusReads(), hiddenUpdateReads, 'A hidden tab does not poll maintenance status');
+    await Promise.all([nextGatewayStatus(), page.evaluate(() => { delete document.hidden; document.dispatchEvent(new Event('visibilitychange')); }), page.clock.fastForward(1)]);
+    await page.waitForFunction(() => document.querySelector('#command-content').textContent.includes('waiting for active turns'));
+    const longWaitReads = gatewayStatusReads();
+    await page.clock.fastForward(5100);
+    assert.equal(gatewayStatusReads(), longWaitReads, 'Long-running worker updates use a slower polling interval');
+    gatewayUpdateWorkers[1].state = 'up_to_date';
+    gatewayStatusText = 'Linux worker: updated and restarted · 0.5.test. Remote worker: up to date · no restart. Codex: up to date.';
+    await Promise.all([nextGatewayStatus(), page.clock.fastForward(15000)]);
+    await page.waitForFunction(() => document.querySelector('#command-content').textContent.includes('All worker update checks finished'));
+    assert.match(await page.locator('#command-content').textContent(), /Codex: up to date/, 'The panel displays the server runtime report without a separate mutation');
+    const completedUpdateReads = gatewayStatusReads();
+    await page.clock.fastForward(30000);
+    assert.equal(gatewayStatusReads(), completedUpdateReads, 'Completion stops automatic status reads');
+    assert.equal(gatewayCommands.filter(request => request.command === 'tgupdateworkers').length, 1, 'Progress checks never replay the update POST');
+    assert.ok(gatewayCommands.filter(request => request.command === 'tgstatus').every(request => request.method === 'GET' && request.session_id === undefined), 'Automatic status reads are read-only and independent of the selected session');
+    gatewayUpdateWorkers.forEach(worker => { worker.state = 'pending'; });
     await page.getByRole('button', { name: 'Close command menu', exact: true }).click();
     // Connection phases describe the actual wait. Recent messages appear as
     // soon as their page arrives, while the active-turn check still gates sends.
@@ -771,7 +814,79 @@ turns['thread-d'] = [{ id: 'short-d', status: 'completed', startedAt: now - 500,
     holdGatewayCommand = false;
     for (const route of heldGatewayCommands.splice(0)) await route.abort().catch(() => {});
     await page.locator('#prompt').fill('');
+    const requestWorkerUpdates = async () => {
+      await page.locator('#prompt').fill('/tgupdateworkers');
+      await page.locator('#send').click();
+      await page.waitForFunction(() => !document.querySelector('#show-commands').disabled && document.querySelector('#command-content').textContent.includes('update queued'));
+    };
+    // Gateway commands work through the Send button even after disconnecting;
+    // ordinary prompts still require a session transport.
+    await page.locator('#disconnect').click();
+    await page.locator('#prompt').fill('An ordinary disconnected prompt');
+    assert.equal(await page.locator('#send').isDisabled(), true);
+    await page.locator('#prompt').fill('/tgupdateworkers');
+    assert.equal(await page.locator('#send').isDisabled(), false, 'Authenticated gateway commands do not require a Codex connection');
+    await requestWorkerUpdates();
+    await page.locator('#prompt').fill('A draft written while updates are pending');
+    gatewayStatusText = 'Linux worker: pending. Remote worker: pending.';
+    await Promise.all([nextGatewayStatus(), page.clock.fastForward(2100)]);
+    await page.waitForFunction(() => document.querySelector('#command-content').textContent.includes('Remote worker: pending'));
+    assert.equal(await page.locator('#prompt').inputValue(), 'A draft written while updates are pending', 'Progress checks preserve a new draft');
+    assert.equal(await page.locator('#prompt').evaluate(element => document.activeElement === element), true, 'Progress checks do not move focus from a new draft');
+    gatewayUpdateWorkers[0].state = 'failed'; gatewayUpdateWorkers[1].state = 'up_to_date';
+    gatewayStatusText = 'Linux worker: update request failed. Remote worker: up to date.';
+    await Promise.all([nextGatewayStatus(), page.clock.fastForward(2100)]);
+    await page.waitForFunction(() => document.querySelector('#command-content').textContent.includes('Update checks finished. See worker results above.'));
+    const manualStatusBefore = gatewayStatusReads();
+    await Promise.all([nextGatewayStatus(), page.getByRole('button', { name: /Check worker update status/ }).click()]);
+    await page.waitForFunction(() => document.querySelector('#command-title').textContent === '/tgstatus' && !document.querySelector('#show-commands').disabled);
+    assert.equal(gatewayStatusReads(), manualStatusBefore + 1, 'Manual status uses a read-only GET too');
+    await page.getByRole('button', { name: 'Close command menu', exact: true }).click();
+    gatewayUpdateWorkers.forEach(worker => { worker.state = 'pending'; });
+    await choose('b');
+    // An HTTP error stops observation with an explicit retry-status action,
+    // never replaying the mutation or disabling the session composer.
+    await requestWorkerUpdates();
+    assert.equal(await page.locator('#command-title').textContent(), '/tgupdateworkers');
+    gatewayStatusCode = 503;
+    await Promise.all([nextGatewayStatus(), page.clock.fastForward(2100)]);
+    await page.waitForFunction(() => document.querySelector('#command-content').textContent.includes('Automatic status checks stopped'));
+    const erroredReads = gatewayStatusReads(), updatesAfterReadError = gatewayCommands.filter(request => request.command === 'tgupdateworkers').length;
+    await page.clock.fastForward(31000);
+    assert.equal(gatewayStatusReads(), erroredReads, 'Failed observations do not create an unbounded error loop');
+    assert.equal(gatewayCommands.filter(request => request.command === 'tgupdateworkers').length, updatesAfterReadError, 'A failed status read never repeats the update mutation');
+    gatewayStatusCode = 200;
+    // A later request for the same worker cannot masquerade as completion of
+    // the request this panel is observing.
+    await requestWorkerUpdates();
+    gatewayUpdateWorkers[0].request_id = 'newer-local-update'; gatewayUpdateWorkers.forEach(worker => { worker.state = 'completed'; });
+    gatewayStatusText = 'UNRELATED REQUEST COMPLETED';
+    await Promise.all([nextGatewayStatus(), page.clock.fastForward(2100)]);
+    await page.waitForFunction(() => document.querySelector('#command-content').textContent.includes('A newer worker update request replaced this status'));
+    assert.doesNotMatch(await page.locator('#command-content').textContent(), /UNRELATED REQUEST COMPLETED|All worker update checks finished/, 'A superseding request is not reported as this request succeeding');
+    gatewayUpdateWorkers.forEach(worker => { worker.state = 'pending'; });
+    await requestWorkerUpdates();
+    holdGatewayCommand = true;
+    const statusRequestStarted = page.waitForRequest(request => new URL(request.url()).searchParams.get('command') === 'tgstatus');
+    await Promise.all([statusRequestStarted, page.clock.fastForward(2100)]);
+    const statusReadAborted = page.waitForEvent('requestfailed', { predicate: request => new URL(request.url()).searchParams.get('command') === 'tgstatus' });
+    await page.getByRole('button', { name: 'Close command menu', exact: true }).click();
+    assert.match((await statusReadAborted).failure().errorText, /abort/i, 'Closing the update panel aborts its in-flight status read');
+    holdGatewayCommand = false;
+    for (const route of heldGatewayCommands.splice(0)) await route.abort().catch(() => {});
+    const closedReads = gatewayStatusReads();
+    await page.clock.fastForward(31000);
+    assert.equal(gatewayStatusReads(), closedReads, 'A closed command panel never polls');
+    await requestWorkerUpdates();
+    const readsBeforeDisconnect = gatewayStatusReads();
+    await page.locator('#disconnect').click();
+    await page.clock.fastForward(31000);
+    assert.equal(gatewayStatusReads(), readsBeforeDisconnect, 'Explicit session disconnect cancels pending update observation');
+    await requestWorkerUpdates();
+    const readsBeforeSwitch = gatewayStatusReads();
     await choose('a');
+    await page.clock.fastForward(31000);
+    assert.equal(gatewayStatusReads(), readsBeforeSwitch, 'Selecting another session cancels pending update observation');
     await page.locator('#prompt').fill('');
     // Heartbeats/status-only traffic must leave the idle transcript DOM intact.
     await page.evaluate(() => { window.originalArticle = document.querySelector('#messages article'); });
@@ -1870,9 +1985,14 @@ turns['thread-d'] = [{ id: 'short-d', status: 'completed', startedAt: now - 500,
     await choose('d');
     await page.locator('#disconnect').click();
     assert.equal(await page.evaluate(() => window.testSockets.at(-1).readyState), 3, 'The conversation socket is closed before testing activity-only authentication');
+    await requestWorkerUpdates();
+    const readsBeforeExpiry = gatewayStatusReads();
     authStatus = 401;
     await page.evaluate(() => window.testActivitySocket.drop(1006));
     await page.waitForSelector('#auth:not([hidden])');
+    await page.clock.fastForward(31000);
+    assert.equal(gatewayStatusReads(), readsBeforeExpiry, 'Expired authentication cancels update status timers');
+    assert.equal(await page.locator('#command-panel').isHidden(), true, 'Expired authentication removes update results');
     if (process.env.WEBUI_SCREENSHOTS) {
       await page.setViewportSize({ width: 390, height: 844 });
       await page.screenshot({ path: path.join(process.env.WEBUI_SCREENSHOTS, 'webui-signin.png') });

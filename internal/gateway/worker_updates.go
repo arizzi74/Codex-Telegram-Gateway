@@ -90,10 +90,15 @@ func (s *Sender) renderWorkerUpdates(response registry.AcceptResult) string {
 			status = "Queued"
 		case "already_queued":
 			status = "Already queued"
+		case "pending":
+			status = "Queued; waiting for the worker to finish its update check"
 		case "completed":
 			status = "Updated and restarted · " + worker.Version
 		case "up_to_date":
-			status = "Already up to date · " + worker.Version + " · No restart"
+			status = "Already up to date · " + worker.Version + " · No worker restart"
+			if worker.Codex != nil {
+				status = "Worker binary up to date · " + worker.Version
+			}
 		case "failed":
 			switch worker.ErrorCode {
 			case "unsupported_worker", "update_unavailable":
@@ -101,9 +106,14 @@ func (s *Sender) renderWorkerUpdates(response registry.AcceptResult) string {
 			}
 		}
 		lines = append(lines, "\n"+name+"\n"+status)
+		if summary := worker.CodexSummary(); summary != "" {
+			for _, line := range strings.Split(summary, "\n") {
+				lines = append(lines, s.sessionListField(line, 600, 2400))
+			}
+		}
 	}
 	if response.View == "worker_updates" {
-		lines = append(lines, "\nEach worker will check GitHub and update at its next idle point, after all its turns and pending work finish. Offline workers receive the request when they reconnect. Workers already on the latest version are not restarted.")
+		lines = append(lines, "\nEach worker will check GitHub and update at its next idle point, after all its turns and pending work finish. Supporting workers also check Codex runtime versions. Offline workers receive the request when they reconnect. A Codex runtime update may also restart the worker supervisor.")
 	}
 	return strings.Join(lines, "\n")
 }

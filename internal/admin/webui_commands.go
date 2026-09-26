@@ -54,7 +54,7 @@ func (s *Server) webuiCommands(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusOK, map[string]any{"commands": []map[string]string{
 				{"name": "tgstatus", "description": "Gateway, worker and queued update status"},
 				{"name": "tginstances", "description": "List enrolled workers and Codex runtimes"},
-				{"name": "tgupdateworkers", "description": "Queue updates for all workers at their next idle point"},
+				{"name": "tgupdateworkers", "description": "Queue worker updates and supported Codex runtime checks"},
 			}})
 			return
 		}
@@ -90,7 +90,7 @@ func (s *Server) webuiCommands(w http.ResponseWriter, r *http.Request) {
 			for _, worker := range workers {
 				lines = append(lines, worker.Name+": "+webUIWorkerUpdateText(worker))
 			}
-			lines = append(lines, "Each worker will check for an update at its next idle point, after its turns and pending work finish. Offline workers receive the request when they reconnect. Workers already on the latest version are not restarted. Use /tgstatus to check progress.")
+			lines = append(lines, "Each worker will check for an update at its next idle point, after its turns and pending work finish. Supporting workers also check Codex runtime versions. Offline workers receive the request when they reconnect. A Codex runtime update may also restart the worker supervisor. Results update automatically; /tgstatus also shows progress.")
 			response.Text = strings.Join(lines, "\n")
 		}
 	} else {
@@ -165,6 +165,14 @@ func (s *Server) webuiCommands(w http.ResponseWriter, r *http.Request) {
 }
 
 func webUIWorkerUpdateText(worker registry.WorkerUpdateStatus) string {
+	status := webUIWorkerBinaryUpdateText(worker)
+	if codex := worker.CodexSummary(); codex != "" {
+		status += "\n" + codex
+	}
+	return status
+}
+
+func webUIWorkerBinaryUpdateText(worker registry.WorkerUpdateStatus) string {
 	switch worker.State {
 	case "queued":
 		return "queued"
@@ -175,7 +183,10 @@ func webUIWorkerUpdateText(worker registry.WorkerUpdateStatus) string {
 	case "completed":
 		return "updated and restarted · " + worker.Version
 	case "up_to_date":
-		return "up to date · " + worker.Version + " · no restart"
+		if worker.Codex != nil {
+			return "worker binary up to date · " + worker.Version
+		}
+		return "up to date · " + worker.Version + " · no worker restart"
 	case "failed":
 		if worker.ErrorCode == "unsupported_worker" || worker.ErrorCode == "update_unavailable" {
 			return "local update required: codex-telegramgw update worker"

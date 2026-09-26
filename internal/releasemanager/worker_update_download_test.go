@@ -65,8 +65,8 @@ func TestRequestedWorkerUpdateRetriesIncompletePackageDownloads(t *testing.T) {
 				t.Fatal("retry reused a partially validated extraction directory")
 			}
 			_, err = f.m.requestedWorkerStep(t.Context(), f.l, plan)
-			if !errors.As(err, &busy) || f.prepares != 2 || workerDownloads != 1 || localDownloads != 2 || f.checks != 0 {
-				t.Fatalf("busy polling redownloaded packages or checked the runtime: err=%v prepares=%d worker=%d local=%d runtime=%d", err, f.prepares, workerDownloads, localDownloads, f.checks)
+			if !errors.As(err, &busy) || f.prepares != 2 || workerDownloads != 1 || localDownloads != 2 || f.checks != 1 {
+				t.Fatalf("busy polling redownloaded packages or repeated the runtime check: err=%v prepares=%d worker=%d local=%d runtime=%d", err, f.prepares, workerDownloads, localDownloads, f.checks)
 			}
 			if installed := updateRead(t, f.l.Binary); installed != "worker" || FileExists(f.l.Backups) || !strings.Contains(busy.Reason, "active turn") {
 				t.Fatalf("package recovery changed the busy installation: binary=%q backups=%t reason=%q", installed, FileExists(f.l.Backups), busy.Reason)

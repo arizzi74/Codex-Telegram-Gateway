@@ -371,25 +371,37 @@ Gateway updates back up SQLite before migrations and verify readiness after
 startup. Workers continue running while the gateway restarts and replay their
 durable outboxes when it returns.
 
-### Request worker updates from Telegram
+### Request worker updates from Telegram or the Web UI
 
-Send `/tgupdateworkers` without arguments. It queues a check for every enabled
+Send `/tgupdateworkers` without arguments in Telegram or the Web UI. It queues a check for every enabled
 worker, including offline workers, without requiring or changing the selected
 session. Repeated requests share an existing pending update. Offline workers
 receive it when they reconnect, and requests survive gateway and worker restarts.
 
-Each worker checks the configured GitHub release repository and waits until all
-its turns and pending work finish before installing a newer release and
-restarting. A worker already on the latest version reports that result without
-restarting. Results return to the chat and topic that requested the update.
+Each worker checks the configured GitHub release repository and checks the
+official stable Codex release, even if its daily runtime check already ran.
+Installation waits until all turns and pending work finish. A runtime update
+restarts its app servers and the worker service that supervises them; when both
+worker and runtime are current, no restart is needed. Results include installed and running Codex
+versions for each runtime profile, the latest available version, and the check
+time. Pinned or externally managed runtimes are reported without changing their
+installation. A Codex check or update failure is reported separately from the
+worker binary's result.
+
+Telegram results return to the chat and topic that requested the update. The
+Web UI keeps its command panel updated until each worker returns a result;
+closing the panel stops observation without cancelling the queued updates.
+Use `/tgstatus` in the Web UI to inspect results later.
 Temporary download failures are retried; a failed request reports its outcome
 and can be submitted again.
 
 This command requires gateway and worker v0.5.29 or later. An older worker
 reports that it first needs a local `codex-telegramgw update worker`. Requested
 updates use an independent updater service and do not change automatic update
-schedules. They update the worker and its local helper; the separate daily
-Codex runtime check continues on its normal schedule.
+schedules. Codex version reporting and the explicit runtime check require the
+v0.5.61 updater; a request executed by an older updater can upgrade the worker
+without reporting Codex versions. Submit a new request after that upgrade.
+Automatic background Codex checks continue once per UTC day.
 
 ### Upgrade to the `/tgw` URL routes
 

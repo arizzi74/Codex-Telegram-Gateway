@@ -70,7 +70,7 @@ func (m *Manager) requestWorkerUpdate(ctx context.Context, args []string) error 
 		return err
 	}
 	defer os.RemoveAll(stage)
-	plan := &requestedWorkerPlan{stage: stage}
+	plan := &requestedWorkerPlan{stage: stage, codexCache: filepath.Join(workerupdate.Directory(stateFile), id+".codex-check.json")}
 	loggedBusy := false
 	return runRequestedWorkerUpdate(ctx, stateFile, request, 5*time.Second, 30*time.Second, func(ctx context.Context) (protocol.WorkerUpdateResult, error) {
 		result, err := m.requestedWorkerStep(ctx, l, plan)
@@ -96,19 +96,63 @@ func (m *Manager) requestWorkerUpdate(ctx context.Context, args []string) error 
 }
 
 type requestedWorkerPlan struct {
-	stage    string
-	release  *Release
-	packages map[string]string
+	stage        string
+	release      *Release
+	packages     map[string]string
+	workerResult *protocol.WorkerUpdateResult
+	codexReport  *protocol.CodexUpdateReport
+	codexCache   string
 }
 
-// This path deliberately excludes the daily Codex runtime check: a Telegram
-// worker update request with no newer worker release must not restart anything.
+// Explicit maintenance checks Codex once per durable request, independently of
+// automatic discovery. Each component still obtains its own live idle lease.
 func (m *Manager) requestedWorkerStep(ctx context.Context, l *Layout, plan *requestedWorkerPlan) (protocol.WorkerUpdateResult, error) {
 	unlock, err := Lock(l.Lock)
 	if err != nil {
 		return protocol.WorkerUpdateResult{}, err
 	}
 	defer unlock()
+	m.requestedCodexDiscovery(ctx, plan)
+	if ctx.Err() != nil {
+		return protocol.WorkerUpdateResult{}, ctx.Err()
+	}
+	// An interrupted runtime installation may leave its launcher unavailable.
+	// Restore its journal before worker upgrade preflight or pending readiness
+	// checks, which also depend on those configured runtime executables.
+	journal, recoveryErr := loadCodexRecovery(l)
+	if recoveryErr == nil && journal != nil {
+		recoveryErr = m.updateCodexRuntime(ctx, l, false, plan.codexReport.LatestVersion)
+	}
+	if recoveryErr != nil {
+		result := protocol.WorkerUpdateResult{}
+		if plan.workerResult != nil {
+			result = *plan.workerResult
+		}
+		report := *plan.codexReport
+		report.State, report.ErrorCode = "failed", "update_failed"
+		result.Codex = &report
+		var busy *BusyError
+		if ctx.Err() != nil || errors.As(recoveryErr, &busy) || plan.workerResult == nil {
+			return result, recoveryErr
+		}
+		return result, nil
+	}
+	if plan.workerResult == nil {
+		result, err := m.requestedWorkerReleaseStep(ctx, l, plan)
+		if err != nil {
+			report := *plan.codexReport
+			if report.ErrorCode == "" {
+				report.State, report.ErrorCode = "failed", "worker_update_failed"
+			}
+			result.Codex = &report
+			return result, err
+		}
+		plan.workerResult = &result
+	}
+	return m.requestedCodexMaintenance(ctx, l, plan)
+}
+
+func (m *Manager) requestedWorkerReleaseStep(ctx context.Context, l *Layout, plan *requestedWorkerPlan) (protocol.WorkerUpdateResult, error) {
 	settings, err := SavedSettings(l)
 	if err != nil {
 		return protocol.WorkerUpdateResult{}, err
@@ -202,7 +246,8 @@ func runRequestedWorkerUpdate(ctx context.Context, stateFile string, request pro
 		if !errors.As(err, &busy) {
 			failures++
 			if failures >= 3 {
-				return workerupdate.Complete(stateFile, protocol.WorkerUpdateResult{RequestID: request.RequestID, State: "failed", ErrorCode: "update_failed"})
+				result.RequestID, result.State, result.ErrorCode = request.RequestID, "failed", "update_failed"
+				return workerupdate.Complete(stateFile, result)
 			}
 			delay = errorDelay
 		}

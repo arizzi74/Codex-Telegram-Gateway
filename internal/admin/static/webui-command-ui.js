@@ -7,10 +7,12 @@
     const { state } = ctx;
     let matches = [], index = 0, inline = false, mode = '', epoch = 0, pending = false, pendingToken = 0;
     let choiceRows = [], choiceIndex = 0, choiceFocus = false, menuBack = null;
+    let updateMonitor = null;
     let raw = false;
     const panel = $('command-panel'), content = $('command-content'), list = $('command-suggestions');
     const prompt = $('prompt'), search = $('command-search');
     function show(title, nextMode = 'result') {
+      stopUpdateMonitor();
       epoch++; mode = nextMode;
       choiceRows = []; choiceIndex = 0; choiceFocus = false; menuBack = null;
       panel.hidden = false; $('command-title').textContent = title;
@@ -26,6 +28,7 @@
     }
     function close(focus = false) {
       if (focus && pending) return;
+      stopUpdateMonitor();
       epoch++; mode = ''; panel.hidden = true;
       choiceRows = []; choiceFocus = false; menuBack = null;
       content.replaceChildren(); list.replaceChildren();
@@ -36,6 +39,57 @@
     function text(value, error = false) {
       const item = node('p', 'command-text' + (error ? ' command-result-error' : ''), clean(value)); content.append(item); return item;
     }
+    function stopUpdateMonitor() {
+      const previous = updateMonitor; updateMonitor = null;
+      if (!previous) return;
+      clearTimeout(previous.timer);
+      if (previous.reading) ctx.cancelGatewayCommand();
+    }
+    function monitorWorkerUpdates(result, output) {
+      const targets = new Map((result.workers || []).filter(worker => worker.worker_id).map(worker => [worker.worker_id, worker.request_id || '']));
+      if (!targets.size) return;
+      const hint = text('Checking worker update progress automatically…'); hint.setAttribute('role', 'status');
+      const monitor = { generation: state.generation, ticket: epoch, started: Date.now(), timer: null, reading: false, resume: null };
+      updateMonitor = monitor;
+      const current = () => updateMonitor === monitor && monitor.generation === state.generation && monitor.ticket === epoch && state.authenticated && !panel.hidden;
+      const schedule = () => {
+        if (!current() || document.hidden) return;
+        const elapsed = Date.now() - monitor.started;
+        monitor.timer = setTimeout(check, elapsed < 30000 ? 2000 : elapsed < 120000 ? 5000 : 15000);
+      };
+      monitor.resume = () => { if (!monitor.reading && current()) { clearTimeout(monitor.timer); monitor.timer = setTimeout(check, 0); } };
+      async function check() {
+        if (!current() || document.hidden) return;
+        monitor.reading = true;
+        try {
+          const status = await ctx.gatewayCommand('tgstatus', { includeSession: false });
+          if (!current()) return;
+          if (status.error) throw new Error(status.error.message || 'Could not read worker update status.');
+          const workers = new Map((status.workers || []).map(worker => [worker.worker_id, worker]));
+          if ([...targets].some(([id, request]) => request && workers.get(id)?.request_id && workers.get(id).request_id !== request)) {
+            hint.textContent = 'A newer worker update request replaced this status. Use Check worker update status to see the latest results.';
+            monitor.reading = false; stopUpdateMonitor(); return;
+          }
+          output.textContent = clean(status.text || 'Worker update status is not available yet.');
+          if ([...targets.keys()].every(id => ['completed', 'up_to_date', 'failed'].includes(workers.get(id)?.state))) {
+            hint.textContent = [...targets.keys()].some(id => workers.get(id).state === 'failed') ? 'Update checks finished. See worker results above.' : 'All worker update checks finished.';
+            monitor.reading = false; stopUpdateMonitor(); return;
+          }
+          schedule();
+        } catch (error) {
+          if (current()) {
+            hint.textContent = 'Automatic status checks stopped. ' + clean(error.message) + ' Use Check worker update status to check again; the update request will not be resent.';
+            monitor.reading = false; stopUpdateMonitor();
+          }
+        } finally { monitor.reading = false; }
+      }
+      schedule();
+    }
+    document.addEventListener('visibilitychange', () => {
+      if (!updateMonitor) return;
+      if (document.hidden) clearTimeout(updateMonitor.timer);
+      else updateMonitor.resume();
+    });
     function activateChoice(next, focus = false) {
       if (!choiceRows.length || panel.hidden) return;
       choiceIndex = Math.max(0, Math.min(next, choiceRows.length - 1));
@@ -298,8 +352,11 @@
       if (entry.kind === 'gateway') {
         if (args) { show('/' + name); text('Use /' + name + ' without arguments.', true); return; }
         return perform('/' + name, () => ctx.gatewayCommand(name), result => {
-          consume(original); text(result.text || 'Done.');
-          if (name === 'tgupdateworkers') button('Check worker update status', () => execute('tgstatus'));
+          consume(original); const output = text(result.text || 'Done.');
+          if (name === 'tgupdateworkers') {
+            monitorWorkerUpdates(result, output);
+            button('Check worker update status', () => execute('tgstatus'));
+          }
         });
       }
       if (['model', 'permissions', 'status', 'usage'].includes(name)) return worker(name, args, original);
@@ -427,6 +484,8 @@
     search.addEventListener('input', () => { index = 0; suggestions(search.value); });
     search.addEventListener('keydown', keydown);
     panel.addEventListener('keydown', keydown);
-    return { open, close, handle, changed, keydown, update, get pending() { return pending; }, sessionChanged() { close(); pendingToken++; pending = false; ctx.cancelGatewayCommand(); } };
+    return { open, close, handle, changed, keydown, update,
+      gatewayAllowed(value) { const parsed = catalog.parse(value); return state.authenticated && catalog.find(parsed?.name)?.kind === 'gateway'; },
+      get pending() { return pending; }, sessionChanged() { close(); pendingToken++; pending = false; ctx.cancelGatewayCommand(); } };
   } };
 })();

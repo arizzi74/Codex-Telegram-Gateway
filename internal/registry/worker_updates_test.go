@@ -64,12 +64,12 @@ func TestWorkerUpdatesQueueOfflineWorkersWithoutRuntimesAndSurviveRestart(t *tes
 		t.Fatal(err)
 	}
 	result := updateTestAccept(t, store, updateTestInput(1))
-	want := []WorkerUpdateStatus{{WorkerID: first.ID.String(), Name: "First", State: "queued", Version: "1.0.0"}, {WorkerID: second.ID.String(), Name: "Second", State: "queued", Version: "1.0.0"}}
+	firstRequest := pendingUpdate(t, store, first.ID)
+	secondRequest := pendingUpdate(t, store, second.ID)
+	want := []WorkerUpdateStatus{{WorkerID: first.ID.String(), RequestID: firstRequest.RequestID, Name: "First", State: "queued", Version: "1.0.0"}, {WorkerID: second.ID.String(), RequestID: secondRequest.RequestID, Name: "Second", State: "queued", Version: "1.0.0"}}
 	if !reflect.DeepEqual(result.WorkerUpdates, want) {
 		t.Fatalf("queued workers = %+v, want %+v", result.WorkerUpdates, want)
 	}
-	firstRequest := pendingUpdate(t, store, first.ID)
-	secondRequest := pendingUpdate(t, store, second.ID)
 	if requests, err := store.PendingWorkerUpdates(ctx, disabled.ID); err != nil || len(requests) != 0 {
 		t.Fatalf("disabled requests = %+v %v", requests, err)
 	}
@@ -215,7 +215,7 @@ func TestWorkerUpdateResultsNotifyOnlyOriginalSubscribersOnce(t *testing.T) {
 		if err := json.Unmarshal(raw, &response); err != nil {
 			t.Fatal(err)
 		}
-		want := []WorkerUpdateStatus{{WorkerID: worker.ID.String(), Name: "Frozen worker name", State: "completed", Version: "1.1.0"}}
+		want := []WorkerUpdateStatus{{WorkerID: worker.ID.String(), RequestID: request.RequestID, Name: "Frozen worker name", State: "completed", Version: "1.1.0"}}
 		if !reflect.DeepEqual(response.WorkerUpdates, want) || response.SessionID != "" || response.RuntimeID != "" {
 			t.Fatalf("completion notice was not frozen/private: %+v", response)
 		}
@@ -280,6 +280,9 @@ func TestWorkerUpdateResultsRejectForeignTargetsAndInvalidData(t *testing.T) {
 		}},
 		{"unsafe error", func(e *protocol.Event) {
 			e.Data, _ = json.Marshal(protocol.WorkerUpdateResult{RequestID: request.RequestID, State: "failed", ErrorCode: "unbounded text with private details"})
+		}},
+		{"invalid runtime report", func(e *protocol.Event) {
+			e.Data, _ = json.Marshal(protocol.WorkerUpdateResult{RequestID: request.RequestID, State: "up_to_date", Version: "1.0.0", Codex: &protocol.CodexUpdateReport{State: "pending"}})
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

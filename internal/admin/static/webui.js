@@ -289,8 +289,10 @@
     if (steerNoticeTurn && (!state.connected || state.turn !== steerNoticeTurn)) clearSteerNotice();
     const available = state.connected && !state.loading && !state.submitting && !commandUI?.pending;
     const image = imageDrafts.get(state.selected?.session_id);
-    $('send').disabled = !available || (!image && !$('prompt').value.trim()) || !!image?.loading;
-    $('send').textContent = state.submitting ? 'Sending…' : state.turn ? 'Steer ↑' : 'Send ↑';
+    const gatewayAllowed = !image && commandUI?.gatewayAllowed($('prompt').value);
+    const sendAvailable = available || (gatewayAllowed && !state.submitting && !commandUI.pending);
+    $('send').disabled = !sendAvailable || (!image && !$('prompt').value.trim()) || !!image?.loading;
+    $('send').textContent = state.submitting ? 'Sending…' : state.turn && !gatewayAllowed ? 'Steer ↑' : 'Send ↑';
     $('stop').hidden = !state.turn;
     $('stop').disabled = !available;
     $('attach-image').disabled = !state.selected || state.submitting || !!image;
@@ -1293,18 +1295,24 @@
     saveDraft(); commandUI?.sessionChanged(); state.stopped = true; state.generation++;
     closeSocket(); disableQuestions(); connection('disconnected', 'Disconnected. Running work continues; your draft is kept.'); updateControls();
   }
-  async function gatewayCommand(command) {
+  async function gatewayCommand(command, options = {}) {
+    const readonly = command === 'tgstatus' || command === 'tginstances';
+    const generation = state.generation;
     const csrf = document.cookie.split('; ').find(value => value.startsWith('__Host-telegramgw-csrf='))?.split('=').slice(1).join('=') || '';
     const controller = new AbortController(); gatewayCommandAbort = controller;
     const timeout = setTimeout(() => controller.abort(), 30000);
     let response;
     try {
-      response = await fetch(api + '/commands', { method: 'POST', credentials: 'same-origin', cache: 'no-store', signal: controller.signal, headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrf }, body: JSON.stringify({ command, ...(state.selected ? { session_id: state.selected.session_id } : {}) }) });
-      if (response.status === 401) { expire(); throw new Error('Sign in to continue.'); }
+      const parameters = { command, ...(options.includeSession !== false && state.selected ? { session_id: state.selected.session_id } : {}) };
+      const url = api + '/commands' + (readonly ? '?' + new URLSearchParams(parameters) : '');
+      response = await fetch(url, { method: readonly ? 'GET' : 'POST', credentials: 'same-origin', cache: 'no-store', signal: controller.signal,
+        ...(readonly ? {} : { headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrf }, body: JSON.stringify(parameters) }) });
+      if (response.status === 401) { if (generation === state.generation) expire(); throw new Error('Sign in to continue.'); }
       if (!response.ok) throw new Error('Gateway command failed (' + response.status + '). Refresh the page and retry if necessary.');
       return await response.json();
     } catch (error) {
       if (response && !response.ok) throw error;
+      if (readonly) throw new Error('Could not read the latest gateway status. Check your connection and try again.');
       throw new Error('The connection was interrupted or timed out. The command may have been accepted; check /tgstatus before retrying. It will not be resent automatically.');
     } finally { clearTimeout(timeout); if (gatewayCommandAbort === controller) gatewayCommandAbort = null; }
   }

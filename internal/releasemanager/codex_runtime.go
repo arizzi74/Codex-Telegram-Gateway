@@ -83,6 +83,26 @@ func codexCheckDue(state codexUpdateState, now time.Time) bool {
 	return state.CheckedAt.IsZero() || state.CheckedAt.UTC().Format(time.DateOnly) != now.UTC().Format(time.DateOnly) || state.CheckedAt.After(now.Add(5*time.Minute))
 }
 
+func codexProfileBinary(l *Layout, binary string) (string, error) {
+	if binary == "" {
+		return "", errors.New("configured Codex runtime executable is unavailable")
+	}
+	if filepath.IsAbs(binary) {
+		return binary, nil
+	}
+	if strings.ContainsRune(binary, filepath.Separator) {
+		return filepath.Join(filepath.Dir(l.Config), binary), nil
+	}
+	if candidate := filepath.Join(l.Bin, binary); FileExists(candidate) {
+		return candidate, nil
+	}
+	path, err := exec.LookPath(binary)
+	if err != nil {
+		return "", errors.New("configured Codex runtime executable is unavailable")
+	}
+	return path, nil
+}
+
 func (m *Manager) codexRuntimePlans(ctx context.Context, l *Layout) ([]codexRuntimePlan, string, error) {
 	data, err := os.ReadFile(l.Config)
 	if err != nil {
@@ -101,18 +121,9 @@ func (m *Manager) codexRuntimePlans(ctx context.Context, l *Layout) ([]codexRunt
 		if profile.ID == "" || profile.Binary == "" {
 			return nil, "", errors.New("invalid configured Codex runtime profile")
 		}
-		binary := profile.Binary
-		if !filepath.IsAbs(binary) {
-			if strings.ContainsRune(binary, filepath.Separator) {
-				binary = filepath.Join(filepath.Dir(l.Config), binary)
-			} else if candidate := filepath.Join(l.Bin, binary); FileExists(candidate) {
-				binary = candidate
-			} else {
-				binary, err = exec.LookPath(binary)
-				if err != nil {
-					return nil, "", errors.New("configured Codex runtime executable is unavailable")
-				}
-			}
+		binary, err := codexProfileBinary(l, profile.Binary)
+		if err != nil {
+			return nil, "", err
 		}
 		distribution, err := m.inspectCodexDistribution(ctx, binary)
 		if errors.Is(err, ErrCodexDistributionUnsupported) {
@@ -136,6 +147,12 @@ func (m *Manager) codexRuntimePlans(ctx context.Context, l *Layout) ([]codexRunt
 // Only release discovery is daily: cached upgrades and an already-updated
 // launcher are reconsidered at every scheduler tick until the worker is idle.
 func (m *Manager) UpdateCodexRuntime(ctx context.Context, l *Layout, check bool) error {
+	return m.updateCodexRuntime(ctx, l, check, "")
+}
+
+// Explicit requests supply their freshly checked stable version. They do not
+// change the automatic discovery clock or refetch metadata while waiting idle.
+func (m *Manager) updateCodexRuntime(ctx context.Context, l *Layout, check bool, latestOverride string) error {
 	if l.Component != "worker" {
 		return errors.New("Codex runtime updates require a worker installation")
 	}
@@ -161,6 +178,12 @@ func (m *Manager) UpdateCodexRuntime(ctx context.Context, l *Layout, check bool)
 	if err != nil {
 		return err
 	}
+	if latestOverride != "" {
+		if _, err := ParseVersion(latestOverride); err != nil {
+			return errors.New("invalid explicit Codex release version")
+		}
+		state.LatestVersion, state.CheckFailed = latestOverride, false
+	}
 	if len(state.RejectedVersions) > 0 && state.RejectedByWorkerVersion != "" {
 		if version, err := m.installedCodexWorkerVersion(ctx, l); err == nil && codexWorkerUpgrade(version, state.RejectedByWorkerVersion) {
 			state.RejectedVersions = nil
@@ -183,7 +206,7 @@ func (m *Manager) UpdateCodexRuntime(ctx context.Context, l *Layout, check bool)
 		return err
 	}
 	var checkErr error
-	if codexCheckDue(state, m.updateNow()) {
+	if latestOverride == "" && codexCheckDue(state, m.updateNow()) {
 		state.CheckedAt = m.updateNow().UTC()
 		state.CheckFailed = true
 		if !check {

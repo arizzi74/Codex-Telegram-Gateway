@@ -22,8 +22,11 @@ func TestWebUIWorkerUpdatesQueueDurablyWithoutTelegram(t *testing.T) {
 		t.Fatalf("queue = %+v %v", updates, err)
 	}
 	request := pendingUpdate(t, store, worker.ID)
+	if updates[0].RequestID != request.RequestID {
+		t.Fatalf("queue omitted durable request identity: %+v", updates[0])
+	}
 	updates, err = store.QueueWebUIWorkerUpdates(ctx)
-	if err != nil || len(updates) != 1 || updates[0].State != "already_queued" || pendingUpdate(t, store, worker.ID) != request {
+	if err != nil || len(updates) != 1 || updates[0].State != "already_queued" || updates[0].RequestID != request.RequestID || pendingUpdate(t, store, worker.ID) != request {
 		t.Fatalf("repeat = %+v %v", updates, err)
 	}
 	path := store.pool.path
@@ -57,7 +60,7 @@ func TestWebUIWorkerUpdatesQueueDurablyWithoutTelegram(t *testing.T) {
 		t.Fatal(err)
 	}
 	updates, err = store.WorkerUpdateSnapshot(ctx)
-	if err != nil || len(updates) != 1 || updates[0].State != "up_to_date" || updates[0].Version != "1.0.0" {
+	if err != nil || len(updates) != 1 || updates[0].State != "up_to_date" || updates[0].Version != "1.0.0" || updates[0].RequestID != request.RequestID || updates[0].Codex != nil {
 		t.Fatalf("completed snapshot = %+v %v", updates, err)
 	}
 	if err := store.pool.QueryRow(ctx, `SELECT count(*) FROM telegram_deliveries`).Scan(&deliveries); err != nil || deliveries != 0 {
@@ -72,7 +75,7 @@ func TestWebUIWorkerUpdatesQueueDurablyWithoutTelegram(t *testing.T) {
 		t.Fatal(err)
 	}
 	updates, err = store.WorkerUpdateSnapshot(ctx)
-	if err != nil || len(updates) != 1 || updates[0].State != "pending" {
+	if err != nil || len(updates) != 1 || updates[0].State != "pending" || updates[0].RequestID == request.RequestID {
 		t.Fatalf("new pending snapshot = %+v %v", updates, err)
 	}
 }

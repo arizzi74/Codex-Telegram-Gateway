@@ -158,11 +158,43 @@ func TestWorkerUpdateCommandAndFrozenResultRendering(t *testing.T) {
 	}
 	response.View = "worker_update_result"
 	response.WorkerUpdates = []registry.WorkerUpdateStatus{{Name: "Build worker", State: "up_to_date", Version: "0.5.29"}}
-	if text := sender.renderWorkerUpdates(response); !strings.Contains(text, "No restart") || strings.Contains(text, "Updated and restarted") {
+	if text := sender.renderWorkerUpdates(response); !strings.Contains(text, "No worker restart") || strings.Contains(text, "Updated and restarted") {
 		t.Fatalf("misleading no-update result: %s", text)
 	}
 	response.WorkerUpdates[0].State, response.WorkerUpdates[0].ErrorCode = "failed", "unsupported_worker"
 	if text := sender.renderWorkerUpdates(response); !strings.Contains(text, "codex-telegramgw update worker") {
 		t.Fatalf("missing bootstrap guidance: %s", text)
+	}
+}
+
+func TestWorkerUpdateRenderingSeparatesCodexCheckFromWorkerSuccess(t *testing.T) {
+	redactor, err := auth.NewRedactor([]string{"private-profile"}, "[REDACTED]")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sender := &Sender{}
+	sender.options.Redactor = redactor
+	response := registry.AcceptResult{View: "worker_update_result", WorkerUpdates: []registry.WorkerUpdateStatus{{
+		Name: "Worker", State: "completed", Version: "1.1.0",
+		Codex: &protocol.CodexUpdateReport{State: "failed", ErrorCode: "check_failed", Profiles: []protocol.CodexRuntimeVersion{{ProfileID: "private-profile", InstalledVersion: "0.157.1", RunningVersion: "0.157.0", Support: "external"}}},
+	}}}
+	text := sender.renderWorkerUpdates(response)
+	for _, want := range []string{"Updated and restarted · 1.1.0", "version check failed", "installed 0.157.1", "running 0.157.0", "externally managed; not updated", "[REDACTED]"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("missing %q in %s", want, text)
+		}
+	}
+	if strings.Contains(text, "private-profile") || strings.Contains(text, "Update request failed") {
+		t.Fatalf("Codex failure erased worker success or leaked profile: %s", text)
+	}
+	response.WorkerUpdates[0].State = "up_to_date"
+	response.WorkerUpdates[0].Codex.State, response.WorkerUpdates[0].Codex.ErrorCode = "completed", ""
+	text = sender.renderWorkerUpdates(response)
+	if strings.Contains(strings.ToLower(text), "no worker restart") || !strings.Contains(text, "Worker binary up to date") || !strings.Contains(text, "Codex runtime: updated") {
+		t.Fatalf("runtime installation falsely claims no restart: %s", text)
+	}
+	response.WorkerUpdates[0].Codex = nil
+	if text := sender.renderWorkerUpdates(response); !strings.Contains(text, "check not reported") {
+		t.Fatalf("older worker falsely promises runtime check: %s", text)
 	}
 }

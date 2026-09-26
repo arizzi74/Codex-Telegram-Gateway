@@ -110,9 +110,11 @@ Supported standalone installations update when the worker has no active or
 queued work, then its app servers restart and their versions are verified.
 Runtime updates test compatibility before restarting production and retain the
 previous release for recovery if the candidate fails.
-Use `/tgupdateworkers` in Telegram to queue an update check for every worker.
-Each worker installs a newer release and restarts when all its turns finish;
-workers already up to date are left running.
+Use `/tgupdateworkers` in Telegram or the Web UI to check every worker and its
+Codex runtime against the latest releases. Results include installed, running,
+and available Codex versions. Updates wait until the worker has no active turns
+or pending work. When both are current, no restart is needed. This explicit
+check does not change the daily background schedule.
 See the [installation guide](docs/installation.md) for HTTPS setup, worker
 enrollment, and manual updates.
 

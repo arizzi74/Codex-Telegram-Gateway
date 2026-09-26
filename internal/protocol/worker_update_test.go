@@ -3,6 +3,7 @@ package protocol
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 )
@@ -38,6 +39,43 @@ func TestWorkerUpdateMessagesHaveOnlyWorkerTargetsAndBoundedResults(t *testing.T
 	} {
 		if invalid.Validate() == nil {
 			t.Fatalf("invalid outcome accepted: %#v", invalid)
+		}
+	}
+}
+
+func TestWorkerUpdateCodexReportsAreOptionalAndBounded(t *testing.T) {
+	base := WorkerUpdateResult{RequestID: uuid.NewString(), State: "completed", Version: "0.5.61"}
+	for _, state := range []string{"up_to_date", "completed", "unsupported", "no_runtimes", "failed", "withheld"} {
+		report := &CodexUpdateReport{State: state, LatestVersion: "0.157.1", CheckedAt: time.Now().UTC(), Profiles: []CodexRuntimeVersion{{ProfileID: "main", InstalledVersion: "0.157.1", RunningVersion: "0.156.0", Support: "supported"}}}
+		if state == "failed" {
+			report.ErrorCode = "update_failed"
+		} else if state == "withheld" {
+			report.ErrorCode = "rejected_release"
+		}
+		result := base
+		result.Codex = report
+		if err := result.Validate(); err != nil {
+			t.Fatalf("valid %s report rejected: %v", state, err)
+		}
+	}
+	for _, report := range []CodexUpdateReport{
+		{State: "unknown"},
+		{State: "up_to_date", LatestVersion: "0.157.1\nprivate"},
+		{State: "up_to_date", LatestVersion: strings.Repeat("1", 129)},
+		{State: "failed", ErrorCode: "private raw error"},
+		{State: "failed"},
+		{State: "withheld", ErrorCode: "update_failed"},
+		{State: "completed", ErrorCode: "check_failed"},
+		{State: "completed", Profiles: make([]CodexRuntimeVersion, 129)},
+		{State: "completed", Profiles: []CodexRuntimeVersion{{ProfileID: "main", Support: "other"}}},
+		{State: "completed", Profiles: []CodexRuntimeVersion{{ProfileID: "main\nprivate", Support: "supported"}}},
+		{State: "completed", Profiles: []CodexRuntimeVersion{{ProfileID: "main", Support: "supported", RunningVersion: "https://private.example"}}},
+		{State: "completed", Profiles: []CodexRuntimeVersion{{ProfileID: "main", Support: "supported"}, {ProfileID: "main", Support: "external"}}},
+	} {
+		result := base
+		result.Codex = &report
+		if result.Validate() == nil {
+			t.Fatalf("invalid Codex report accepted: %#v", report)
 		}
 	}
 }

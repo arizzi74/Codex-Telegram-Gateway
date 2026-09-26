@@ -814,7 +814,7 @@ func findQuestion(questions []protocol.Question, id string) (protocol.Question, 
 }
 
 func helpText() string {
-	return "Gateway commands:\n/tgstart — getting started\n/tghelp — show this guide\n/tginstances — list workers and runtimes\n/tgupdateworkers — queue worker updates after active turns finish\n/tgsessions — list, select, or create sessions\n/tgstatus — show gateway session and queue state\n/tghistory [count] — show recent user and Codex messages, newest last (default 2)\n/tglastmessages [count] — show recent user and Codex messages, newest last (default 1)\n/tgmultisession [on|off] — toggle messages from all sessions\n/tgdisconnect — clear the selection\n/tgdeletesession — delete a session and keep its folder\n/tgsteer <text> — guide the active turn\n/tginterrupt — stop the active turn\n/tgquestions — show pending questions and approvals from all sessions\n/tginput [<approval-id> <question-id> <answer>] — show requests or answer one\n\nType /_ for session command suggestions in either mode. You can use /_<session_alias> <message> to send to a session without changing your selection, or /_<session_alias> to select it. /tgmultisession controls which sessions send messages here.\n\nCodex commands use their usual names: /status, /model, /compact, /review and more. Use /help for the full list or the bot menu."
+	return "Gateway commands:\n/tgstart — getting started\n/tghelp — show this guide\n/tginstances — list workers and runtimes\n/tgupdateworkers — check worker and Codex versions; update when idle\n/tgsessions — list, select, or create sessions\n/tgstatus — show gateway session and queue state\n/tghistory [count] — show recent user and Codex messages, newest last (default 2)\n/tglastmessages [count] — show recent user and Codex messages, newest last (default 1)\n/tgmultisession [on|off] — toggle messages from all sessions\n/tgdisconnect — clear the selection\n/tgdeletesession — delete a session and keep its folder\n/tgsteer <text> — guide the active turn\n/tginterrupt — stop the active turn\n/tgquestions — show pending questions and approvals from all sessions\n/tginput [<approval-id> <question-id> <answer>] — show requests or answer one\n\nType /_ for session command suggestions in either mode. You can use /_<session_alias> <message> to send to a session without changing your selection, or /_<session_alias> to select it. /tgmultisession controls which sessions send messages here.\n\nCodex commands use their usual names: /status, /model, /compact, /review and more. Use /help for the full list or the bot menu."
 }
 
 func codexHelpText() string {
@@ -829,7 +829,7 @@ func codexHelpText() string {
 func telegramErrorText(code string) string {
 	switch code {
 	case "worker_updates_usage":
-		return "Use /tgupdateworkers without arguments to queue updates for all enabled workers."
+		return "Use /tgupdateworkers without arguments to check and update workers and Codex runtimes when idle."
 	case "image_too_large":
 		return "The image is too large. Send an image of 10 MiB or less."
 	case "image_download_failed":

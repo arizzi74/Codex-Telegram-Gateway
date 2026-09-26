@@ -82,7 +82,7 @@
     command('tgsessions', 'Find and connect to a session', 'local', '[name]', { source: 'gateway' }),
     command('tginstances', 'List workers and their runtimes', 'gateway', '', { source: 'gateway' }),
     command('tgstatus', 'Inspect gateway connections and worker state', 'gateway', '', { source: 'gateway' }),
-    command('tgupdateworkers', 'Queue worker updates after active turns finish', 'gateway', '', { source: 'gateway' }),
+    command('tgupdateworkers', 'Check worker and Codex versions; update when idle', 'gateway', '', { source: 'gateway' }),
     command('tgdisconnect', 'Disconnect this web viewer', 'local', '', { source: 'gateway' }),
     command('tghistory', 'Show recent messages in conversation order', 'local', '[count]', { source: 'gateway' }),
     command('tglastmessages', 'Show the last message or last N messages', 'local', '[count]', { source: 'gateway' }),

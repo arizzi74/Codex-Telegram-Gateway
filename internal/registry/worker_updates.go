@@ -18,11 +18,78 @@ const workerUpdateRetryAfter = 5 * time.Second
 // WorkerUpdateStatus freezes a maintenance notice independently of the active
 // session. The renderer bounds and redacts worker names before presentation.
 type WorkerUpdateStatus struct {
-	WorkerID  string `json:"worker_id"`
-	Name      string `json:"name"`
-	State     string `json:"state"`
-	Version   string `json:"version,omitempty"`
-	ErrorCode string `json:"error_code,omitempty"`
+	WorkerID  string                      `json:"worker_id"`
+	RequestID string                      `json:"request_id,omitempty"`
+	Name      string                      `json:"name"`
+	State     string                      `json:"state"`
+	Version   string                      `json:"version,omitempty"`
+	ErrorCode string                      `json:"error_code,omitempty"`
+	Codex     *protocol.CodexUpdateReport `json:"codex,omitempty"`
+}
+
+// CodexSummary formats only the structured, bounded runtime result. Callers
+// still apply their normal presentation limits and secret redaction. Keeping
+// this separate from State preserves a successful worker update when the
+// independent Codex check or installation fails.
+func (w WorkerUpdateStatus) CodexSummary() string {
+	if w.Codex == nil {
+		switch w.State {
+		case "completed", "up_to_date", "failed":
+			return "Codex runtime: check not reported by this worker."
+		default:
+			return ""
+		}
+	}
+	r := w.Codex
+	status := "result unavailable"
+	switch r.State {
+	case "up_to_date":
+		status = "up to date"
+	case "completed":
+		status = "updated"
+	case "failed":
+		switch r.ErrorCode {
+		case "check_failed":
+			status = "version check failed; see the worker update service logs"
+		case "inspection_failed":
+			status = "installed or running version could not be verified"
+		case "worker_update_failed":
+			status = "runtime installation skipped because the worker update failed"
+		default:
+			status = "runtime update failed; see the worker update service logs"
+		}
+	case "unsupported":
+		status = "automatic updates unavailable for the configured runtimes"
+	case "withheld":
+		status = "update withheld; this release previously failed validation"
+	case "no_runtimes":
+		status = "no runtimes configured"
+	}
+	lines := []string{"Codex runtime: " + status}
+	if r.LatestVersion != "" {
+		lines = append(lines, "Latest stable: "+r.LatestVersion)
+	}
+	if !r.CheckedAt.IsZero() {
+		lines = append(lines, "Checked: "+r.CheckedAt.UTC().Format("2006-01-02 15:04:05 UTC"))
+	}
+	for _, p := range r.Profiles {
+		installed, running := p.InstalledVersion, p.RunningVersion
+		if installed == "" {
+			installed = "unavailable"
+		}
+		if running == "" {
+			running = "unavailable"
+		}
+		line := p.ProfileID + " · installed " + installed + " · running " + running
+		switch p.Support {
+		case "external":
+			line += " · externally managed; not updated"
+		case "unavailable":
+			line += " · update support unavailable"
+		}
+		lines = append(lines, line)
+	}
+	return strings.Join(lines, "\n")
 }
 
 func acceptWorkerUpdates(ctx context.Context, tx *dbTx, in IncomingUpdate) (AcceptResult, error) {
@@ -85,6 +152,7 @@ func queueWorkerUpdates(ctx context.Context, tx *dbTx, subscriber *IncomingUpdat
 		if err != nil {
 			return nil, fmt.Errorf("registry: queue worker update: %w", err)
 		}
+		worker.RequestID = requestID
 		if subscriber != nil {
 			if _, err := tx.Exec(ctx, `INSERT INTO worker_update_watchers (request_id,bot_id,user_id,chat_id,message_thread_id)
             VALUES ($1,$2,$3,$4,$5) ON CONFLICT (request_id,bot_id,chat_id,message_thread_id) DO NOTHING`, requestID, subscriber.BotID, subscriber.UserID, subscriber.ChatID, subscriber.TopicID); err != nil {
@@ -98,7 +166,7 @@ func queueWorkerUpdates(ctx context.Context, tx *dbTx, subscriber *IncomingUpdat
 // WorkerUpdateSnapshot returns only the latest maintenance request per enabled
 // worker. It excludes subscriber identities and internal dispatch metadata.
 func (s *Store) WorkerUpdateSnapshot(ctx context.Context) ([]WorkerUpdateStatus, error) {
-	rows, err := s.pool.Query(ctx, `SELECT r.worker_id,w.name,r.state,COALESCE(r.version,''),COALESCE(r.error_code,'')
+	rows, err := s.pool.Query(ctx, `SELECT r.worker_id,r.request_id,w.name,r.state,COALESCE(r.version,''),COALESCE(r.error_code,''),r.codex_report
         FROM workers w JOIN worker_update_requests r ON r.request_id=(
             SELECT request_id FROM worker_update_requests WHERE worker_id=w.worker_id
             ORDER BY (state='pending') DESC,created_at DESC,rowid DESC LIMIT 1)
@@ -110,8 +178,14 @@ func (s *Store) WorkerUpdateSnapshot(ctx context.Context) ([]WorkerUpdateStatus,
 	updates := make([]WorkerUpdateStatus, 0)
 	for rows.Next() {
 		var update WorkerUpdateStatus
-		if err := rows.Scan(&update.WorkerID, &update.Name, &update.State, &update.Version, &update.ErrorCode); err != nil {
+		var codex []byte
+		if err := rows.Scan(&update.WorkerID, &update.RequestID, &update.Name, &update.State, &update.Version, &update.ErrorCode, &codex); err != nil {
 			return nil, err
+		}
+		if len(codex) != 0 {
+			if err := json.Unmarshal(codex, &update.Codex); err != nil {
+				return nil, fmt.Errorf("registry: decode worker Codex update report: %w", err)
+			}
 		}
 		updates = append(updates, update)
 	}
@@ -205,8 +279,16 @@ func completeWorkerUpdate(ctx context.Context, tx *dbTx, workerID uuid.UUID, res
 		// or overwrite the outcome of this request or a later request.
 		return nil
 	}
-	if _, err := tx.Exec(ctx, `UPDATE worker_update_requests SET state=$3,version=$4,error_code=$5,
-        completed_at=(strftime('%Y-%m-%dT%H:%M:%f','now') || '000000Z') WHERE request_id=$1 AND worker_id=$2`, result.RequestID, workerID, result.State, result.Version, result.ErrorCode); err != nil {
+	var codex any
+	if result.Codex != nil {
+		raw, err := json.Marshal(result.Codex)
+		if err != nil {
+			return fmt.Errorf("registry: encode worker Codex update report: %w", err)
+		}
+		codex = string(raw)
+	}
+	if _, err := tx.Exec(ctx, `UPDATE worker_update_requests SET state=$3,version=$4,error_code=$5,codex_report=$6,
+		completed_at=(strftime('%Y-%m-%dT%H:%M:%f','now') || '000000Z') WHERE request_id=$1 AND worker_id=$2`, result.RequestID, workerID, result.State, result.Version, result.ErrorCode, codex); err != nil {
 		return fmt.Errorf("registry: complete worker update: %w", err)
 	}
 	rows, err := tx.Query(ctx, `SELECT bot_id,user_id,chat_id,message_thread_id FROM worker_update_watchers WHERE request_id=$1`, result.RequestID)
@@ -227,7 +309,7 @@ func completeWorkerUpdate(ctx context.Context, tx *dbTx, workerID uuid.UUID, res
 		return err
 	}
 	rows.Close()
-	response := AcceptResult{View: "worker_update_result", WorkerUpdates: []WorkerUpdateStatus{{WorkerID: workerID.String(), Name: name, State: result.State, Version: result.Version, ErrorCode: result.ErrorCode}}}
+	response := AcceptResult{View: "worker_update_result", WorkerUpdates: []WorkerUpdateStatus{{WorkerID: workerID.String(), RequestID: result.RequestID, Name: name, State: result.State, Version: result.Version, ErrorCode: result.ErrorCode, Codex: result.Codex}}}
 	for _, destination := range destinations {
 		if err := queueUIResponse(ctx, tx, destination, response); err != nil {
 			return err
