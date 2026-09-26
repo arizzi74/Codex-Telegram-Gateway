@@ -741,16 +741,7 @@ func (m *Manager) ApplyUpdate(ctx context.Context, l *Layout, packages map[strin
 			return err
 		}
 	}
-	if err := os.MkdirAll(l.Backups, 0o700); err != nil {
-		return err
-	}
-	if err := os.Chmod(l.Backups, 0o700); err != nil {
-		return err
-	}
-	backup, err := os.MkdirTemp(l.Backups, m.updateNow().UTC().Format("20060102T150405Z")+"-")
-	if err != nil {
-		return err
-	}
+	var backup string
 	sources := []struct{ destination, source string }{
 		{l.Binary, filepath.Join(packages[l.Component], filepath.Base(l.Binary))},
 		{l.Manager, filepath.Join(packages[l.Component], "codex-telegramgw")},
@@ -763,18 +754,9 @@ func (m *Manager) ApplyUpdate(ctx context.Context, l *Layout, packages map[strin
 		paths = append(paths, source.destination)
 	}
 	snapshots := make(map[string]*updateSnapshot)
-	for index, path := range paths {
-		if _, exists := snapshots[path]; exists {
-			continue
-		}
-		snapshot, err := snapshotUpdateFile(path, filepath.Join(backup, fmt.Sprintf("%02d-%s", index, filepath.Base(path))))
-		if err != nil {
-			return err
-		}
-		snapshots[path] = snapshot
-	}
 	var database *updateDatabase
 	if l.Component == "gateway" {
+		var err error
 		database, err = openGatewayDatabase(l)
 		if err != nil {
 			return err
@@ -784,7 +766,7 @@ func (m *Manager) ApplyUpdate(ctx context.Context, l *Layout, packages map[strin
 	changed := make(map[string]bool)
 	var prepared *workerLease
 	stopped, databaseMutated := false, false
-	err = func() error {
+	err := func() error {
 		running := !fresh
 		if !fresh && l.Component == "worker" {
 			var err error
@@ -799,6 +781,30 @@ func (m *Manager) ApplyUpdate(ctx context.Context, l *Layout, packages map[strin
 				}
 			}
 		}
+		// Reserve the idle worker before copying binaries. Busy retries must
+		// not accumulate another complete backup on every timer invocation.
+		if err := os.MkdirAll(l.Backups, 0o700); err != nil {
+			return err
+		}
+		if err := os.Chmod(l.Backups, 0o700); err != nil {
+			return err
+		}
+		var err error
+		backup, err = os.MkdirTemp(l.Backups, m.updateNow().UTC().Format("20060102T150405Z")+"-")
+		if err != nil {
+			return err
+		}
+		for index, path := range paths {
+			if _, exists := snapshots[path]; exists {
+				continue
+			}
+			snapshot, err := snapshotUpdateFile(path, filepath.Join(backup, fmt.Sprintf("%02d-%s", index, filepath.Base(path))))
+			if err != nil {
+				return err
+			}
+			snapshots[path] = snapshot
+		}
+		// Snapshot I/O consumes lease time; retain the final admission fence.
 		if prepared != nil && prepared.ExpiresAt.Sub(m.updateNow()) < 45*time.Second {
 			return &BusyError{Reason: "worker update reservation expired; retry later"}
 		}
@@ -880,10 +886,34 @@ func (m *Manager) ApplyUpdate(ctx context.Context, l *Layout, packages map[strin
 		if rollbackErr != nil {
 			return errors.Join(err, fmt.Errorf("rollback could not complete; inspect private backup %s: %w", backup, rollbackErr))
 		}
+		if !stopped && backup != "" {
+			// No service was stopped, rollback completed, and any reservation
+			// has been released.
+			// Discard only this attempt's snapshots, never existing backups.
+			if cleanupErr := os.RemoveAll(backup); cleanupErr != nil {
+				return errors.Join(err, fmt.Errorf("discard unused update backup: %w", cleanupErr))
+			}
+		}
 		return err
 	}
 	if m.Out != nil {
 		fmt.Fprintf(m.Out, "Installed %s %s. Backup: %s\n", l.Component, release.Tag, backup)
 	}
+	m.pruneUpdateBackups(l, release.Tag)
 	return nil
+}
+
+// Call only after readiness and durable version confirmation, while holding
+// the update lock. Cleanup failures must not turn a healthy update into a
+// failed installation or trigger rollback.
+func (m *Manager) pruneUpdateBackups(l *Layout, version string) {
+	removed, err := pruneUpdateBackups(l, version)
+	if m.Out != nil {
+		if removed > 0 {
+			fmt.Fprintf(m.Out, "Removed %d obsolete update backups (retention: three previous versions).\n", removed)
+		}
+		if err != nil {
+			fmt.Fprintf(m.Out, "Warning: update succeeded, but some backup cleanup was skipped: %v\n", err)
+		}
+	}
 }

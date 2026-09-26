@@ -662,8 +662,15 @@ journalctl --user -u codex-worker-update.service
 ```
 
 Gateway backups are kept in `/var/backups/codex-gateway/updates`; worker binary
-backups are in `~/.local/state/codex-worker/updates`. If migration fails before
-startup, the updater restores the previous binary and SQLite backup. Once new
+backups are in `~/.local/state/codex-worker/updates`. After an update passes its
+readiness check and records the new installed version, the updater keeps one
+complete backup for each of the three newest previous versions. It removes
+older versions and duplicate copies. Busy worker checks do not create backups;
+failed updates do not prune existing backups. Unrecognized or damaged backup
+folders are preserved with a warning for manual review.
+
+If migration fails before startup, the updater restores the previous binary
+and SQLite backup. Once new
 service startup has been attempted, failures retain the new files for inspection
 so later writes cannot be lost through an automatic rollback.
 

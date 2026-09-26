@@ -421,6 +421,7 @@ func (m *Manager) execute(ctx context.Context, opts options) (retErr error) {
 				if err = SaveSettings(l, repo, release.Tag); err != nil {
 					return err
 				}
+				m.pruneUpdateBackups(l, release.Tag)
 			}
 			// An old updater may have installed this native executable at its
 			// legacy .py path. Finish that migration without restarting services.

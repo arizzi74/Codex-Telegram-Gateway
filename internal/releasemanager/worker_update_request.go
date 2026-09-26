@@ -185,6 +185,7 @@ func (m *Manager) requestedWorkerReleaseStep(ctx context.Context, l *Layout, pla
 			if err := SaveSettings(l, repo, installed); err != nil {
 				return protocol.WorkerUpdateResult{}, err
 			}
+			m.pruneUpdateBackups(l, installed)
 		}
 		return protocol.WorkerUpdateResult{State: "up_to_date", Version: installed}, nil
 	}
@@ -205,22 +206,8 @@ func (m *Manager) requestedWorkerReleaseStep(ctx context.Context, l *Layout, pla
 		}
 		plan.packages[component] = packagePath
 	}
-	// ApplyUpdate also takes its own fresh lease. This preliminary check avoids
-	// creating backup directories on every busy poll while retaining that final
-	// admission fence against a turn starting between the check and installation.
-	running, err := m.workerRunning(ctx, l)
-	if err != nil {
-		return protocol.WorkerUpdateResult{}, err
-	}
-	if running {
-		lease, err := m.workerPrepare(ctx, l)
-		if err != nil {
-			return protocol.WorkerUpdateResult{}, err
-		}
-		if err := m.workerAbort(ctx, l, lease.Token); err != nil {
-			return protocol.WorkerUpdateResult{}, err
-		}
-	}
+	// ApplyUpdate reserves the idle worker before creating any backup files
+	// and retains that reservation through the final check before stopping it.
 	if err := m.ApplyUpdate(ctx, l, plan.packages, plan.release, false); err != nil {
 		return protocol.WorkerUpdateResult{}, err
 	}
