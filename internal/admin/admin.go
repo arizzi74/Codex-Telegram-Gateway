@@ -95,6 +95,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/tgw/api/v1/admin/login/begin", s.loginBegin)
 	s.mux.HandleFunc("/tgw/api/v1/admin/login/finish", s.loginFinish)
 	s.mux.HandleFunc("/tgw/api/v1/admin/session", s.session)
+	s.mux.HandleFunc("/tgw/api/v1/admin/sessions", s.browserSessions)
+	s.mux.HandleFunc("/tgw/api/v1/admin/sessions/", s.browserSession)
 	s.mux.HandleFunc("/tgw/api/v1/admin/logout", s.logout)
 	s.mux.HandleFunc("/tgw/api/v1/admin/passkeys", s.passkeys)
 	s.mux.HandleFunc("/tgw/api/v1/admin/passkeys/", s.passkey)
@@ -188,7 +190,7 @@ func (s *Server) registrationBegin(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	} else {
-		if _, ok := s.requireAuth(w, r, true); !ok {
+		if _, ok := s.requireFreshAuth(w, r); !ok {
 			return
 		}
 		var err error
@@ -239,6 +241,11 @@ func (s *Server) registrationFinish(w http.ResponseWriter, r *http.Request) {
 	if !decode(w, r, &in) {
 		return
 	}
+	if in.BootstrapToken == "" {
+		if _, ok := s.requireFreshAuth(w, r); !ok {
+			return
+		}
+	}
 	id, err := uuid.Parse(in.CeremonyID)
 	if err != nil {
 		bad(w)
@@ -270,7 +277,7 @@ func (s *Server) registrationFinish(w http.ResponseWriter, r *http.Request) {
 	if in.BootstrapToken != "" {
 		err = s.store.CompleteBootstrapCredential(r.Context(), id, binding, in.BootstrapToken, record)
 	} else {
-		if _, ok := s.requireAuth(w, r, true); !ok {
+		if _, ok := s.requireFreshAuth(w, r); !ok {
 			return
 		}
 		err = s.store.CompleteAdminCredential(r.Context(), id, binding, record)
@@ -299,7 +306,11 @@ func (s *Server) loginBegin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	raw, _ := json.Marshal(sd)
-	c, err := s.store.NewAdminCeremony(r.Context(), "authentication", nil, raw)
+	predecessor := ""
+	if cookie, cookieErr := r.Cookie(adminCookie); cookieErr == nil {
+		predecessor = cookie.Value
+	}
+	c, err := s.store.NewAdminLoginCeremony(r.Context(), raw, predecessor, r.UserAgent())
 	if err != nil {
 		if errors.Is(err, registry.ErrAdminCeremonyLimit) {
 			tooManyRequests(w)
@@ -368,6 +379,10 @@ func (s *Server) loginFinish(w http.ResponseWriter, r *http.Request) {
 	raw, _ := json.Marshal(credential)
 	token, err := s.store.CompleteAdminLogin(r.Context(), id, binding, registry.AdminCredential{ID: credential.ID, CredentialJSON: raw})
 	if err != nil {
+		if errors.Is(err, registry.ErrAdminCeremonyInvalid) || errors.Is(err, registry.ErrAdminSessionInvalid) || errors.Is(err, registry.ErrAdminCredentialGone) {
+			forbidden(w)
+			return
+		}
 		fail(w, err)
 		return
 	}
@@ -389,16 +404,6 @@ func tooManyRequests(w http.ResponseWriter) {
 	http.Error(w, "try again later", http.StatusTooManyRequests)
 }
 
-func (s *Server) session(w http.ResponseWriter, r *http.Request) {
-	if r.Method != "GET" {
-		method(w)
-		return
-	}
-	if _, ok := s.requireAuth(w, r, false); !ok {
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]bool{"authenticated": true})
-}
 func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
 	if r.Method != "POST" {
 		method(w)
@@ -408,7 +413,10 @@ func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if c, err := r.Cookie(adminCookie); err == nil {
-		_ = s.store.RevokeAdminSession(r.Context(), c.Value)
+		if err := s.store.RevokeAdminSession(r.Context(), c.Value); err != nil {
+			fail(w, err)
+			return
+		}
 	}
 	s.clearSession(w)
 	writeJSON(w, http.StatusNoContent, nil)
@@ -438,7 +446,7 @@ func (s *Server) workers(w http.ResponseWriter, r *http.Request) {
 		method(w)
 		return
 	}
-	if _, ok := s.requireAuth(w, r, true); !ok {
+	if _, ok := s.requireFreshAuth(w, r); !ok {
 		return
 	}
 	var in struct {
@@ -464,7 +472,7 @@ func (s *Server) workers(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, map[string]string{"worker_id": wkr.ID.String(), "token": token})
 }
 func (s *Server) worker(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.requireAuth(w, r, true); !ok {
+	if _, ok := s.requireFreshAuth(w, r); !ok {
 		return
 	}
 	parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/tgw/api/v1/admin/workers/"), "/")
@@ -542,7 +550,7 @@ func (s *Server) passkey(w http.ResponseWriter, r *http.Request) {
 		method(w)
 		return
 	}
-	if _, ok := s.requireAuth(w, r, true); !ok {
+	if _, ok := s.requireFreshAuth(w, r); !ok {
 		return
 	}
 	id, err := base64.RawURLEncoding.DecodeString(strings.TrimPrefix(r.URL.Path, "/tgw/api/v1/admin/passkeys/"))

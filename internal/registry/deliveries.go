@@ -38,12 +38,13 @@ const deliveryQueueReadySQL = `SELECT EXISTS (
     SELECT 1 FROM telegram_deliveries
     WHERE status IN ('pending','failed','sending')
       AND (status IN ('pending','failed') OR next_attempt_at<=` + sqliteNow + `)
-)`
+) OR EXISTS(SELECT 1 FROM telegram_input_reply_helpers WHERE backfill_pending=1)`
 
 const claimDeliveriesSQL = `WITH claimed AS (
  SELECT delivery.delivery_id FROM telegram_deliveries delivery
  WHERE delivery.status IN ('pending','failed','sending') AND delivery.visibility_revoked=0 AND delivery.next_attempt_at <= ` + sqliteNow + `
    AND NOT (` + pendingPickerCleanupSQL + `)
+   AND NOT EXISTS(SELECT 1 FROM telegram_input_reply_helpers helper WHERE helper.delivery_id=delivery.delivery_id AND (helper.retired=1 OR helper.backfill_pending=1))
    AND (delivery.kind NOT IN ('agent_progress_message','tool_progress_message') OR (NOT ` + pendingSelectionConfirmationSQL + ` AND NOT ` + pendingProgressRepositionSQL + ` AND NOT ` + newerProgressDeliverySQL + ` AND NOT EXISTS (
      SELECT 1 FROM events progress
      JOIN events active_event ON active_event.runtime_id=progress.runtime_id
@@ -85,6 +86,9 @@ func (s *Store) ClaimDeliveries(ctx context.Context, limit int) ([]Delivery, err
 		return nil, err
 	}
 	defer tx.Rollback(ctx)
+	if err := reconcilePendingInputReplyHelpers(ctx, tx); err != nil {
+		return nil, err
+	}
 	if _, err := tx.Exec(ctx, `UPDATE telegram_deliveries SET status='cancelled' WHERE status IN ('pending','failed','sending') AND visibility_revoked=1 AND (status IN ('pending','failed') OR (status='sending' AND next_attempt_at<=`+sqliteNow+`))`); err != nil {
 		return nil, err
 	}
@@ -133,13 +137,16 @@ func (s *Store) MarkDeliverySent(ctx context.Context, id string, messageID int64
 	defer tx.Rollback(ctx)
 	var bot string
 	var chat int64
-	if err = tx.QueryRow(ctx, `UPDATE telegram_deliveries SET status='sent', sent_at=(strftime('%Y-%m-%dT%H:%M:%f','now') || '000000Z'), telegram_message_id=$2, last_error=NULL WHERE delivery_id=$1 AND status='sending' RETURNING bot_id,chat_id`, deliveryID, messageID).Scan(&bot, &chat); err != nil {
+	if err = tx.QueryRow(ctx, `UPDATE telegram_deliveries SET status='sent', sent_at=(strftime('%Y-%m-%dT%H:%M:%f','now') || '000000Z'), telegram_message_id=$2, last_error=NULL WHERE delivery_id=$1 AND (status='sending' OR EXISTS(SELECT 1 FROM telegram_input_reply_helpers helper WHERE helper.delivery_id=telegram_deliveries.delivery_id AND helper.retired=1)) RETURNING bot_id,chat_id`, deliveryID, messageID).Scan(&bot, &chat); err != nil {
 		return err
 	}
 	if err := checkpointTelegramProgress(ctx, tx, deliveryID, -1, messageID); err != nil {
 		return err
 	}
 	if err := checkpointPickerCleanup(ctx, tx, deliveryID, messageID); err != nil {
+		return err
+	}
+	if err := checkpointInputReplyHelper(ctx, tx, deliveryID, messageID); err != nil {
 		return err
 	}
 	if sessionID != "" {
@@ -287,7 +294,7 @@ func (s *Store) MarkDeliveryChunkSent(ctx context.Context, id string, index int,
 	defer tx.Rollback(ctx)
 	var bot string
 	var chat int64
-	if err = tx.QueryRow(ctx, `SELECT bot_id,chat_id FROM telegram_deliveries WHERE delivery_id=$1 AND status='sending'`, deliveryID).Scan(&bot, &chat); err != nil {
+	if err = tx.QueryRow(ctx, `SELECT bot_id,chat_id FROM telegram_deliveries WHERE delivery_id=$1 AND (status='sending' OR EXISTS(SELECT 1 FROM telegram_input_reply_helpers helper WHERE helper.delivery_id=telegram_deliveries.delivery_id AND helper.retired=1))`, deliveryID).Scan(&bot, &chat); err != nil {
 		return err
 	}
 	if _, err = tx.Exec(ctx, `UPDATE telegram_delivery_chunks SET status='sent',telegram_message_id=$3,sent_at=(strftime('%Y-%m-%dT%H:%M:%f','now') || '000000Z') WHERE delivery_id=$1 AND chunk_index=$2 AND status='pending'`, deliveryID, index, messageID); err != nil {
@@ -297,6 +304,9 @@ func (s *Store) MarkDeliveryChunkSent(ctx context.Context, id string, index int,
 		return err
 	}
 	if err := checkpointPickerCleanup(ctx, tx, deliveryID, messageID); err != nil {
+		return err
+	}
+	if err := checkpointInputReplyHelper(ctx, tx, deliveryID, messageID); err != nil {
 		return err
 	}
 	questionID := ""

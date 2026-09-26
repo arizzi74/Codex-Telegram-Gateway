@@ -23,6 +23,10 @@ The browser uses these endpoints:
 | `POST /tgw/api/v1/admin/passkeys/register/begin` | Begins bootstrap or an authenticated additional-passkey ceremony. |
 | `POST /tgw/api/v1/admin/passkeys/register/finish` | Verifies and persists a registration response. |
 | `POST /tgw/api/v1/admin/login/begin` / `finish` | Begins and completes a discoverable passkey login. |
+| `GET /tgw/api/v1/admin/session` | Returns the current login's identity, server time, expiry and last passkey verification time. |
+| `GET /tgw/api/v1/admin/sessions` | Lists this account's active browser logins, approximate browser labels and last-seen times. |
+| `DELETE /tgw/api/v1/admin/sessions/{id}` | Revokes one browser login and its notification subscriptions. |
+| `POST /tgw/api/v1/admin/sessions/revoke-all` | Signs out every browser belonging to the account. |
 | `GET /tgw/api/v1/admin/dashboard` | Returns visible sessions and statistics, workers, runtimes, bot status, and pending counts. |
 | `GET, DELETE /tgw/api/v1/admin/passkeys[/{id}]` | Lists credentials or revokes a non-final credential. |
 | `POST /tgw/api/v1/admin/workers` | Creates a worker and returns its one-time enrollment token. |
@@ -35,6 +39,26 @@ the browser to a five-minute, server-persisted WebAuthn session. Admin sessions
 are opaque hashed random tokens, expire after eight hours, and can be revoked.
 Worker tokens are only included in the create/rotate response and are never
 logged or returned later.
+
+The eight-hour lifetime is absolute: requests, WebSocket traffic and ongoing
+Codex turns do not extend it. Five minutes before expiry, both interfaces show
+**Continue with passkey**. Successful verification creates a new eight-hour
+session, invalidates the previous token and transfers that browser's notification
+subscriptions. Cancellation leaves the existing login valid until its original
+expiry. Registration of a passkey itself has no automatic expiry.
+
+Adding or removing passkeys and enrolling, revoking or rotating a worker require
+passkey verification within the previous five minutes. The console asks for a
+passkey when needed; a rejected or cancelled verification performs no mutation.
+Both stages of additional-passkey registration enforce this check. Browser
+session revocation remains available without another passkey prompt.
+
+The **Browser sessions** panel shows active, unexpired logins and can revoke one
+or sign out everywhere. Labels such as **Safari on iOS** are approximate browser
+classifications, not authenticated device identities. **Last seen** includes
+authenticated background requests. A synced passkey can be used by more than one
+browser. Session cookies remain Secure, HttpOnly and SameSite=Strict; neither
+session tokens nor passkey secrets are exposed in the session inventory.
 
 Login initiation allows 10 attempts per client per minute and 120 globally;
 completion allows 20 per client and 240 globally. Each phase has a separate

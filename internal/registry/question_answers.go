@@ -84,6 +84,8 @@ func enqueueQuestionAnswerEdits(ctx context.Context, tx *dbTx, id uuid.UUID, bot
         FROM telegram_question_answers summary JOIN bot_message_routes route
           ON route.approval_id=summary.approval_id AND route.question_id=summary.question_id
         WHERE summary.approval_id=$1 AND summary.answer IS NOT NULL
+          AND NOT EXISTS(SELECT 1 FROM telegram_input_reply_messages helper
+            WHERE helper.bot_id=route.bot_id AND helper.chat_id=route.chat_id AND helper.message_id=route.message_id)
           AND ($2='' OR (route.bot_id=$2 AND route.chat_id=$3 AND route.message_id=$4))`, id, bot, chat, message)
 	if err != nil {
 		return err

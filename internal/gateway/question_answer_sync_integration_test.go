@@ -3,6 +3,7 @@ package gateway
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -34,6 +35,14 @@ func (a *questionSyncAPI) Edit(_ context.Context, chat, id int64, text string, k
 func (a *questionSyncAPI) EditFormatted(_ context.Context, id int64, message SendMessage) error {
 	a.editsCount++
 	a.live[id] = message
+	return nil
+}
+
+func (a *questionSyncAPI) DeleteMessage(ctx context.Context, chat, id int64) error {
+	if err := a.progressAPIFake.DeleteMessage(ctx, chat, id); err != nil {
+		return err
+	}
+	delete(a.live, id)
 	return nil
 }
 
@@ -91,6 +100,25 @@ func TestTerminalQuestionAnswerEditsOriginalInBackgroundSession(t *testing.T) {
 	if messageID != 2 || api.live[messageID].Keyboard == nil {
 		t.Fatalf("question not delivered: %+v", api.live)
 	}
+	var textReplyToken string
+	for _, row := range api.live[messageID].Keyboard.Rows {
+		for _, button := range row {
+			if button.Text == "Reply with text" {
+				textReplyToken = strings.TrimPrefix(button.Data, "cb:")
+			}
+		}
+	}
+	if textReplyToken == "" {
+		t.Fatal("question has no text-reply button")
+	}
+	if result, err := store.AcceptTelegram(ctx, registry.IncomingUpdate{BotID: "bot", UpdateID: 2, UserID: 10, ChatID: 20, CallbackToken: textReplyToken, CallbackMessageID: messageID}); err != nil || !result.TextReply {
+		t.Fatalf("open text reply: %+v %v", result, err)
+	}
+	flush()
+	helperID := int64(len(api.messages))
+	if helperID != 3 || api.live[helperID].Keyboard == nil || !api.live[helperID].Keyboard.ForceReply {
+		t.Fatalf("native reply helper not delivered: %+v", api.live)
+	}
 	answer := "Yes, while captured.\nControl+Option releases it."
 	approval.Answers = map[string][]string{"q1": {answer}}
 	approval.State = "answered"
@@ -100,19 +128,23 @@ func TestTerminalQuestionAnswerEditsOriginalInBackgroundSession(t *testing.T) {
 	// A sender restart must retain the queued edit and exact target.
 	sender = NewSender(store, api, nil, options)
 	flush()
+	flush() // The sender leases one operation at a time: edit, then helper cleanup.
 	got := api.live[messageID]
 	want := "Question: Does the pointer disappear?\n\nAnswer: " + answer
-	if got.Text != want || (got.Keyboard != nil && (got.Keyboard.ForceReply || len(got.Keyboard.Rows) > 0)) || api.editsCount != 1 || len(api.messages) != 2 {
+	if got.Text != want || (got.Keyboard != nil && (got.Keyboard.ForceReply || len(got.Keyboard.Rows) > 0)) || api.editsCount != 1 || len(api.messages) != 3 {
 		t.Fatalf("answer did not replace question: %+v; edits=%d sends=%d", got, api.editsCount, len(api.messages))
+	}
+	if _, remains := api.live[helperID]; remains || len(api.deleted) != 1 || api.deleted[0] != [2]int64{20, helperID} {
+		t.Fatalf("answer did not remove only its temporary reply helper: live=%+v deleted=%v", api.live, api.deleted)
 	}
 	if err := store.IngestEvent(ctx, worker.ID, connection, answered); err != nil {
 		t.Fatal(err)
 	}
 	flush()
-	if api.editsCount != 1 || len(api.messages) != 2 {
-		t.Fatal("replayed answer duplicated the edit or posted a message")
+	if api.editsCount != 1 || len(api.messages) != 3 || len(api.deleted) != 1 {
+		t.Fatal("replayed answer duplicated an edit/deletion or posted a message")
 	}
-	if result, err := store.AcceptTelegram(ctx, registry.IncomingUpdate{BotID: "bot", UpdateID: 2, UserID: 10, ChatID: 20, Action: "status"}); err != nil || result.SessionID != second.String() {
+	if result, err := store.AcceptTelegram(ctx, registry.IncomingUpdate{BotID: "bot", UpdateID: 3, UserID: 10, ChatID: 20, Action: "status"}); err != nil || result.SessionID != second.String() {
 		t.Fatalf("answer changed selection: %+v %v", result, err)
 	}
 }

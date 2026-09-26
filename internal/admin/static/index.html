@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>Gateway admin</title>
   <link rel="stylesheet" href="/tgw/admin/static/app.css">
+  <link rel="stylesheet" href="/tgw/admin/static/session-auth.css">
 </head>
 <body>
 <main>
@@ -12,6 +13,7 @@
     <div><p class="eyebrow">CODEX GATEWAY</p><h1>Operations console</h1></div>
     <nav aria-label="Gateway"><a href="/tgw/webui/">Open Codex</a> <button id="logout" hidden>Sign out</button></nav>
   </header>
+  <div id="auth-warning"></div>
   <section id="auth" class="card">
     <h2>Passkey access</h2>
     <p>Use a personal passkey to administer this gateway.</p>
@@ -64,8 +66,13 @@
       <div class="row"><div><h2 id="passkey-heading">Passkeys</h2><p>Add a spare personal passkey before removing one.</p></div><button id="add-passkey">Add passkey</button></div>
       <div id="keys"></div>
     </section>
+    <section class="card" aria-labelledby="browser-session-heading">
+      <div class="row"><div><h2 id="browser-session-heading">Browser sessions</h2><p>Review signed-in browsers and end access you no longer need. Browser labels are approximate.</p></div><button id="logout-everywhere" class="danger">Sign out everywhere</button></div>
+      <div id="browser-sessions"></div>
+    </section>
   </section>
 </main>
+<script src="/tgw/admin/static/session-auth.js"></script>
 <script src="/tgw/admin/static/app.js"></script>
 </body>
 </html>

@@ -264,6 +264,9 @@ func reconcileTelegramSelection(ctx context.Context, tx *dbTx, in IncomingUpdate
 // before each Telegram API call. Private command responses and questions retain
 // their frozen destinations, independently of the current selection.
 func (s *Store) SuppressTelegramDelivery(ctx context.Context, id string) (bool, error) {
+	if suppress, err := s.suppressInputReplyHelper(ctx, id); err != nil || suppress {
+		return suppress, err
+	}
 	if suppress, err := s.SuppressProgressDelivery(ctx, id); err != nil || suppress {
 		return suppress, err
 	}

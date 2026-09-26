@@ -137,6 +137,12 @@ colors and formatting with responsive text, completed replies and live tool acti
 model and reasoning controls, and question and approval prompts. It talks to the
 worker's existing app-server; it does not launch a terminal or another Codex CLI.
 
+Passkey sign-in can be renewed in place before its eight-hour expiry. After
+unlocking, the interface restores the selected session and reading position;
+running work continues. Optional encrypted text-draft recovery retains a copy
+for 30 minutes. The admin console lists browser logins and can revoke access.
+See [sign-in and recovery](docs/webui.md#sign-in-and-recovery).
+
 Connection progress distinguishes the live connection from session restoration
 and history loading. On mobile, the session menu turns green while any session
 is working; a pending question takes priority with a yellow question mark.

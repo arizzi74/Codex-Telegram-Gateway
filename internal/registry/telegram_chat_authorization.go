@@ -38,7 +38,7 @@ func (s *Store) ApplyTelegramChatAllowlist(ctx context.Context, bot string, chat
 	}
 	if _, err := tx.Exec(ctx, `UPDATE telegram_deliveries AS delivery
         SET status=CASE WHEN status='sending' THEN 'sending' ELSE 'cancelled' END,visibility_revoked=1,last_error=NULL
-        WHERE bot_id=$1 AND kind<>'picker_cleanup' AND status IN ('pending','failed','sending')
+        WHERE bot_id=$1 AND kind NOT IN ('picker_cleanup','input_reply_cleanup') AND status IN ('pending','failed','sending')
           AND NOT `+telegramChatAllowedSQL("delivery.bot_id", "delivery.chat_id"), bot); err != nil {
 		return err
 	}

@@ -84,6 +84,16 @@ func (s *Store) CheckAdminBootstrap(ctx context.Context, token string) error {
 // NewAdminCeremony saves a short-lived WebAuthn SessionData and returns a
 // random cookie binding. Session data is consumed exactly once at completion.
 func (s *Store) NewAdminCeremony(ctx context.Context, purpose string, userHandle []byte, sessionData json.RawMessage) (AdminCeremony, error) {
+	return s.newAdminCeremony(ctx, purpose, userHandle, sessionData, "", "Browser")
+}
+
+// NewAdminLoginCeremony binds renewal to the cookie present at login begin.
+// The browser label is classified here rather than persisting a raw UA header.
+func (s *Store) NewAdminLoginCeremony(ctx context.Context, sessionData json.RawMessage, predecessorToken, userAgent string) (AdminCeremony, error) {
+	return s.newAdminCeremony(ctx, "authentication", nil, sessionData, predecessorToken, adminBrowserLabel(userAgent))
+}
+
+func (s *Store) newAdminCeremony(ctx context.Context, purpose string, userHandle []byte, sessionData json.RawMessage, predecessorToken, browserLabel string) (AdminCeremony, error) {
 	if purpose != "registration" && purpose != "authentication" || len(sessionData) == 0 {
 		return AdminCeremony{}, ErrAdminCeremonyInvalid
 	}
@@ -124,9 +134,19 @@ func (s *Store) NewAdminCeremony(ctx context.Context, purpose string, userHandle
 		}
 		return AdminCeremony{}, ErrAdminCeremonyLimit
 	}
+	var predecessorHash []byte
+	if predecessorToken != "" {
+		// Expired sessions may renew, but never resurrect revoked relationships.
+		err = tx.QueryRow(ctx, `SELECT a.token_hash FROM admin_sessions a
+            JOIN admin_credentials c ON c.credential_id=a.credential_id
+            WHERE a.token_hash=$1 AND a.revoked_at IS NULL AND c.revoked_at IS NULL`, hashSecret(predecessorToken)).Scan(&predecessorHash)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return AdminCeremony{}, err
+		}
+	}
 	_, err = tx.Exec(ctx, `INSERT INTO admin_challenges
-        (challenge_id, purpose, challenge_hash, user_handle, expires_at, session_data, ceremony_binding_hash)
-        VALUES ($1, $2, $3, $4, (strftime('%Y-%m-%dT%H:%M:%f','now','+5 minutes') || '000000Z'), $5, $6)`, id, purpose, sha256Bytes(challenge), nullableBytes(userHandle), sessionData, hashSecret(binding))
+        (challenge_id, purpose, challenge_hash, user_handle, expires_at, session_data, ceremony_binding_hash, predecessor_token_hash, browser_label)
+        VALUES ($1, $2, $3, $4, (strftime('%Y-%m-%dT%H:%M:%f','now','+5 minutes') || '000000Z'), $5, $6, $7, $8)`, id, purpose, sha256Bytes(challenge), nullableBytes(userHandle), sessionData, hashSecret(binding), nullableBytes(predecessorHash), browserLabel)
 	if err != nil {
 		return AdminCeremony{}, fmt.Errorf("registry: save admin ceremony: %w", err)
 	}
@@ -262,45 +282,6 @@ func (s *Store) AddAdminCredential(ctx context.Context, credential AdminCredenti
 	return insertAdminCredential(ctx, s.pool, credential)
 }
 
-// CompleteAdminLogin atomically consumes an authentication ceremony, writes
-// the advanced signature counter, and issues the one-time plaintext session.
-func (s *Store) CompleteAdminLogin(ctx context.Context, ceremonyID uuid.UUID, binding string, credential AdminCredential) (string, error) {
-	tx, err := s.pool.Begin(ctx)
-	if err != nil {
-		return "", err
-	}
-	defer tx.Rollback(ctx)
-	var record struct {
-		Authenticator struct {
-			SignCount uint32 `json:"signCount"`
-		} `json:"authenticator"`
-	}
-	if json.Unmarshal(credential.CredentialJSON, &record) != nil {
-		return "", ErrAdminCredentialGone
-	}
-	ct, err := tx.Exec(ctx, `UPDATE admin_credentials SET credential_json=$2,sign_count=$3,last_used_at=(strftime('%Y-%m-%dT%H:%M:%f','now') || '000000Z') WHERE credential_id=$1 AND revoked_at IS NULL`, credential.ID, credential.CredentialJSON, record.Authenticator.SignCount)
-	if err != nil {
-		return "", err
-	}
-	if ct.RowsAffected() != 1 {
-		return "", ErrAdminCredentialGone
-	}
-	if err = claimAdminCeremony(ctx, tx, ceremonyID, "authentication", binding); err != nil {
-		return "", err
-	}
-	token, err := randomSecret(32)
-	if err != nil {
-		return "", err
-	}
-	if _, err = tx.Exec(ctx, `INSERT INTO admin_sessions(session_id,credential_id,token_hash,expires_at) VALUES($1,$2,$3,(strftime('%Y-%m-%dT%H:%M:%f','now','+8 hours') || '000000Z'))`, uuid.New(), credential.ID, hashSecret(token)); err != nil {
-		return "", err
-	}
-	if err = tx.Commit(ctx); err != nil {
-		return "", err
-	}
-	return token, nil
-}
-
 type adminDB interface {
 	Exec(context.Context, string, ...any) (dbCommandTag, error)
 }
@@ -434,6 +415,9 @@ func (s *Store) RevokeAdminCredential(ctx context.Context, id []byte) error {
 	if _, err = tx.Exec(ctx, `DELETE FROM webpush_subscriptions WHERE credential_id=$1`, id); err != nil {
 		return err
 	}
+	if _, err = tx.Exec(ctx, `UPDATE admin_drafts SET ciphertext=NULL,deleted=1 WHERE admin_session_id IN (SELECT session_id FROM admin_sessions WHERE credential_id=$1)`, id); err != nil {
+		return err
+	}
 	return tx.Commit(ctx)
 }
 
@@ -463,7 +447,7 @@ func (s *Store) ValidateAdminSession(ctx context.Context, token string) (AdminCr
 	if err != nil {
 		return AdminCredential{}, fmt.Errorf("registry: validate admin session: %w", err)
 	}
-	_, _ = s.pool.Exec(ctx, `UPDATE admin_sessions SET last_seen_at=(strftime('%Y-%m-%dT%H:%M:%f','now') || '000000Z') WHERE token_hash=$1`, hashSecret(token))
+	_, _ = s.pool.Exec(ctx, `UPDATE admin_sessions SET last_seen_at=(strftime('%Y-%m-%dT%H:%M:%f','now') || '000000Z') WHERE token_hash=$1 AND (last_seen_at IS NULL OR last_seen_at < (strftime('%Y-%m-%dT%H:%M:%f','now','-1 minute') || '000000Z'))`, hashSecret(token))
 	return c, nil
 }
 func (s *Store) RevokeAdminSession(ctx context.Context, token string) error {
@@ -477,6 +461,9 @@ func (s *Store) RevokeAdminSession(ctx context.Context, token string) error {
 		return fmt.Errorf("registry: revoke admin session: %w", err)
 	}
 	if _, err = tx.Exec(ctx, `DELETE FROM webpush_subscriptions WHERE admin_session_id IN (SELECT session_id FROM admin_sessions WHERE token_hash=$1)`, hashSecret(token)); err != nil {
+		return err
+	}
+	if _, err = tx.Exec(ctx, `UPDATE admin_drafts SET ciphertext=NULL,deleted=1 WHERE admin_session_id IN (SELECT session_id FROM admin_sessions WHERE token_hash=$1)`, hashSecret(token)); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)

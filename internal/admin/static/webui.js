@@ -4,7 +4,11 @@
   const $ = id => document.getElementById(id);
   const api = '/tgw/api/v1/webui';
   const state = { sessions: [], selected: null, socket: null, generation: 0, authGeneration: 0, sequence: 0, pending: new Map(), drafts: new Map(), positions: new Map(), items: new Map(), questions: new Map(), models: [], turn: null, connected: false, stopped: false, attempts: 0, timer: null, loading: false, cursor: null, queuedEvents: [], submitting: false, renderTimer: null, authenticated: false, refreshing: false, refreshTimer: null };
-  let commandUI = null, notificationUI = null, rawView = false, gatewayCommandAbort = null;
+  let commandUI = null, notificationUI = null, sessionAuth = null, rawView = false, gatewayCommandAbort = null;
+  let authRestore = null, restoringPosition = false, uncertainSend = false;
+  let draftRecovery = null, recoveredDrafts = null, draftSaveTimer = null, draftDirty = false;
+  const uncertainDrafts = new Set();
+  let sessionInventoryAbort = null, authRotationPending = false;
   const sessionUUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
   const requestedSession = new URL(location.href).searchParams.get('session_id') || '';
   let notificationSessionID = sessionUUID.test(requestedSession) ? requestedSession.toLowerCase() : '';
@@ -305,6 +309,7 @@
   }
   function saveDraft() {
     if (state.selected) state.drafts.set(state.selected.session_id, $('prompt').value);
+    syncRecoveryDrafts();
     resizePrompt();
     updateControls();
   }
@@ -382,16 +387,31 @@
       catch (error) { clearTimeout(timer); state.pending.delete(id); reject(error); }
     });
   }
-  async function fetchJSON(path) {
-    const response = await fetch(path, { credentials: 'same-origin', cache: 'no-store', signal: AbortSignal.timeout(15000) });
-    if (response.status === 401) { expire(); throw new Error('Sign in with your passkey to continue.'); }
+  async function fetchJSON(path, signal = AbortSignal.timeout(15000)) {
+    const authGeneration = state.authGeneration;
+    const response = await fetch(path, { credentials: 'same-origin', cache: 'no-store', signal });
+    if (response.status === 401) { if (authGeneration === state.authGeneration) expire(); throw new Error('Sign in with your passkey to continue.'); }
     if (!response.ok) throw new Error('Gateway request failed (' + response.status + '). Try again shortly.');
     return response.json();
   }
-  function expire() {
+  function captureAuthPosition() {
+    if (!state.selected) return;
+    const scroller = $('transcript');
+    const anchor = [...$('messages').children].find(item => item.getBoundingClientRect().bottom > scroller.getBoundingClientRect().top);
+    authRestore = { id: state.selected.session_id, top: scroller.scrollTop, bottom: followLatest, anchor: anchor?.dataset.itemId, offset: anchor ? anchor.getBoundingClientRect().top - scroller.getBoundingClientRect().top : 0, count: state.items.size };
+    uncertainSend ||= state.submitting || uncertainDrafts.has(state.selected.session_id);
+  }
+  function expire() { if (sessionAuth) sessionAuth.expire('expired'); else lockAuthentication('expired'); }
+  function lockAuthentication(reason) {
+    captureAuthPosition();
+    clearTimeout(draftSaveTimer); draftSaveTimer = null; draftDirty = false;
+    if (['logout', 'revoked'].includes(reason)) draftRecovery?.clear();
+    draftRecovery?.expireAuth(); recoveredDrafts = null; $('draft-recovery-offer').hidden = true;
+    window.dispatchEvent(new CustomEvent('codex-auth-expiring'));
     commandUI?.sessionChanged();
     state.generation++;
     state.authGeneration++;
+    resetInventory();
     for (const deletion of sessionDeletions.values()) { clearTimeout(deletion.timer); deletion.controller?.abort(); }
     sessionDeletions.clear(); deleteSessionTarget = null;
     if ($('delete-session-dialog').open) $('delete-session-dialog').close();
@@ -414,6 +434,12 @@
     state.cursor = null;
     state.queuedEvents = [];
     $('prompt').value = '';
+    $('session-search').value = '';
+    $('workspace-path').textContent = ''; $('workspace-path').removeAttribute('title');
+    $('usage').textContent = '';
+    $('model').textContent = 'Session model'; $('effort').textContent = 'Session effort';
+    for (const id of ['delete-session-name', 'delete-session-cwd', 'delete-session-message']) $(id).textContent = '';
+    $('image-file').value = '';
     $('messages').replaceChildren();
     $('questions').replaceChildren();
     $('questions').hidden = true;
@@ -423,6 +449,8 @@
     $('sessions-status').textContent = 'Sign in to see your sessions.';
     for (const id of ['transcript', 'composer', 'empty', 'disconnect', 'jump-latest']) $(id).hidden = true;
     $('auth').hidden = false;
+    $('auth-title').textContent = authRestore ? 'Unlock your sessions' : 'Sign in to Codex';
+    $('auth-description').textContent = authRestore ? 'Your running work continues. Use your passkey to return to the same conversation.' : 'Use your gateway passkey to open your sessions.';
     showSessions(false);
     notice();
     connection('disconnected', 'Sign in required');
@@ -596,14 +624,21 @@
       if (deletionIsCurrent(deletion)) { updateDeletionView(deletion); scheduleDeletionCheck(deletion); }
     }
   }
+  function resetInventory() {
+    sessionInventoryAbort?.abort(); sessionInventoryAbort = null;
+    state.refreshing = false; state.refreshAgain = false;
+  }
   async function refreshSessions() {
+    if (!state.authenticated) return;
     if (state.refreshing) { state.refreshAgain = true; return; }
     state.refreshAgain = false; state.refreshing = true;
     const authGeneration = state.authGeneration;
+    const controller = new AbortController(); sessionInventoryAbort = controller;
+    const timeout = setTimeout(() => controller.abort(), 15000);
     $('refresh-sessions').disabled = true;
     try {
-      const data = await fetchJSON(api + '/sessions');
-      if (authGeneration !== state.authGeneration) return;
+      const data = await fetchJSON(api + '/sessions', controller.signal);
+      if (authGeneration !== state.authGeneration || !state.authenticated) return;
       state.sessions = (data.sessions || []).filter(session => !sessionDeletions.get(session.session_id)?.deleted);
       for (const session of state.sessions) {
         const settings = sessionSettings.get(session.session_id);
@@ -616,14 +651,22 @@
       connectActivity();
       commandUI?.update();
       if (!state.selected) { $('empty').hidden = false; connection('connected', 'Gateway connected · choose a session'); }
+      if (authRestore && !state.selected) {
+        const target = state.sessions.find(session => session.session_id === authRestore.id && !session.archived && !session.deleted);
+        if (target) { notificationSessionID = ''; selectSession(target); }
+        else { authRestore = null; notice('Your previous session is no longer available. Choose another session.'); }
+      }
       if (notificationSessionID) {
         const requested = notificationSessionID; notificationSessionID = '';
         const target = state.sessions.find(session => session.session_id === requested && !session.archived && !session.deleted);
         if (target) selectSession(target);
         else { notificationLocation(); notice('This notification’s session is no longer available. Choose another session.'); }
       }
-    } catch (error) { if (state.authenticated) $('sessions-status').textContent = error.message; else if ($('auth').hidden) connection('error', error.message); }
+    } catch (error) { if (authGeneration !== state.authGeneration) return; if (state.authenticated) $('sessions-status').textContent = error.message; else if ($('auth').hidden) connection('error', error.message); }
     finally {
+      clearTimeout(timeout);
+      if (sessionInventoryAbort === controller) sessionInventoryAbort = null;
+      if (authGeneration !== state.authGeneration) return;
       state.refreshing = false; $('refresh-sessions').disabled = false;
       if (state.refreshAgain && state.authenticated) { state.refreshAgain = false; queueMicrotask(refreshSessions); }
     }
@@ -728,6 +771,30 @@
     };
     socket.onerror = () => { /* close is authoritative; never retry a prompt from this handler. */ };
   }
+  async function restoreAuthPosition(generation) {
+    if (!authRestore || authRestore.id !== state.selected?.session_id) return;
+    const position = authRestore; authRestore = null;
+    restoringPosition = true;
+    try {
+      if (position.bottom) { jump(); settleBottom(); }
+      else {
+        followLatest = false;
+        const findAnchor = () => [...$('messages').children].find(item => item.dataset.itemId === position.anchor);
+        // Keep only an item ID and geometry while locked. Load the same pages
+        // again after authentication; no transcript is retained in storage.
+        let pages = Math.ceil(position.count / 20);
+        while (!findAnchor() && state.cursor && pages-- > 0 && generation === state.generation) {
+          const cursor = state.cursor; await loadOlder(); if (cursor === state.cursor) break;
+        }
+        if (generation !== state.generation) return;
+        const anchor = findAnchor(), scroller = $('transcript');
+        scroller.scrollTop = anchor ? scroller.scrollTop + anchor.getBoundingClientRect().top - scroller.getBoundingClientRect().top - position.offset : position.top;
+        $('jump-latest').hidden = atBottom();
+      }
+      if (uncertainSend) { notice('A previous send may have reached Codex. Check the conversation before sending it again. Nothing was resent.'); uncertainSend = false; }
+      window.dispatchEvent(new CustomEvent('codex-auth-restored', { detail: { sessionId: state.selected.session_id } }));
+    } finally { restoringPosition = false; }
+  }
   function sessionConnectionReady() {
     if (!state.connected || state.loading || !state.selected) return;
     const questions = state.questionsStatus === 'loading' ? ' · Checking questions…' : state.questionsStatus === 'error' ? ' · Questions unavailable; reconnect to retry' : '';
@@ -761,7 +828,8 @@
         renderMessages(false);
         $('older').hidden = !state.cursor; $('older').disabled = true;
         connection('loading', 'Connected · Checking active turn…');
-        if (!preserve || previous.bottom) { jump(); settleBottom(); }
+        if (authRestore?.id === state.selected?.session_id && !authRestore.bottom) { followLatest = false; }
+        else if (!preserve || previous.bottom) { jump(); settleBottom(); }
         else { followLatest = false; $('transcript').scrollTop = previous.top; }
       }),
       rpc('thread/turns/list', { threadId, limit: 20, sortDirection: 'desc', itemsView: 'notLoaded' }),
@@ -787,6 +855,8 @@
     sessionConnectionReady();
     updateUsage(state.selected.stats);
     updateControls();
+    await restoreAuthPosition(generation);
+    if (!current()) return;
     settleBottom();
     // Start this optional worker lookup only after the essential native reads
     // finish: older workers share its input lane with history fallback reads.
@@ -1239,12 +1309,17 @@
       const input = text ? [{ type: 'text', text }] : [];
       if (image) input.push({ type: 'image', url: await imageDataURL(image.file) });
       if (generation !== state.generation || !state.connected) return;
+      // Forget the old recovery key synchronously before dispatch. Even if
+      // this send loses its acknowledgement, its text cannot be recovered
+      // later as an apparently unsent draft. Other drafts get a fresh copy.
+      uncertainDrafts.add(sessionId);
+      if (draftRecovery?.enabled()) { draftRecovery.clear(); syncRecoveryDrafts(true); }
       const params = { threadId: state.selected.codex_thread_id, input };
       let result;
       if (steerTurn) result = await rpc('turn/steer', { ...params, expectedTurnId: steerTurn });
       else result = await rpc('turn/start', params);
       if (generation !== state.generation) return;
-      if ($('prompt').value === original) { $('prompt').value = ''; state.drafts.delete(sessionId); resizePrompt(); }
+      if ($('prompt').value === original) { $('prompt').value = ''; state.drafts.delete(sessionId); uncertainDrafts.delete(sessionId); syncRecoveryDrafts(); resizePrompt(); }
       if (image) removeImage(sessionId, image);
       if (result?.turn?.id) { state.turn = result.turn.id; ingestTurn(result.turn); }
       if (steerTurn) queuedSteer(steerTurn);
@@ -1400,7 +1475,7 @@
   });
   $('prompt').setAttribute('aria-controls', 'command-suggestions');
   $('prompt').setAttribute('aria-autocomplete', 'list');
-  $('prompt').addEventListener('input', () => { saveDraft(); commandUI.changed(); });
+  $('prompt').addEventListener('input', () => { uncertainDrafts.delete(state.selected?.session_id); saveDraft(); commandUI.changed(); });
   $('prompt').addEventListener('keydown', event => { if (commandUI.keydown(event)) return; if (event.key === 'Enter' && !event.shiftKey && !event.isComposing && !matchMedia('(pointer: coarse)').matches) { event.preventDefault(); if (!$('send').disabled) $('composer').requestSubmit(); } });
   $('composer').addEventListener('submit', send);
   $('attach-image').addEventListener('click', () => { imagePickerSession = state.selected?.session_id; $('image-file').click(); });
@@ -1441,7 +1516,7 @@
       else if (movingUp && sameLayout && $('command-panel').hidden) followLatest = false;
     }
     if (atBottom()) $('jump-latest').hidden = true;
-    if (movingUp && top <= 64 && !suppressHistoryScroll) loadOlder();
+    if (movingUp && top <= 64 && !suppressHistoryScroll && !restoringPosition) loadOlder();
   }, { passive: true });
   $('transcript').addEventListener('wheel', event => { if (event.deltaY < 0) followLatest = false; }, { passive: true });
   $('transcript').addEventListener('keydown', event => { if (['ArrowUp', 'PageUp', 'Home'].includes(event.key)) followLatest = false; });
@@ -1451,10 +1526,8 @@
   $('disconnect').addEventListener('click', disconnect);
   function reconnect() { if (!state.selected) { refreshSessions(); return; } state.generation++; closeSocket(); state.stopped = false; state.attempts = 0; connect(state.generation); }
   $('reconnect').addEventListener('click', reconnect);
-  window.addEventListener('online', () => { connectActivity(); if (state.selected && !state.connected && !state.stopped) reconnect(); });
-  document.addEventListener('visibilitychange', () => { if (document.hidden) closeActivity(); else { if (state.authenticated) refreshSessions(); connectActivity(); if (state.selected && !state.connected && !state.stopped) reconnect(); } });
+  document.addEventListener('visibilitychange', () => { if (document.hidden) { flushRecoveryDrafts(); closeActivity(); } });
   window.addEventListener('pagehide', closeActivity);
-  window.addEventListener('pageshow', connectActivity);
   navigator.serviceWorker?.addEventListener('message', event => {
     if (event.data?.type !== 'codex-notification-open') return;
     let source;
@@ -1531,5 +1604,99 @@
   if (notificationSessionID) notificationLocation(notificationSessionID);
   // Activity is pushed independently of the selected session. No history or
   // session-list polling runs while idle, and no transcript is persisted here.
-  refreshSessions();
+  sessionAuth = window.CodexSessionAuth.create({
+    mount: $('workspace'), isLocked: () => !state.authenticated && !$('auth').hidden,
+    onExpired: lockAuthentication,
+    onRenewing: busy => {
+      $('auth-login').disabled = busy; $('auth-login').textContent = busy ? 'Waiting for passkey…' : 'Continue with passkey';
+      if (!busy && authRotationPending) {
+        authRotationPending = false;
+        // A failed finish can leave either the old or new cookie in place.
+        // Let the server confirm it before restoring either transport.
+        sessionAuth.verify('renewal-recovery').then(value => {
+          if (!value || !state.authenticated) return;
+          connectActivity();
+          if (state.selected && !state.connected && !state.loading && !state.stopped) reconnect();
+        }).catch(error => notice(error.message, 'connection'));
+      }
+    },
+    onBeforeRotate: () => {
+      if (!state.authenticated) return;
+      captureAuthPosition(); saveDraft();
+      authRotationPending = true;
+      state.authGeneration++; state.generation++; resetInventory();
+      closeSocket(); closeActivity(); disableQuestions();
+      connection('reconnecting', 'Renewing sign-in… Your running work continues.'); updateControls();
+    },
+    onStatus: text => { $('auth-status').textContent = text; },
+    onWarning: warning => { if (warning) flushRecoveryDrafts(); },
+    onAuthenticated: async () => {
+      authRotationPending = false;
+      const previouslyAuthenticated = state.authenticated;
+      const authEpoch = state.authGeneration + 1;
+      draftRecovery?.identityChanged();
+      captureAuthPosition();
+      state.authGeneration++; state.generation++;
+      resetInventory();
+      closeSocket(); closeActivity();
+      state.authenticated = true; state.stopped = false;
+      $('auth').hidden = true;
+      // selectSession performs a fresh native bootstrap with the new login.
+      // Preserve a still-authorized draft during early renewal only.
+      if (state.selected) saveDraft();
+      state.selected = null;
+      await refreshSessions();
+      if (authEpoch !== state.authGeneration || !state.authenticated) return;
+      if (previouslyAuthenticated) syncRecoveryDrafts();
+      else if (draftRecovery?.enabled()) {
+        const recovered = await draftRecovery.recover();
+        if (authEpoch !== state.authGeneration || !state.authenticated) return;
+        recoveredDrafts = recovered; $('draft-recovery-offer').hidden = !recoveredDrafts;
+      }
+    },
+    onVerified: (_session, { reason }) => {
+      if (reason !== 'foreground' || !state.authenticated) return;
+      refreshSessions(); connectActivity();
+      if (state.selected && !state.connected && !state.loading && !state.stopped && (!state.socket || state.socket.readyState === 3)) reconnect();
+    },
+  });
+  async function draftRequest(path, options = {}) {
+    const authGeneration = state.authGeneration;
+    const response = await fetch(path, { ...options, credentials: 'same-origin', cache: 'no-store', headers: { ...(options.headers || {}), 'X-CSRF-Token': window.CodexSessionAuth.cookie('__Host-telegramgw-csrf') } });
+    if (!response.ok) {
+      if (response.status === 401 && authGeneration === state.authGeneration) expire();
+      const error = new Error('Encrypted draft request failed (' + response.status + ').'); error.status = response.status; throw error;
+    }
+    return response.status === 204 ? null : response.json();
+  }
+  function flushRecoveryDrafts() {
+    clearTimeout(draftSaveTimer); draftSaveTimer = null;
+    if (!draftDirty || !draftRecovery?.enabled() || !state.authenticated || recoveredDrafts) return;
+    draftDirty = false;
+    draftRecovery.update(Object.fromEntries([...state.drafts].filter(([id]) => !uncertainDrafts.has(id))));
+  }
+  function syncRecoveryDrafts(immediate = false) {
+    if (!draftRecovery?.enabled() || !state.authenticated || recoveredDrafts) return;
+    draftDirty = true; clearTimeout(draftSaveTimer);
+    if (immediate) flushRecoveryDrafts();
+    else draftSaveTimer = setTimeout(flushRecoveryDrafts, 500);
+  }
+  draftRecovery = window.CodexDraftRecovery.create({ request: draftRequest, getIdentity: () => sessionAuth.snapshot()?.owner_id, onStatus: text => { $('draft-recovery-status').textContent = text; } });
+  $('draft-recovery-enabled').checked = draftRecovery.enabled();
+  $('draft-recovery-enabled').addEventListener('change', async event => {
+    await draftRecovery.setEnabled(event.target.checked);
+    if (!event.target.checked) { clearTimeout(draftSaveTimer); draftSaveTimer = null; draftDirty = false; recoveredDrafts = null; $('draft-recovery-offer').hidden = true; }
+    else syncRecoveryDrafts(true);
+  });
+  $('restore-drafts').addEventListener('click', () => {
+    if (!state.authenticated || !recoveredDrafts) return;
+    const saved = recoveredDrafts; recoveredDrafts = null; $('draft-recovery-offer').hidden = true;
+    const allowed = new Set(state.sessions.map(session => session.session_id));
+    for (const [id, text] of Object.entries(saved)) if (allowed.has(id) && !uncertainDrafts.has(id) && !state.drafts.get(id)) state.drafts.set(id, text);
+    if (state.selected && !$('prompt').value) { $('prompt').value = state.drafts.get(state.selected.session_id) || ''; resizePrompt(); updateControls(); }
+    draftRecovery.consume();
+  });
+  $('discard-drafts').addEventListener('click', () => { recoveredDrafts = null; $('draft-recovery-offer').hidden = true; draftRecovery.clear(); });
+  $('auth-login').addEventListener('click', () => sessionAuth.login().catch(() => {}));
+  sessionAuth.verify('initial').catch(error => { lockAuthentication('unavailable'); $('auth-status').textContent = error.message; });
 })();

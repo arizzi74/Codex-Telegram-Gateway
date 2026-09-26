@@ -40,7 +40,7 @@ async function prepare(page, pendingQuestions = true) {
     const url = new URL(route.request().url());
     if (url.origin !== 'https://webui.example.test') return route.abort('blockedbyclient');
     const json = data => route.fulfill({ contentType: 'application/json', body: JSON.stringify(data) });
-    if (url.pathname === '/tgw/api/v1/admin/session') return json({});
+    if (url.pathname === '/tgw/api/v1/admin/session') return json({ authenticated: true, session_id: 'aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa', owner_id: 'screenshot-owner', server_time: new Date().toISOString(), expires_at: new Date(Date.now() + 8 * 3600000).toISOString(), reauthenticated_at: new Date().toISOString() });
     if (url.pathname === '/tgw/api/v1/webui/sessions') return json({ sessions });
     if (url.pathname === '/tgw/api/v1/webui/push/config') return json({ supported: true, public_key: 'fictional-demo-public-key', subscribed: false, scope: 'all' });
     let name = url.pathname === '/tgw/webui/' ? 'webui.html' : url.pathname.endsWith('/manifest.webmanifest') ? 'webui-manifest.webmanifest' : path.basename(url.pathname);

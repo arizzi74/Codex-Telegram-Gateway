@@ -62,3 +62,5 @@
   #session-status #rate-limits{grid-column:2/4;grid-row:2;min-width:0;justify-content:flex-end;flex-wrap:nowrap;gap:8px}
   #session-status .rate-limit{max-width:100%;white-space:nowrap}
 }
+
+.draft-recovery-control{font-size:.75rem;line-height:1.5;margin-bottom:12px}.draft-recovery-control label{display:flex;align-items:flex-start;gap:8px}.draft-recovery-control input{width:auto;flex-shrink:0;margin-top:3px}.draft-recovery-control p{font-size:.9em;margin:6px 0 0}#draft-recovery-offer{padding:10px 20px;background:var(--panel);border-top:1px solid var(--border);font-size:.85rem;flex-shrink:0}#draft-recovery-offer p{margin:0 0 8px;line-height:1.5}#draft-recovery-offer button{margin:0 8px 0 0;font-size:inherit}#auth-status{white-space:pre-wrap;overflow-wrap:anywhere}#auth a{display:block;margin-top:18px}

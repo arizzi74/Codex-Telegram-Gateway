@@ -158,6 +158,29 @@ func testPasskeyRegistrationAndAuthenticationHTTP(t *testing.T, origin string) {
 	csrf = cookieValue(t, client, origin, csrfCookie)
 	response = loginFinishRequest(t, client, origin, csrf, login.CeremonyID, validAssertion)
 	requireHTTPStatus(t, response, http.StatusForbidden)
+
+	// Renewal selects its predecessor at BEGIN. A different authenticated
+	// cookie at FINISH must not revoke or adopt that other browser's session.
+	predecessor := cookieValue(t, client, origin, adminCookie)
+	otherToken, err := store.CreateAdminSession(context.Background(), credentialID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response = adminRequest(t, client, origin, http.MethodPost, "/tgw/api/v1/admin/login/begin", struct{}{}, origin, csrf)
+	decodeHTTPJSON(t, response, http.StatusOK, &login)
+	setCookie(client, origin, adminCookie, otherToken)
+	renewalAssertion := browserAssertion(t, key, credentialID, userHandle, login.PublicKey.Challenge, origin, rpID, 0x05)
+	response = loginFinishRequest(t, client, origin, csrf, login.CeremonyID, renewalAssertion)
+	requireHTTPStatus(t, response, http.StatusOK)
+	if _, err = store.ValidateAdminSession(context.Background(), predecessor); err == nil {
+		t.Fatal("begin predecessor was not revoked")
+	}
+	if _, err = store.ValidateAdminSession(context.Background(), otherToken); err != nil {
+		t.Fatalf("finish cookie chose a different predecessor: %v", err)
+	}
+	if _, err = store.ValidateAdminSession(context.Background(), cookieValue(t, client, origin, adminCookie)); err != nil {
+		t.Fatalf("renewed cookie invalid: %v", err)
+	}
 }
 
 func adminIntegrationStore(t *testing.T) *registry.Store {

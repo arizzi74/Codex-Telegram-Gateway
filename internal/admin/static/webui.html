@@ -12,10 +12,13 @@
   <link rel="icon" href="/tgw/webui/static/webui-icon.svg" type="image/svg+xml">
   <link rel="apple-touch-icon" href="/tgw/webui/static/webui-icon-180.png">
   <link rel="stylesheet" href="/tgw/webui/static/webui.css">
+  <link rel="stylesheet" href="/tgw/admin/static/session-auth.css">
+  <script defer src="/tgw/admin/static/session-auth.js"></script>
   <script defer src="/tgw/webui/static/webui-format.js"></script>
   <script defer src="/tgw/webui/static/webui-commands.js"></script>
   <script defer src="/tgw/webui/static/webui-command-ui.js"></script>
   <script defer src="/tgw/webui/static/webui-notifications.js"></script>
+  <script defer src="/tgw/webui/static/webui-drafts.js"></script>
   <script defer src="/tgw/webui/static/webui.js"></script>
 </head>
 <body>
@@ -27,7 +30,7 @@
       <p id="sessions-status" class="muted small" role="status">Loading sessions…</p>
       <p id="activity-status" class="muted small" role="status" data-state="connecting">Connecting live updates…</p>
       <nav id="session-list" aria-label="Available sessions"></nav>
-      <footer class="sidebar-footer"><div class="notifications-control"><button id="toggle-notifications" class="quiet" type="button" aria-describedby="notifications-status" aria-pressed="false" disabled>Notifications</button><p id="notifications-status" role="status">Sign in to manage notifications.</p></div><a href="/tgw/admin/">Operations console ↗</a></footer>
+      <footer class="sidebar-footer"><div class="draft-recovery-control"><label><input id="draft-recovery-enabled" type="checkbox"> Recover encrypted text drafts after sign-in</label><p id="draft-recovery-status" class="small muted" role="status">Optional · kept for 30 minutes · images excluded.</p></div><div class="notifications-control"><button id="toggle-notifications" class="quiet" type="button" aria-describedby="notifications-status" aria-pressed="false" disabled>Notifications</button><p id="notifications-status" role="status">Sign in to manage notifications.</p></div><a href="/tgw/admin/">Operations console ↗</a></footer>
     </aside>
     <button id="sidebar-backdrop" aria-label="Close sessions" hidden></button>
     <section id="workspace" aria-label="Conversation">
@@ -39,7 +42,7 @@
         <button id="disconnect" class="quiet" hidden>Disconnect</button>
       </header>
       <div id="connection" data-state="connecting" role="status" aria-live="polite"><span id="connection-dot" aria-hidden="true"></span><span id="connection-text">Connecting to gateway…</span><button id="reconnect" class="quiet" hidden>Reconnect</button></div>
-      <div id="auth" class="welcome" hidden><span class="welcome-mark" aria-hidden="true">›_</span><h2>Your Codex, wherever you are.</h2><p>Sign in with your gateway passkey to open your sessions.</p><a class="primary button-link" href="/tgw/admin/?next=/tgw/webui/">Sign in with a passkey</a></div>
+      <div id="auth" class="welcome" hidden><span class="welcome-mark" aria-hidden="true">›_</span><h2 id="auth-title">Sign in to Codex</h2><p id="auth-description">Use your gateway passkey to open your sessions.</p><button id="auth-login" type="button" class="primary">Continue with passkey</button><p id="auth-status" role="status"></p><a class="muted small" href="/tgw/admin/?next=/tgw/webui/">Manage passkeys</a></div>
       <div id="empty" class="welcome" hidden><span class="welcome-mark" aria-hidden="true">›_</span><h2>Pick up where you left off.</h2><p>Select a session. Your conversation and running work stay on its worker when you disconnect.</p><button id="empty-sessions" class="primary mobile-only">Choose a session</button></div>
       <div id="transcript" tabindex="0" aria-label="Conversation history" hidden>
         <button id="older" class="quiet older" hidden>Load 20 earlier messages</button>
@@ -55,6 +58,7 @@
         <div id="command-suggestions" role="listbox" aria-label="Slash commands"></div>
         <div id="command-content" aria-live="polite"></div>
       </section>
+      <section id="draft-recovery-offer" aria-label="Saved text drafts" hidden><p>Saved text drafts are available for this tab. Restore them to review before sending.</p><button id="restore-drafts" type="button" class="quiet">Restore text drafts</button><button id="discard-drafts" type="button" class="quiet">Discard</button></section>
       <form id="composer" hidden>
         <div id="steer-notice" role="status" aria-live="polite" hidden></div>
         <div id="image-preview" hidden><img id="image-thumbnail" alt="Image attached to this prompt"><span id="image-description"></span><button id="remove-image" type="button" class="quiet" aria-label="Remove image">×</button></div>

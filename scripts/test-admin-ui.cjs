@@ -31,12 +31,22 @@ const data = {
   const errors = [];
   page.on('pageerror', error => errors.push(error.message));
   let dashboardStatus = 200;
+  let loginStatus = 200;
+  let browserID = 'aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa';
+  let nearExpiry = false;
+  let holdLoginFinish = false;
+  let releaseLoginFinish = null;
+  let markFinishStarted = null;
+  let loginFinishStatus = 200;
+  let loginFinishCalls = 0;
+  const otherBrowserID = 'bbbbbbbb-2222-4222-8222-bbbbbbbbbbbb';
+  let otherBrowserRevoked = false;
   let dashboardReads = 0;
   const mutations = [];
   const paths = [];
   const nextDashboardResponse = () => page.waitForResponse(response =>
     new URL(response.url()).pathname === '/tgw/api/v1/admin/dashboard' && response.request().method() === 'GET');
-  await page.route('http://admin.test/**', async route => {
+  await page.route('https://admin.test/**', async route => {
     const request = route.request();
     const url = new URL(request.url());
     paths.push(url.pathname);
@@ -45,18 +55,42 @@ const data = {
       let body = {};
       let status = 200;
       if (url.pathname.endsWith('/dashboard')) { body = data; status = dashboardStatus; dashboardReads++; }
+      else if (url.pathname.endsWith('/admin/session')) {
+        status = loginStatus;
+        body = { authenticated: true, session_id: browserID, server_time: new Date().toISOString(), expires_at: new Date(Date.now() + (nearExpiry ? 240000 : 8 * 3600000)).toISOString(), reauthenticated_at: new Date().toISOString() };
+      }
+      else if (url.pathname.endsWith('/login/begin')) body = { ceremony_id: 'ceremony', publicKey: { challenge: 'dGVzdC1jaGFsbGVuZ2U', rpId: 'admin.test' } };
+      else if (url.pathname.endsWith('/login/finish')) {
+        loginFinishCalls++;
+        if (holdLoginFinish) await new Promise(resolve => { releaseLoginFinish = resolve; markFinishStarted?.(); });
+        status = loginFinishStatus;
+        if (status === 200) { browserID = 'cccccccc-3333-4333-8333-cccccccccccc'; nearExpiry = false; }
+        body = { ok: status === 200 };
+      }
+      else if (url.pathname.endsWith('/admin/sessions')) body = { sessions: [
+        { session_id: browserID, browser_label: 'Safari on iOS', current: true, created_at: time, last_seen_at: time, expires_at: time },
+        ...(!otherBrowserRevoked ? [{ session_id: otherBrowserID, browser_label: 'Browser ' + malicious, current: false, created_at: time, last_seen_at: time, expires_at: time }] : []),
+      ] };
+      else if (url.pathname.endsWith('/admin/sessions/' + otherBrowserID) && request.method() === 'DELETE') { otherBrowserRevoked = true; status = 204; }
+      else if (url.pathname.endsWith('/admin/logout')) { loginStatus = 401; status = 204; }
       else if (url.pathname.endsWith('/passkeys')) body = [{ id: 'test-passkey', created_at: time }];
       else if (url.pathname.endsWith('/rotate-token')) body = { token: 'one-time-secret' };
       else if (url.pathname.endsWith('/workers') && request.method() === 'POST') body = { worker_id: 'new-worker', token: 'one-time-secret' };
       if (request.method() !== 'GET') mutations.push({ path: url.pathname, method: request.method(), body: request.postData() });
-      return route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(body) });
+      return route.fulfill({ status, contentType: 'application/json', body: status === 204 ? '' : JSON.stringify(body) });
     }
-    const filename = url.pathname.endsWith('app.js') ? 'app.js' : url.pathname.endsWith('app.css') ? 'app.css' : 'index.html';
+    const filename = /\.(js|css)$/.test(url.pathname) ? path.basename(url.pathname) : 'index.html';
     return route.fulfill({ contentType: filename.endsWith('.js') ? 'text/javascript' : filename.endsWith('.css') ? 'text/css' : 'text/html', headers: { 'Content-Security-Policy': "default-src 'self'; script-src 'self'; style-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'" }, body: fs.readFileSync(path.join(assets, filename)) });
+  });
+  await page.addInitScript(() => {
+    Object.defineProperty(navigator.credentials, 'get', { configurable: true, value: async () => ({
+      id: 'passkey', rawId: new Uint8Array([1, 2, 3]).buffer, type: 'public-key',
+      response: { clientDataJSON: new Uint8Array([1]).buffer, authenticatorData: new Uint8Array([2]).buffer, signature: new Uint8Array([3]).buffer },
+    }) });
   });
   try {
     if (page.clock) await page.clock.install();
-    await page.goto('http://admin.test/tgw/admin');
+    await page.goto('https://admin.test/tgw/admin');
     await page.waitForSelector('#console:not([hidden])');
     assert.equal(await page.locator('#sessions').textContent(), '12');
     assert.equal(await page.locator('.session-card').count(), 10);
@@ -71,6 +105,10 @@ const data = {
     assert.match(await page.locator('#bot-info').innerText(), /Any chat with an allowed user/);
     assert.equal(await page.locator('img').count(), 0, 'API data must not become HTML');
     assert.equal(await page.evaluate(() => window.injected), undefined);
+    await page.waitForSelector('.browser-session');
+    assert.equal(await page.locator('.browser-session').count(), 2);
+    assert.match(await page.locator('#browser-sessions').innerText(), /Safari on iOS · This browser/);
+    assert.equal(await page.locator('#browser-sessions img').count(), 0, 'Browser labels must remain plain text');
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true, 'Mobile layout must fit viewport');
     await page.locator('.session-card summary').first().click();
     await page.locator('#refresh').click();
@@ -122,6 +160,12 @@ const data = {
     assert.ok(mutations.some(entry => entry.path.endsWith('/workers') && entry.body.includes('Fresh worker')));
     assert.ok(dialogs.some(dialog => dialog.value === 'one-time-secret'));
     assert.equal((await page.locator('body').innerText()).includes('one-time-secret'), false);
+    await Promise.all([
+      nextDashboardResponse(),
+      page.locator('.browser-session').nth(1).getByRole('button', { name: 'Sign out', exact: true }).click(),
+    ]);
+    await page.waitForFunction(() => document.querySelectorAll('.browser-session').length === 1);
+    assert.ok(mutations.some(entry => entry.path.endsWith('/sessions/' + otherBrowserID) && entry.method === 'DELETE'));
     await page.setViewportSize({ width: 1440, height: 1000 });
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
     if (process.env.ADMIN_UI_SCREENSHOTS) await page.screenshot({ path: path.join(process.env.ADMIN_UI_SCREENSHOTS, 'admin-desktop.png'), fullPage: true });
@@ -134,21 +178,49 @@ const data = {
       await page.waitForFunction(() => !document.getElementById('refresh').disabled);
       assert.ok(dashboardReads > before, 'Visible authenticated dashboard refreshes automatically');
     }
+    // Hold login/finish while the old cookie has been revoked. No dashboard
+    // request may begin in that window, including the 15-second automatic poll.
+    // A rejected finish must verify the still-valid cookie and resume once.
+    for (const finishStatus of [200, 503]) {
+      await page.waitForFunction(() => !document.getElementById('refresh').disabled);
+      nearExpiry = true; holdLoginFinish = true; loginFinishStatus = finishStatus;
+      await page.evaluate(() => sessionAuth.verify('test-warning'));
+      const finishStarted = new Promise(resolve => { markFinishStarted = resolve; });
+      const finishesBefore = loginFinishCalls;
+      await page.locator('.session-auth-banner button').click();
+      await finishStarted;
+      const beforePoll = dashboardReads;
+      dashboardStatus = 401;
+      if (page.clock) await page.clock.fastForward(16000);
+      await page.evaluate(() => load(false)); // Manual refresh is fenced too.
+      assert.equal(dashboardReads, beforePoll, 'Rotation pauses dashboard reads made with the revoked cookie');
+      assert.equal(await page.locator('#console').getAttribute('hidden'), null, 'Renewal keeps the current console visible');
+      dashboardStatus = 200; holdLoginFinish = false;
+      releaseLoginFinish();
+      await page.waitForFunction(() => !rotationPending && !document.getElementById('refresh').disabled && !document.getElementById('console').inert);
+      assert.equal(await page.locator('#console').getAttribute('hidden'), null, 'Finish success or recovery preserves authenticated console');
+      assert.ok(dashboardReads > beforePoll, 'Dashboard polling resumes after verifying the cookie');
+      assert.equal(loginFinishCalls, finishesBefore + 1, 'Failed finish is never automatically replayed');
+      assert.equal(await page.evaluate(() => sessionAuth.snapshot()?.session_id), browserID);
+      if (finishStatus === 503) assert.match(await page.locator('#message').textContent(), /sign-in failed|^$/i);
+    }
+    nearExpiry = false;
     dashboardStatus = 401;
     await page.locator('#refresh').click();
     await page.waitForSelector('#auth:not([hidden])');
     assert.equal(await page.locator('#console').getAttribute('hidden'), '');
     assert.equal(await page.locator('.session-card').count(), 0, 'Session expiry removes session data');
+    assert.equal(await page.locator('.browser-session').count(), 0, 'Session expiry removes browser-session data');
     assert.ok(paths.every(path => path === '/tgw/admin' || path.startsWith('/tgw/admin/') || path.startsWith('/tgw/api/')), 'Every gateway request must use the /tgw prefix');
     // Notification links retain only the built-in session target after login.
     dashboardStatus = 200;
     const sessionLink = '/tgw/webui/?session_id=11111111-2222-4333-8444-555555555555';
     for (const destination of ['/tgw/webui/', sessionLink]) {
-      await page.goto('http://admin.test/tgw/admin/?next=' + encodeURIComponent(destination));
-      await page.waitForURL('http://admin.test' + destination);
+      await page.goto('https://admin.test/tgw/admin/?next=' + encodeURIComponent(destination));
+      await page.waitForURL('https://admin.test' + destination);
     }
     for (const destination of ['https://invalid.example/', '//invalid.example/', '/tgw/admin/', sessionLink + '&next=https://invalid.example/', sessionLink + '\n', '/tgw/webui/?session_id=invalid']) {
-      await page.goto('http://admin.test/tgw/admin/?next=' + encodeURIComponent(destination));
+      await page.goto('https://admin.test/tgw/admin/?next=' + encodeURIComponent(destination));
       await page.waitForSelector('#console:not([hidden])');
       assert.equal(new URL(page.url()).pathname, '/tgw/admin/', 'Unsafe or unsupported return targets stay in admin');
     }
@@ -162,6 +234,6 @@ const data = {
     assert.ok(logoutCalls.some(entry => entry.path.endsWith('/webui/push/unsubscribe') && JSON.parse(entry.body).subscription_id === device), 'Sign-out disables the current device');
     assert.ok(logoutCalls.findIndex(entry => entry.path.endsWith('/webui/push/unsubscribe')) < logoutCalls.findIndex(entry => entry.path.endsWith('/admin/logout')), 'Device cleanup starts while the login is still valid');
     assert.deepEqual(errors, []);
-    console.log('Admin browser checks passed: mobile/desktop layout, full names, stats, filters, pagination, safe rendering, refresh/error recovery, enrollment flows, session expiry.');
+    console.log('Admin browser checks passed: mobile/desktop layout, full names, stats, filters, pagination, safe rendering, refresh/error recovery, enrollment flows, renewal/poll races, failed-finish recovery, session expiry.');
   } finally { await browser.close(); }
 })().catch(error => { console.error(error); process.exitCode = 1; });

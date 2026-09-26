@@ -278,7 +278,37 @@ func TestAnswerProgressIgnoresOpenInvalidAndRepeatedQuestionButtons(t *testing.T
 	if result, err := env.store.AcceptTelegram(ctx, answer); err != nil || !result.ProgressReposition {
 		t.Fatalf("answer: %+v %v", result, err)
 	}
-	ack := answerProgressUI(t, env.store)
+	// The temporary text-reply helper is deleted independently of progress.
+	// No replacement progress may precede either the answer acknowledgement
+	// or its existing progress-deletion barrier.
+	var ack Delivery
+	for _, row := range claimProgress(t, env.store, 3) {
+		switch row.Kind {
+		case "ui_response":
+			ack = row
+		case "question_answered":
+			var edit QuestionAnswerEdit
+			if err := json.Unmarshal(row.Payload, &edit); err != nil || edit.MessageID != 900 || edit.Answer != "Mac" {
+				t.Fatalf("original question answer changed: %+v %v", edit, err)
+			}
+			if err := env.store.MarkDeliverySent(ctx, row.ID, edit.MessageID, "", "", ""); err != nil {
+				t.Fatal(err)
+			}
+		case "input_reply_cleanup":
+			var cleanup InputReplyCleanup
+			if err := json.Unmarshal(row.Payload, &cleanup); err != nil || cleanup.MessageID != 910 {
+				t.Fatalf("cleanup removed non-helper message: %+v %v", cleanup, err)
+			}
+			if err := env.store.MarkDeliverySent(ctx, row.ID, cleanup.MessageID, "", "", ""); err != nil {
+				t.Fatal(err)
+			}
+		default:
+			t.Fatalf("progress bypassed answer cleanup: %+v", row)
+		}
+	}
+	if ack.ID == "" {
+		t.Fatal("missing answer acknowledgement")
+	}
 	if err := env.store.MarkDeliverySent(ctx, ack.ID, 915, "", "", ""); err != nil {
 		t.Fatal(err)
 	}

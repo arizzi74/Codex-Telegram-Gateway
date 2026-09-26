@@ -6,6 +6,10 @@ const pageSize = 10;
 let csrf = cookie('__Host-telegramgw-csrf');
 let authenticated = false;
 let loading = false;
+let reloadPending = false;
+let authEpoch = 0;
+let rotationPending = false;
+let sessionAuth = null;
 let dashboard = null;
 let sessionPage = 0;
 // Only the built-in web interface and a single canonical session link are
@@ -28,14 +32,25 @@ function cookie(name) {
 function msg(message) { $('message').textContent = message; }
 async function call(path, opts = {}) {
   const headers = { ...(opts.headers || {}), 'Content-Type': 'application/json' };
-  if (opts.method && opts.method !== 'GET') headers['X-CSRF-Token'] = csrf;
+  if (opts.method && opts.method !== 'GET') headers['X-CSRF-Token'] = cookie('__Host-telegramgw-csrf');
   const response = await fetch(api + path, { credentials: 'same-origin', ...opts, headers });
   if (!response.ok) {
     const error = new Error(response.status === 401 ? 'Sign in required.' : `Request failed (${response.status}). Please try again.`);
     error.status = response.status;
+    try { const detail = await response.json(); error.code = detail.code; if (detail.message) error.message = detail.message; } catch (_) { /* Non-JSON errors retain the safe generic message. */ }
     throw error;
   }
   return response.status === 204 ? null : response.json();
+}
+async function sensitiveCall(path, opts) {
+  await sessionAuth.ensureFresh();
+  try { return await call(path, opts); } catch (error) {
+    // Only this explicit server rejection proves that the mutation did not run.
+    // Network failures and ambiguous responses must never replay a mutation.
+    if (error.status !== 403 || error.code !== 'reauthentication_required') throw error;
+    await sessionAuth.login();
+    return call(path, opts);
+  }
 }
 function publicOptions(options) {
   const p = options.publicKey;
@@ -63,8 +78,9 @@ function serialize(credential) {
   return output;
 }
 async function enroll(bootstrap = '') {
+  if (!bootstrap) await sessionAuth.ensureFresh();
   msg('Preparing your passkey…');
-  const begin = await call('/passkeys/register/begin', { method: 'POST', body: JSON.stringify({ bootstrap_token: bootstrap }) });
+  const begin = await (bootstrap ? call : sensitiveCall)('/passkeys/register/begin', { method: 'POST', body: JSON.stringify({ bootstrap_token: bootstrap }) });
   const credential = await navigator.credentials.create({ publicKey: publicOptions(begin) });
   if (!credential) throw new Error('Passkey creation was cancelled.');
   await call('/passkeys/register/finish', { method: 'POST', body: JSON.stringify({ ceremony_id: begin.ceremony_id, bootstrap_token: bootstrap, credential: serialize(credential) }) });
@@ -72,13 +88,7 @@ async function enroll(bootstrap = '') {
   msg('Passkey saved. You can now sign in.');
 }
 async function login() {
-  msg('Waiting for your passkey…');
-  const begin = await call('/login/begin', { method: 'POST', body: '{}' });
-  const credential = await navigator.credentials.get({ publicKey: publicOptions(begin) });
-  if (!credential) throw new Error('Sign in was cancelled.');
-  await call('/login/finish', { method: 'POST', body: JSON.stringify({ ceremony_id: begin.ceremony_id, credential: serialize(credential) }) });
-  csrf = cookie('__Host-telegramgw-csrf');
-  await load();
+  await sessionAuth.login();
 }
 
 // Build dynamic content with text nodes; session titles, messages, and names are untrusted.
@@ -129,23 +139,37 @@ function fact(list, label, value, options = {}) {
 function button(label, className, action) {
   const control = el('button', className, label);
   control.type = 'button';
-  control.addEventListener('click', () => perform(action));
+  control.addEventListener('click', async () => {
+    control.disabled = true;
+    try { await perform(action); } finally { control.disabled = false; }
+  });
   return control;
 }
 function showError(error) {
   if (error.status === 401) {
-    authenticated = false;
-    dashboard = null;
-    $('console').hidden = true;
-    $('logout').hidden = true;
-    $('auth').hidden = false;
-    $('session-list').replaceChildren();
-    $('bot-info').replaceChildren();
-    msg('Your session expired. Please sign in again.');
+    sessionAuth.expire('Your session expired. Continue with your passkey.');
     return;
   }
   $('dashboard-error').textContent = error.message || 'Unable to refresh. Please try again.';
   $('dashboard-error').hidden = false;
+}
+function lockConsole(reason) {
+  authEpoch++;
+  authenticated = false;
+  dashboard = null;
+  reloadPending = false;
+  $('console').hidden = true;
+  $('logout').hidden = true;
+  $('auth').hidden = false;
+  for (const id of ['session-list', 'bot-info', 'worker-list', 'keys', 'browser-sessions']) $(id).replaceChildren();
+  msg(reason === 'expired' ? 'Your session expired. Continue with your passkey.' : reason?.startsWith('Signed out') ? reason : 'Continue with your passkey.');
+}
+function signedOut(message) {
+  // The same tab may have navigated here from the web UI. Its optional draft
+  // key is not an authentication token, but explicit sign-out should discard it.
+  try { sessionStorage.removeItem('codex-webui-encrypted-text-draft-v1'); } catch (_) { /* Storage may be disabled. */ }
+  sessionAuth.broadcast('logout');
+  sessionAuth.expire(message);
 }
 async function perform(action) {
   try { await action(); } catch (error) { showError(error); }
@@ -310,13 +334,13 @@ function renderWorkers(workers) {
     const actions = el('div', 'worker-actions');
     if (worker.Enabled !== false) {
       actions.append(button('Rotate token', 'secondary', async () => {
-        const result = await call('/workers/' + encodeURIComponent(worker.ID) + '/rotate-token', { method: 'POST', body: '{}' });
+        const result = await sensitiveCall('/workers/' + encodeURIComponent(worker.ID) + '/rotate-token', { method: 'POST', body: '{}' });
         showToken(worker.ID, result.token);
         await load(false);
       }));
       actions.append(button('Revoke', 'danger', async () => {
         if (confirm('Revoke this worker?')) {
-          await call('/workers/' + encodeURIComponent(worker.ID), { method: 'DELETE', body: '{}' });
+          await sensitiveCall('/workers/' + encodeURIComponent(worker.ID), { method: 'DELETE', body: '{}' });
           await load(false);
         }
       }));
@@ -334,7 +358,7 @@ function renderKeys(keys) {
     info.append(el('b', '', key.id.slice(0, 18) + '…'), el('div', 'muted', 'Added ' + timestamp(key.created_at)));
     row.append(info);
     if (!key.revoked_at) row.append(button('Revoke', 'danger', async () => {
-      await call('/passkeys/' + encodeURIComponent(key.id), { method: 'DELETE', body: '{}' });
+      await sensitiveCall('/passkeys/' + encodeURIComponent(key.id), { method: 'DELETE', body: '{}' });
       await load();
     }));
     else row.append(badge('revoked'));
@@ -342,13 +366,37 @@ function renderKeys(keys) {
   }
   if (!keys?.length) $('keys').append(el('p', 'muted', 'No passkeys available.'));
 }
+function renderBrowserSessions(sessions) {
+  $('browser-sessions').replaceChildren();
+  for (const session of sessions || []) {
+    const row = el('div', 'key browser-session');
+    const info = el('div');
+    info.append(el('b', '', (session.browser_label || 'Browser') + (session.current ? ' · This browser' : '')),
+      el('div', 'muted', 'Signed in ' + timestamp(session.created_at)),
+      el('div', 'muted', 'Last seen ' + timestamp(session.last_seen_at || session.created_at)),
+      el('div', 'muted', 'Expires ' + timestamp(session.expires_at)));
+    row.append(info, button('Sign out', 'danger', async () => {
+      if (!confirm(session.current ? 'Sign out of this browser?' : 'End access for this browser session?')) return;
+      await call('/sessions/' + encodeURIComponent(session.session_id), { method: 'DELETE', body: '{}' });
+      if (session.current) signedOut('Signed out.');
+      else await load(false);
+    }));
+    $('browser-sessions').append(row);
+  }
+}
 async function load(includeKeys = true) {
-  if (loading) return;
+  // A request issued between cookie revocation and login/finish response can
+  // return a stale 401 after the new login is verified. Pause both periodic
+  // and manual reads until the rotation is resolved.
+  if (rotationPending) { reloadPending = true; return; }
+  if (loading) { reloadPending = true; return; }
   loading = true;
+  const epoch = authEpoch;
   $('refresh').disabled = true;
   try {
     csrf = cookie('__Host-telegramgw-csrf');
     const data = await call('/dashboard');
+    if (epoch !== authEpoch) return;
     dashboard = data;
     authenticated = true;
     if (returnToWebUI) { location.replace(returnToWebUI); return; }
@@ -362,13 +410,22 @@ async function load(includeKeys = true) {
     renderSessions();
     renderWorkers(data.workers || []);
     $('last-refreshed').textContent = 'Updated ' + new Date().toLocaleTimeString() + ' · Refreshes every 15s';
-    if (includeKeys) renderKeys(await call('/passkeys'));
+    if (includeKeys) {
+      const keys = await call('/passkeys');
+      if (epoch !== authEpoch) return;
+      renderKeys(keys);
+    }
+    const browsers = await call('/sessions');
+    if (epoch !== authEpoch) return;
+    renderBrowserSessions(browsers.sessions);
   } catch (error) {
+    if (epoch !== authEpoch) return;
     if (!authenticated && error.status !== 401) msg(error.message);
     showError(error);
   } finally {
     loading = false;
     $('refresh').disabled = false;
+    if (reloadPending && authenticated) { reloadPending = false; queueMicrotask(() => load()); }
   }
 }
 function showToken(workerID, token) {
@@ -380,7 +437,7 @@ $('add-passkey').addEventListener('click', () => perform(async () => { await enr
 $('new-worker').addEventListener('click', () => perform(async () => {
   const name = prompt('Worker display name');
   if (name?.trim()) {
-    const result = await call('/workers', { method: 'POST', body: JSON.stringify({ name: name.trim() }) });
+    const result = await sensitiveCall('/workers', { method: 'POST', body: JSON.stringify({ name: name.trim() }) });
     showToken(result.worker_id, result.token);
     await load(false);
   }
@@ -397,6 +454,7 @@ $('logout').addEventListener('click', () => perform(async () => {
     } catch (_) { /* Server logout also revokes devices bound to this login. */ }
   }
   await call('/logout', { method: 'POST', body: '{}' });
+  signedOut('Signed out.');
   try {
     if (navigator.serviceWorker) await Promise.race([
       navigator.serviceWorker.getRegistration('/tgw/webui/').then(registration => registration?.pushManager?.getSubscription()).then(subscription => subscription?.unsubscribe()),
@@ -406,10 +464,41 @@ $('logout').addEventListener('click', () => perform(async () => {
   try { localStorage.removeItem('codex-webui-push-subscription'); } catch (_) { /* Storage can be disabled. */ }
   location.reload();
 }));
+$('logout-everywhere').addEventListener('click', () => perform(async () => {
+  if (!confirm('Sign out of every browser, including this one?')) return;
+  await call('/sessions/revoke-all', { method: 'POST', body: '{}' });
+  signedOut('Signed out everywhere.');
+}));
 $('refresh').addEventListener('click', () => load());
 for (const id of ['session-search', 'session-state']) $(id).addEventListener(id === 'session-search' ? 'input' : 'change', () => { sessionPage = 0; renderSessions(); });
 $('session-prev').addEventListener('click', () => { sessionPage--; renderSessions(); });
 $('session-next').addEventListener('click', () => { sessionPage++; renderSessions(); });
 setInterval(() => { if (authenticated && !document.hidden) load(false); }, 15000);
-document.addEventListener('visibilitychange', () => { if (authenticated && !document.hidden) load(false); });
-call('/session').then(() => load()).catch(error => { if (error.status !== 401) msg(error.message); });
+sessionAuth = window.CodexSessionAuth.create({
+  mount: $('auth-warning'),
+  isLocked: () => !authenticated,
+  onBeforeRotate: () => {
+    authEpoch++; rotationPending = true;
+    $('console').inert = true; $('logout').disabled = true;
+  },
+  onAuthenticated: async () => {
+    rotationPending = false; $('console').inert = false; $('logout').disabled = false;
+    authEpoch++; authenticated = true; await load();
+  },
+  onExpired: lockConsole,
+  onRenewing: busy => {
+    $('login').disabled = busy;
+    if (!busy && rotationPending) {
+      // A failed finish may have left either the old or new cookie valid.
+      // Check once before resuming reads; never replay the login mutation.
+      sessionAuth.verify('rotation-recovery').then(value => {
+        rotationPending = false;
+        if (value) return load();
+      }).catch(showError).finally(() => {
+        rotationPending = false; $('console').inert = false; $('logout').disabled = false;
+      });
+    }
+  },
+  onStatus: msg,
+});
+sessionAuth.verify('initial').catch(error => { if (error.status !== 401) msg(error.message); });

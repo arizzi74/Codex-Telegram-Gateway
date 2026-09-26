@@ -300,11 +300,22 @@ Question: Does the pointer disappear when captured?
 Answer: The pointer disappears when captured.
 ```
 
-The answer replaces the pending instructions and buttons. A separate **Reply
-with text** prompt for that question is updated too. Each answered field in a
-multi-question request is updated separately, while the remaining questions
-stay answerable. Edits keep working when another session is selected and are
-retried after a temporary Telegram failure.
+The answer replaces the original question's pending instructions and buttons.
+The temporary **Answer for <session>** helper created by **Reply with text** is
+deleted when its question is answered, or when the request is dismissed or
+resolved. Each answered field in a multi-question request is handled separately,
+while the remaining questions stay answerable. Cleanup also applies when the
+worker reports an answer or resolution from another interface. Edits and
+deletions work when another session is selected and retry temporary Telegram
+failures. Helpers that arrive late are queued for deletion as well. Upgrading
+also schedules cleanup of recorded, resolved helpers still eligible for deletion.
+
+Telegram controls the reply selection in its message box. If a previously saved
+reply preview remains after reopening the app, tap **×** beside it; this only
+closes the reply selection. Use `/tgquestions` to check which requests are still
+pending. Telegram's [message deletion API](https://core.telegram.org/bots/api#deletemessage)
+limits deletion to messages less than 48 hours old, so older helper messages may
+remain in chat history.
 
 For tracked asynchronous questions, the worker recognizes answers submitted
 through the terminal's native question UI and preserves their response text.

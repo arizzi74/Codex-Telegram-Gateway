@@ -2,7 +2,7 @@
   "name": "codex-telegram-gateway-browser-checks",
   "private": true,
   "scripts": {
-    "test:browser": "node scripts/test-admin-ui.cjs && node scripts/test-webui.cjs && node scripts/test-webui-notifications.cjs && node scripts/test-site.cjs",
+    "test:browser": "node scripts/test-admin-ui.cjs && node scripts/test-webui.cjs && node scripts/test-webui-auth.cjs && node scripts/test-webui-drafts.cjs && node scripts/test-webui-notifications.cjs && node scripts/test-site.cjs",
     "screenshots": "node scripts/capture-site-screenshots.cjs"
   },
   "devDependencies": {

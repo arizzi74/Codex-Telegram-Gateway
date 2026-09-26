@@ -18,6 +18,15 @@ import (
 func (s *Server) webuiRoutes() {
 	s.webuiPushRoutes()
 	s.webuiPWARoutes()
+	s.webuiDraftRoutes()
+	for _, asset := range []struct{ name, contentType string }{
+		{"session-auth.js", "application/javascript; charset=utf-8"},
+		{"session-auth.css", "text/css; charset=utf-8"},
+	} {
+		s.mux.HandleFunc("/tgw/admin/static/"+asset.name, func(w http.ResponseWriter, r *http.Request) {
+			serveAsset(w, r, "static/"+asset.name, asset.contentType)
+		})
+	}
 	s.mux.HandleFunc("/tgw/webui/", s.webuiPage)
 	for _, asset := range []struct{ name, contentType string }{
 		{"webui.css", "text/css; charset=utf-8"},
@@ -25,6 +34,7 @@ func (s *Server) webuiRoutes() {
 		{"webui-format.js", "application/javascript; charset=utf-8"},
 		{"webui-commands.js", "application/javascript; charset=utf-8"},
 		{"webui-command-ui.js", "application/javascript; charset=utf-8"},
+		{"webui-drafts.js", "application/javascript; charset=utf-8"},
 	} {
 		s.mux.HandleFunc("/tgw/webui/static/"+asset.name, func(w http.ResponseWriter, r *http.Request) {
 			serveAsset(w, r, "static/"+asset.name, asset.contentType)

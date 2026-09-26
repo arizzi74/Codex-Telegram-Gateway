@@ -210,6 +210,12 @@ func run(args []string, logger *slog.Logger) error {
 				if err != nil && serviceCtx.Err() == nil {
 					logger.Warn("Admin ceremony cleanup deferred", "error", err)
 				}
+				draftCtx, cancelDrafts := context.WithTimeout(serviceCtx, 5*time.Second)
+				draftErr := store.CleanupExpiredAdminDrafts(draftCtx)
+				cancelDrafts()
+				if draftErr != nil && serviceCtx.Err() == nil {
+					logger.Warn("Encrypted draft cleanup deferred", "error", draftErr)
+				}
 				select {
 				case <-serviceCtx.Done():
 					return

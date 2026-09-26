@@ -15,7 +15,7 @@ var versionedWebUIPage = sync.OnceValues(func() ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	names := []string{"webui.css", "webui-format.js", "webui-commands.js", "webui-command-ui.js", "webui-notifications.js", "webui.js"}
+	names := []string{"webui.css", "webui-format.js", "webui-commands.js", "webui-command-ui.js", "webui-notifications.js", "webui-drafts.js", "webui.js", "session-auth.js", "session-auth.css"}
 	hash := sha256.New()
 	_, _ = hash.Write(page)
 	for _, name := range names {
@@ -30,8 +30,10 @@ var versionedWebUIPage = sync.OnceValues(func() ([]byte, error) {
 	}
 	version := hex.EncodeToString(hash.Sum(nil))[:20]
 	for _, name := range names {
-		path := "/tgw/webui/static/" + name
-		page = bytes.ReplaceAll(page, []byte(path+`"`), []byte(path+"?v="+version+`"`))
+		for _, prefix := range []string{"/tgw/webui/static/", "/tgw/admin/static/"} {
+			path := prefix + name
+			page = bytes.ReplaceAll(page, []byte(path+`"`), []byte(path+"?v="+version+`"`))
+		}
 	}
 	return page, nil
 })

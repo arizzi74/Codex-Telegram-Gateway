@@ -4,6 +4,32 @@ Open `https://gateway.example.com/tgw/webui/` and sign in with the gateway's adm
 
 The existing Go gateway serves the interface and relays its authenticated connection to the selected worker. The worker attaches to the existing Codex app-server. No additional Codex CLI, pseudo-terminal, Python service, Node.js service, CDN, or public worker port is needed. Browser JavaScript and CSS are embedded in the gateway binary.
 
+## Sign-in and recovery
+
+Browser logins expire eight hours after the last successful passkey sign-in.
+Five minutes before expiry, **Continue with passkey** lets you renew access in
+place. If access expires, the interface locks and removes private conversation
+data. Signing in again restores the selected conversation and reading position;
+running turns continue on the worker. On phones, returning to the foreground
+checks authentication again instead of relying on background timers. Other open
+tabs recheck their login after renewal or sign-out.
+
+**Recover encrypted text drafts after sign-in** is optional and off by default.
+When enabled, the browser encrypts per-session text drafts with AES-GCM before
+sending them to the gateway. The gateway stores only ciphertext, with a maximum
+of 256 KiB per recovery copy and a 30-minute expiry after its latest save. The
+encryption key stays in this tab's session storage; no plaintext draft or
+conversation is written to browser storage. Recovery requires signing in as the
+same account and retaining this tab's key. Closing the tab can lose the key.
+Image attachments are excluded and remain in memory only.
+
+Recovered copies are cleared after recovery; disabling recovery or explicitly
+signing out clears the associated recovery state. Expired copies are removed
+periodically. Failed or uncertain saves show a notice, and recovery does not
+guarantee the last keystroke was saved before expiry or a network interruption.
+Restoring a draft never sends it. If a previous send's acknowledgment was lost,
+check the conversation before submitting again.
+
 ## Conversation controls
 
 - An accepted **Steer** message shows **Message queued** above the input for four seconds. This temporary confirmation also applies to **/tgsteer** and disappears when the turn ends, the session changes or the viewer disconnects. It is not added to conversation history. Failed or unconfirmed sends do not display this confirmation.
@@ -16,7 +42,7 @@ The existing Go gateway serves the interface and relays its authenticated connec
 - Paste an image into the prompt, drop one onto the composer, or tap **＋** to choose an image on desktop or mobile. A thumbnail appears before sending; **×** removes it. You can send the image by itself or with text. Each message supports one PNG, JPEG or GIF up to 10 MiB, 16 million pixels and 8,192 pixels per side. If a mobile clipboard does not expose image files to the browser, use **＋** and the photo/file picker. Image drafts stay with their session in browser memory and are cleared only after acknowledgment; they are never resent automatically. Reloading or signing out clears them. Saved conversation and Telegram history show an **[Image]** placeholder.
 - Prompts sent through Telegram appear live in an open web UI for the same session when Codex accepts them; prompts queued behind a running turn appear when that queued turn starts. Prompts sent through the web UI or Codex CLI appear in Telegram as a bot message labeled **You · Codex**, following the selected session or multisession mode. Accepted Telegram prompts are not echoed back, and replayed native events do not duplicate prompts. The worker subscribes before enabling a newly opened web session, including sessions restored from disk.
 - Model and reasoning names in the status bar are plain text. Use **/model** to choose a model and then its reasoning effort, or **/reasoning** to change effort. These settings apply to subsequent turns; changes require an idle session. Confirmed model and effort changes from a browser, Telegram or attached native client update other open web views of the same session through WebSocket notifications. Historical usage data and delayed command acknowledgments cannot overwrite the confirmed selection. Missing runtime model metadata leaves the session defaults available.
-- Worker headings have a tinted background and accent border, with runtime names underneath. On desktop, the **− / +** controls in the header set the conversation and prompt font to 12–22 pixels and scale the status text with it. Only this font preference is saved in the browser; the phone layout keeps its compact text size.
+- Worker headings have a tinted background and accent border, with runtime names underneath. On desktop, the **− / +** controls in the header set the conversation and prompt font to 12–22 pixels and scale the status text with it. This display preference is saved in the browser; the phone layout keeps its compact text size.
 - A session name turns green while its turn runs, with a pulsing green dot beside a steady **Working** label, and returns to its normal color when the turn ends. Only the dot pulses, using the same animation as the purple working dot in the conversation. Switching to another session keeps the running session green; it continues updating in the background. Pending questions or approvals take priority: the name glows yellow until they are resolved. On mobile, any pending session question also changes the menu button to a glowing yellow **?**. These indicators update through a separate WebSocket, without polling conversation history. **Live updates** below the session count confirms that the feed is connected; reconnection is shown explicitly rather than silently leaving stale indicators.
 - On a wide desktop, one full-width status row combines model/effort controls, turn state, context usage, Codex account allowances (for example **5h 74% left · Weekly 58% left**), and working directory. It wraps when larger fonts or a narrower window need more room; phones keep model controls on their own row. Hover over an allowance for its reset date and local time. Like the Codex statusline, this uses the default Codex limit bucket; labels follow the reported window duration. Limits load when connecting and update from runtime events without periodic quota polling. Older workers or accounts that do not report quotas show **Limits unavailable**; disconnecting clears the values.
 - Tool calls are collapsible, with blue labels and output and gray command text such as **Ran …**; failed tools retain an error color. File changes show green additions and red deletions. Assistant Markdown supports headings, lists, emphasis, links, quotes, tables, fenced code, and basic code coloring. Tables become labeled records on narrow screens; long code and paths wrap.
@@ -93,7 +119,13 @@ Worker observer admission is cancellation-aware, including update admission and 
 
 The worker prefers native item pagination. Official Codex 0.156 can reject that method for older conversation formats, so the worker falls back to reading individual source turns and returns only the requested 20 entries. Completed turns are cached in bounded worker memory for up to ten minutes; this cache does not change the existing SQLite synchronization backend or add an idle polling loop. A cold legacy read can still require one complete source turn from Codex. These reads use a temporary connection to the existing app-server so an oversized response cannot close the worker's durable observer connection. Cache limits are 64 MiB and 32 snapshots, with bounded message/page sizes and an explicit notice for oversized entries. If a paging cursor expires, **Reload recent messages** returns to the latest 20 entries while preserving the unsent draft.
 
-Drafts remain in memory per session while the page stays open. There is no persistent browser transcript, token, or draft cache. Reloading/closing the page loses an unsent draft. If a prompt's acknowledgment is lost, its draft stays visible with an explicit warning; **the browser never automatically resends it**. Check the restored conversation before pressing Send again. Authentication expiry disconnects the viewer and clears loaded conversation data and drafts.
+By default, drafts remain in memory per session while the page stays open, and
+reloading or closing it loses an unsent draft. Optional encrypted text recovery is
+described above. There is no persistent browser transcript or plaintext draft
+cache. If a prompt's acknowledgment is lost, its draft stays visible with an
+explicit warning; **the browser never automatically resends it**. Authentication
+expiry disconnects the viewer and clears loaded conversation data and plaintext
+drafts; successful sign-in can recover an opted-in encrypted text copy.
 
 The interface follows new output only while you are near the bottom. Selecting a session scrolls fully to its latest entry and keeps it visible while status text, questions, font metrics and image previews settle above the composer. Reading earlier messages keeps your scroll position; **Latest messages** returns to the end. Mobile layouts account for the visible keyboard viewport. Reduced-motion preferences disable working and question animations while keeping their status colors. The official runtime's existing limitation with clearing TUI question displays after answers from another client still applies; this interface does not patch the Codex runtime.
 

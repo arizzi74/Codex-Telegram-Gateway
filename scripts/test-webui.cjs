@@ -105,7 +105,7 @@ turns['thread-d'] = [{ id: 'short-d', status: 'completed', startedAt: now - 500,
       if (holdSessionInventory) { heldSessionInventories.push(route); notifySessionInventoryHeld(); return; }
       return route.fulfill({ status: authStatus, contentType: 'application/json', body: JSON.stringify({ sessions }) });
     }
-    if (url.pathname === '/tgw/api/v1/admin/session') return route.fulfill({ status: authStatus, contentType: 'application/json', body: '{}' });
+    if (url.pathname === '/tgw/api/v1/admin/session') return route.fulfill({ status: authStatus, contentType: 'application/json', body: JSON.stringify({ authenticated: true, session_id: 'browser-test-session', server_time: new Date().toISOString(), expires_at: new Date(Date.now() + 28800000).toISOString(), reauthenticated_at: new Date().toISOString() }) });
     if (url.pathname === '/tgw/api/v1/webui/commands') {
       const request = route.request().method() === 'POST' ? route.request().postDataJSON() : Object.fromEntries(url.searchParams);
       gatewayCommands.push({ method: route.request().method(), csrf: route.request().headers()['x-csrf-token'], ...request });
@@ -113,7 +113,7 @@ turns['thread-d'] = [{ id: 'short-d', status: 'completed', startedAt: now - 500,
       const command = request.command;
       return route.fulfill({ status: authStatus !== 200 ? authStatus : command === 'tgstatus' ? gatewayStatusCode : 200, contentType: 'application/json', body: JSON.stringify({ command, text: command === 'tgupdateworkers' ? 'Linux worker: update queued after active turns finish.' : command === 'tginstances' ? 'Linux worker / Primary Codex · online' : gatewayStatusText, workers: command === 'tgupdateworkers' ? gatewayUpdateWorkers.map(worker => ({ ...worker, state: 'queued' })) : gatewayUpdateWorkers, gateway_version: '0.5.test' }) });
     }
-    const staticFiles = ['webui-format.js', 'webui-commands.js', 'webui-command-ui.js', 'webui-notifications.js', 'webui.js', 'webui.css', 'webui-icon.svg', 'webui-icon-180.png', 'webui-icon-192.png', 'webui-icon-512.png'];
+    const staticFiles = ['session-auth.js', 'session-auth.css', 'webui-drafts.js', 'webui-format.js', 'webui-commands.js', 'webui-command-ui.js', 'webui-notifications.js', 'webui.js', 'webui.css', 'webui-icon.svg', 'webui-icon-180.png', 'webui-icon-192.png', 'webui-icon-512.png'];
     const filename = url.pathname.endsWith('/manifest.webmanifest') ? 'webui-manifest.webmanifest' : staticFiles.find(name => url.pathname.endsWith('/' + name)) || 'webui.html';
     const contentType = filename.endsWith('.js') ? 'text/javascript' : filename.endsWith('.css') ? 'text/css' : filename.endsWith('.png') ? 'image/png' : filename.endsWith('.svg') ? 'image/svg+xml' : filename.endsWith('.webmanifest') ? 'application/manifest+json' : 'text/html';
     await route.fulfill({ contentType, headers: { 'Content-Security-Policy': "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'" }, body: fs.readFileSync(path.join(assets, filename)) });
@@ -1761,7 +1761,13 @@ turns['thread-d'] = [{ id: 'short-d', status: 'completed', startedAt: now - 500,
       await page.waitForFunction(() => Boolean(window.testSockets.at(-1).heldOlderItems)).catch(async error => {
         await historyDiagnostics(count); throw error;
       });
-      await page.waitForFunction(() => document.querySelector('#transcript').scrollTop === 0);
+      // The real Home gesture above must trigger the request. Finish its
+      // native compositor scroll before measuring the anchor: browser keyboard
+      // scrolling is not controlled by Playwright's mocked animation clock and
+      // can stop short when layout and CPU scheduling overlap. Pagination is
+      // already held; this only makes the geometry assertion deterministic.
+      await page.locator('#transcript').evaluate(scroller => scroller.scrollTo({ top: 0, behavior: 'instant' }));
+      await page.waitForFunction(() => document.querySelector('#transcript').scrollTop === 0).catch(async error => { await historyDiagnostics(count); throw error; });
       await page.locator('#transcript').evaluate(scroller => {
         const first = document.querySelector('#messages article');
         window.historyAnchor = { id: first.dataset.itemId, top: first.getBoundingClientRect().top };

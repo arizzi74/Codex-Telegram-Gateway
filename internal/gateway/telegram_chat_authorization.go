@@ -18,7 +18,7 @@ func telegramChatAllowed(chats []int64, chat int64) bool {
 // authorizeDeliveryDestination checks the actual API destination, not only the
 // queue envelope: frozen chunks survive gateway restarts and policy changes.
 func (s *Sender) authorizeDeliveryDestination(ctx context.Context, row registry.Delivery, chat int64) error {
-	if row.Kind == "picker_cleanup" {
+	if row.Kind == "picker_cleanup" || row.Kind == "input_reply_cleanup" {
 		return nil // Deleting old content remains safe after access is revoked.
 	}
 	allowed := telegramChatAllowed(s.options.AllowedChatIDs, chat)

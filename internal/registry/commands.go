@@ -485,9 +485,13 @@ func (s *Store) acceptReplyInput(ctx context.Context, tx *dbTx, in IncomingUpdat
 	}
 	var approvalID *uuid.UUID
 	var questionID *string
-	err := tx.QueryRow(ctx, `SELECT approval_id, question_id FROM bot_message_routes
-        WHERE bot_id=$1 AND chat_id=$2 AND message_id=$3`, in.BotID, in.ChatID, in.ReplyToMessageID).
-		Scan(&approvalID, &questionID)
+	var retiredHelper bool
+	err := tx.QueryRow(ctx, `SELECT route.approval_id,route.question_id,COALESCE(helper.retired,0)
+        FROM bot_message_routes route
+        LEFT JOIN telegram_input_reply_messages message ON message.bot_id=route.bot_id AND message.chat_id=route.chat_id AND message.message_id=route.message_id
+        LEFT JOIN telegram_input_reply_helpers helper ON helper.delivery_id=message.delivery_id
+        WHERE route.bot_id=$1 AND route.chat_id=$2 AND route.message_id=$3`, in.BotID, in.ChatID, in.ReplyToMessageID).
+		Scan(&approvalID, &questionID, &retiredHelper)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return AcceptResult{}, fmt.Errorf("registry: resolve input reply route: %w", err)
 	}
@@ -496,6 +500,11 @@ func (s *Store) acceptReplyInput(ctx context.Context, tx *dbTx, in IncomingUpdat
 			return result, err
 		}
 		return s.acceptAction(ctx, tx, in)
+	}
+	// Retain the route after deletion, but an old composer must never replace
+	// a submitted answer or become an ordinary prompt when a question reopens.
+	if retiredHelper {
+		return AcceptResult{}, ErrTelegramTarget
 	}
 	if len(in.Images) > 0 {
 		return mediaErrorResult("image_input_reply"), nil
@@ -906,13 +915,14 @@ func queueUIResponse(ctx context.Context, tx *dbTx, in IncomingUpdate, result Ac
 	if err != nil {
 		return err
 	}
+	id := uuid.New()
 	_, err = tx.Exec(ctx, `INSERT INTO telegram_deliveries
         (delivery_id, bot_id, chat_id, message_thread_id, kind, payload)
-        VALUES ($1,$2,$3,$4,'ui_response',$5)`, uuid.New(), in.BotID, in.ChatID, in.TopicID, string(payload))
+        VALUES ($1,$2,$3,$4,'ui_response',$5)`, id, in.BotID, in.ChatID, in.TopicID, string(payload))
 	if err != nil {
 		return fmt.Errorf("registry: queue UI response: %w", err)
 	}
-	return nil
+	return trackInputReplyHelper(ctx, tx, id, result)
 }
 
 // PendingCommands returns frozen commands across workers. Dispatchers that own

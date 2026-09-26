@@ -81,8 +81,8 @@ func TestWebUIPageVersionsEveryEmbeddedAsset(t *testing.T) {
 	}
 	w := httptest.NewRecorder()
 	console.ServeHTTP(w, httptest.NewRequest("GET", "/tgw/webui/", nil))
-	links := regexp.MustCompile(`/tgw/webui/static/[^"?]+\?v=([0-9a-f]{20})`).FindAllStringSubmatch(w.Body.String(), -1)
-	if w.Code != 200 || len(links) != 6 {
+	links := regexp.MustCompile(`/tgw/(?:webui|admin)/static/[^"?]+\?v=([0-9a-f]{20})`).FindAllStringSubmatch(w.Body.String(), -1)
+	if w.Code != 200 || len(links) != 9 {
 		t.Fatalf("versioned assets: status=%d links=%v", w.Code, links)
 	}
 	for _, link := range links {
