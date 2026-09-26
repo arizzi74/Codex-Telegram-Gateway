@@ -145,6 +145,11 @@ func inspectUpdateBackup(root *os.Root, name, component string) (updateBackup, e
 		required = append(required, "04-codex-local")
 	} else {
 		allowed["gateway.db"] = true
+		// SQLite's backup integrity check can leave WAL/shared-memory files.
+		// They belong to the snapshot and must be retained or removed with it.
+		for _, suffix := range []string{"-wal", "-shm", "-journal"} {
+			allowed["gateway.db"+suffix] = true
+		}
 		// Gateway files are snapshotted before the service stops and its
 		// database is backed up. A binary-only attempt is not a full rollback.
 		required = append(required, "gateway.db")

@@ -224,6 +224,87 @@ func TestPruneUpdateBackupsGatewayRequiresDatabaseSnapshot(t *testing.T) {
 	}
 }
 
+func TestPruneUpdateBackupsGatewaySQLiteSidecars(t *testing.T) {
+	l := retentionFixture(t, "gateway")
+	source := filepath.Join(t.TempDir(), "source.db")
+	db := openUpdateDB(t, source)
+	if _, err := db.Exec("PRAGMA journal_mode=WAL; CREATE TABLE data(value TEXT); INSERT INTO data VALUES ('committed in WAL')"); err != nil {
+		t.Fatal(err)
+	}
+	if data := updateRead(t, source+"-wal"); len(data) == 0 {
+		t.Fatal("test requires a live nonempty WAL")
+	}
+	var want []string
+	preservedFiles := make(map[string]string)
+	for day, version := range []string{"v1.0.0", "v1.1.0", "v1.2.0", "v1.3.0", "v1.2.0", "v2.0.0"} {
+		name := retentionSnapshot(t, l, day+1, version)
+		dir := filepath.Join(l.Backups, name)
+		backup := filepath.Join(dir, "gateway.db")
+		if err := os.Remove(backup); err != nil {
+			t.Fatal(err)
+		}
+		if err := sqliteBackup(t.Context(), source, backup); err != nil {
+			t.Fatal(err)
+		}
+		// Match the real gateway snapshots, including sidecars emitted by the
+		// SQLite integrity check rather than only synthetic companion files.
+		for _, suffix := range []string{"-shm", "-wal"} {
+			if info, err := os.Lstat(backup + suffix); err != nil || !info.Mode().IsRegular() {
+				t.Fatalf("SQLite backup did not emit regular %s: %v", suffix, err)
+			}
+		}
+		retentionWrite(t, backup+"-journal", "optional rollback journal")
+		if day == 1 || day == 3 || day == 4 {
+			want = append(want, name)
+			for _, file := range []string{"gateway.db", "gateway.db-shm", "gateway.db-wal", "gateway.db-journal"} {
+				path := filepath.Join(dir, file)
+				preservedFiles[path] = updateRead(t, path)
+			}
+		}
+	}
+	if removed, err := pruneUpdateBackups(l, "v2.0.0"); removed != 3 || err != nil {
+		t.Fatalf("prune = %d, %v; expected old version, duplicate and current-version copies removed", removed, err)
+	}
+	if got := retentionNames(t, l); !reflect.DeepEqual(got, want) {
+		t.Fatalf("remaining entries = %v, want %v", got, want)
+	}
+	for path, original := range preservedFiles {
+		if data := updateRead(t, path); data != original {
+			t.Fatalf("retained database snapshot file changed: %s", path)
+		}
+	}
+}
+
+func TestPruneUpdateBackupsGatewayRejectsUnsafeSidecars(t *testing.T) {
+	for _, suffix := range []string{"-shm", "-wal", "-journal"} {
+		for _, kind := range []string{"symlink", "directory"} {
+			t.Run(suffix+"/"+kind, func(t *testing.T) {
+				l := retentionFixture(t, "gateway")
+				name := retentionSnapshot(t, l, 1, "v2.0.0")
+				path := filepath.Join(l.Backups, name, "gateway.db"+suffix)
+				sentinel := filepath.Join(t.TempDir(), "keep")
+				retentionWrite(t, sentinel, "untouched")
+				if kind == "symlink" {
+					if err := os.Symlink(sentinel, path); err != nil {
+						t.Fatal(err)
+					}
+				} else if err := os.Mkdir(path, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if removed, err := pruneUpdateBackups(l, "v2.0.0"); removed != 0 || err == nil {
+					t.Fatalf("unsafe sidecar prune = %d, %v", removed, err)
+				}
+				if got := retentionNames(t, l); !reflect.DeepEqual(got, []string{name}) {
+					t.Fatalf("unsafe snapshot removed: %v", got)
+				}
+				if data := updateRead(t, sentinel); data != "untouched" {
+					t.Fatalf("external sentinel changed: %q", data)
+				}
+			})
+		}
+	}
+}
+
 func TestPruneUpdateBackupsMissingRootAndInvalidCurrentVersion(t *testing.T) {
 	l := &Layout{Component: "worker", Backups: filepath.Join(t.TempDir(), "absent")}
 	if removed, err := pruneUpdateBackups(l, "v2.0.0"); removed != 0 || err != nil {
