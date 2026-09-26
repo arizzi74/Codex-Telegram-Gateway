@@ -964,6 +964,35 @@
     if (Array.isArray(item.summary)) return item.summary.map(part => typeof part === 'string' ? part : part.text || '').join('\n');
     return '';
   }
+  function appendToolOutput(parent, output, truncated = false) {
+    const text = clean(typeof output === 'string' ? output : JSON.stringify(output, null, 2));
+    if (!text.trim()) return;
+    if (text.length > 64000 || truncated) parent.append(node('p', 'muted small', 'Showing the last 64,000 characters of tool output.'));
+    parent.append(code(text.slice(-64000)));
+  }
+  function webSearchPresentation(item) {
+    const text = value => typeof value === 'string' ? clean(value).trim() : '';
+    const action = item.action || {};
+    const queries = [...new Set((Array.isArray(action.queries) ? action.queries : []).map(text).filter(Boolean))];
+    if (!queries.length && text(action.query || item.query)) queries.push(text(action.query || item.query));
+    const url = text(action.url), pattern = text(action.pattern);
+    let label = 'Search · ' + (text(item.query) || queries[0] || 'Web');
+    const body = document.createDocumentFragment();
+    const field = (name, value) => { if (value) body.append(node('p', 'muted small', name), code(value)); };
+    if (action.type === 'openPage' || action.type === 'findInPage') {
+      label = action.type === 'openPage' ? 'Open page · ' + (url || text(item.query) || 'Web') : 'Find in page · ' + (pattern || text(item.query) || url || 'Web');
+      field('URL', url);
+      if (action.type === 'findInPage') field('Find', pattern);
+      if (!body.childNodes.length) field('Query', queries.join('\n'));
+    } else field(queries.length > 1 ? 'Queries' : 'Query', queries.join('\n'));
+    // Native search results are opaque JSON. Keep their public contents intact
+    // as bounded text rather than assuming a result schema or inserting HTML.
+    if (Array.isArray(item.results) && item.results.length) {
+      body.append(node('p', 'muted small', 'Results'));
+      appendToolOutput(body, item.results);
+    }
+    return { label, body };
+  }
   function renderItem(item) {
     const type = item.type;
     const isUser = type === 'userMessage';
@@ -990,6 +1019,12 @@
         details.append(summary, markdown(summaryText)); article.append(details);
       }
       if (item.displayNotice) article.append(node('p', 'muted small', clean(item.displayNotice)));
+    } else if (type === 'contextCompaction') {
+      // This native item has no summary or output. Only live item events can
+      // distinguish an active compaction within an otherwise running turn.
+      const label = item._complete ? 'Context compacted' : item._liveStarted && item._turn === state.turn ? 'Compacting context…' : 'Context compaction';
+      article.append(node('p', 'tool-title', label));
+      if (item.displayNotice) article.append(node('p', 'muted small', clean(item.displayNotice)));
     } else if (type === 'subAgentActivity') {
       // Native SubAgentActivity carries a lifecycle kind and target identity,
       // not tool output. Codex's TUI presents the same action as a plain line.
@@ -1003,31 +1038,32 @@
       if (item.displayNotice) article.append(node('p', 'muted small', clean(item.displayNotice)));
     }
     else {
-      const details = node('details');
-      const summary = node('summary');
+      const body = document.createDocumentFragment();
+      const search = type === 'webSearch' ? webSearchPresentation(item) : null;
       let label = type || 'Activity';
       if (type === 'commandExecution') label = (item.status === 'completed' ? 'Ran ' : 'Running ') + (item.command || 'command');
       else if (type === 'fileChange') label = 'File changes · ' + ((item.changes || []).map(change => change.path).join(', ') || item.status || 'pending');
       else if (type === 'mcpToolCall') label = [item.server, item.tool].filter(Boolean).join(' / ');
-      else if (type === 'webSearch') label = 'Search · ' + (item.query || item.action?.query || 'Web');
+      else if (search) label = search.label;
       else if (type === 'plan') label = 'Plan';
-      summary.append(node('span', 'tool-title', clean(label).slice(0, 600))); details.append(summary);
       if (item.displayNotice) {
-        details.append(node('p', 'muted small', clean(item.displayNotice)));
+        body.append(node('p', 'muted small', clean(item.displayNotice)));
+      } else if (search) {
+        body.append(search.body);
       } else if (type === 'fileChange') {
-        for (const change of item.changes || []) { details.append(node('p', '', change.path || ''), code(change.diff || '', 'diff')); }
-      } else if (type === 'plan') details.append(markdown(itemText(item)));
+        for (const change of item.changes || []) { body.append(node('p', '', change.path || ''), code(change.diff || '', 'diff')); }
+      } else if (type === 'plan') body.append(markdown(itemText(item)));
       else {
         const output = item.aggregatedOutput || item.output || item.result?.content?.map?.(part => part.text || '').join('\n') || itemText(item);
-        if (output) {
-          const text = typeof output === 'string' ? output : JSON.stringify(output, null, 2);
-          if (text.length > 64000 || item._truncated) details.append(node('p', 'muted small', 'Showing the last 64,000 characters of tool output.'));
-          details.append(code(text.slice(-64000)));
-        }
-        if (item.exitCode !== undefined && item.exitCode !== null) details.append(node('p', 'muted small', 'Exit code: ' + item.exitCode));
+        if (output) appendToolOutput(body, output, item._truncated);
+        if (item.exitCode !== undefined && item.exitCode !== null) body.append(node('p', 'muted small', 'Exit code: ' + item.exitCode));
       }
       article.dataset.failed = String(item.status === 'failed' || (typeof item.exitCode === 'number' && item.exitCode !== 0));
-      article.append(details);
+      if (clean(body.textContent).trim()) {
+        const details = node('details'), summary = node('summary');
+        summary.append(node('span', 'tool-title', clean(label).slice(0, 600)));
+        details.append(summary, body); article.append(details);
+      } else article.append(node('p', 'tool-title', clean(label)));
     }
     return article;
   }
@@ -1121,7 +1157,7 @@
     } else if (method === 'thread/status/changed') {
       if (p.status?.type === 'idle') { state.turn = null; }
     } else if (method === 'item/started' || method === 'item/completed') {
-      if (p.item) { ingestItem({ ...p.item, _complete: method === 'item/completed' }, { id: p.turnId, startedAt: state.items.get(p.item.id)?._time || Date.now(), status: method === 'item/started' ? 'inProgress' : 'completed' }); renderQuestions(); }
+      if (p.item) { ingestItem({ ...p.item, _liveStarted: method === 'item/started', _complete: method === 'item/completed' }, { id: p.turnId, startedAt: state.items.get(p.item.id)?._time || Date.now(), status: method === 'item/started' ? 'inProgress' : 'completed' }); renderQuestions(); }
     } else if (method === 'item/agentMessage/delta') {
       const item = state.items.get(p.itemId) || { id: p.itemId, type: 'agentMessage', text: '', _turn: p.turnId };
       item.text = (item.text || '') + (p.delta || ''); state.items.set(p.itemId, item);

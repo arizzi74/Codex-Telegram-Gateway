@@ -34,6 +34,7 @@ check the conversation before submitting again.
 
 ## Conversation controls
 
+- Search entries expand to show their full queries or page actions and any results supplied by Codex. Context compaction is a plain status line; other tool entries only expand when they have details to display. Compaction loaded from a still-running turn uses a neutral label until a live event confirms its state.
 - An accepted **Steer** message shows **Message queued** above the input for four seconds. This temporary confirmation also applies to **/tgsteer** and disappears when the turn ends, the session changes or the viewer disconnects. It is not added to conversation history. Failed or unconfirmed sends do not display this confirmation.
 - Connection and history-loading errors disappear after the session successfully reloads. A successful retry also clears an older-history loading error. Codex errors marked as retryable clear when output resumes for that same turn or it completes successfully. Merely opening a socket does not clear an unresolved error; other Codex errors and uncertain-send warnings remain visible.
 - On phones, the status bar uses two lines: model/reasoning with turn state, then context percentage with account limits. The numeric token count is omitted. Long model names are shortened to keep the rows compact.

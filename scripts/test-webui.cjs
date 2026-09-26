@@ -36,11 +36,13 @@ const turns = {
       { id: 'agent-fallback-a', type: 'subAgentActivity', kind: 'completed', agentThreadId: 'child-without-path' },
       { id: 'agent-future-a', type: 'subAgentActivity', kind: 'future-action', agentThreadId: 'child-thread', agentPath: '/root/future-agent', output: 'UNEXPOSED_AGENT_OUTPUT' },
       { id: 'tool-a', type: 'commandExecution', command: 'go test ./...', status: 'completed', exitCode: 0, aggregatedOutput: 'All checks passed.' },
+      { id: 'search-a', type: 'webSearch', query: 'Codex app-server web search ' + hostile, action: { type: 'search', query: 'Codex app-server web search ' + hostile, queries: ['Codex app-server web search ' + hostile, 'Search action schema and complete search query'] }, results: null },
+      { id: 'compaction-a', type: 'contextCompaction' },
       { id: 'reply-a', type: 'agentMessage', text: '# Ready to continue\n\nThe **responsive layout** is ready.\n\n| Control | Behavior |\n| --- | --- |\n| Send | Starts a turn |\n| Disconnect | Work continues |\n\n```go\nconst ready = true\n```\n\n```diff\n-old UI\n+responsive UI\n```\n\n[Unsafe](javascript:alert(1)) ' + hostile + '\n\n[Documentation](https://example.com/docs)' },
     ] },
     { id: 'old-a', status: 'completed', startedAt: now - 3600, items: [{ id: 'old-user', type: 'userMessage', content: [{ type: 'text', text: 'The earlier prompt.' }] }] },
   ],
-  'thread-b': [{ id: 'running-b', status: 'inProgress', startedAt: now - 60, items: [{ id: 'user-b', type: 'userMessage', content: [{ type: 'text', text: 'Keep working in session B.' }] }, { id: 'comment-b', type: 'agentMessage', phase: 'commentary', text: 'Checking the mobile layout.' }] }],
+  'thread-b': [{ id: 'running-b', status: 'inProgress', startedAt: now - 60, items: [{ id: 'user-b', type: 'userMessage', content: [{ type: 'text', text: 'Keep working in session B.' }] }, { id: 'comment-b', type: 'agentMessage', phase: 'commentary', text: 'Checking the mobile layout.' }, { id: 'compaction-b', type: 'contextCompaction' }] }],
 };
 const historyItem = index => {
   const common = { id: 'history-' + index, createdAt: now - 1000 + index };
@@ -453,6 +455,9 @@ turns['thread-d'] = [{ id: 'short-d', status: 'completed', startedAt: now - 500,
     await page.waitForFunction(() => Boolean(window.testSockets.at(-1).heldInitialItems && window.testSockets.at(-1).heldMetadata));
     await page.evaluate(() => { const old = window.testSockets.at(-1); window.testOldBootstrap = { old, callback: old.onmessage }; window.testHoldInitialItems = false; window.testHoldMetadata = false; window.testHoldQuestions = false; });
     await choose('b');
+    assert.match(await page.locator('[data-item-id="compaction-b"]').textContent(), /Context compaction/, 'Saved compaction in a running turn does not claim a completion state the protocol cannot establish');
+    assert.doesNotMatch(await page.locator('[data-item-id="compaction-b"]').textContent(), /Compacting context|Context compacted/, 'Only a live item event establishes active or completed compaction');
+    assert.equal(await page.locator('[data-item-id="compaction-b"] details').count(), 0, 'Saved compaction without item status is also a plain activity line');
     await page.evaluate(() => {
       const { old, callback } = window.testOldBootstrap;
       for (const reply of [old.heldInitialItems, old.heldMetadata]) callback({ data: JSON.stringify({ id: reply.frame.id, result: reply.result }) });
@@ -509,6 +514,16 @@ turns['thread-d'] = [{ id: 'short-d', status: 'completed', startedAt: now - 500,
     assert.match(await page.locator('[data-item-id="agent-fallback-a"]').textContent(), /child-without-path/, 'An agent without a path is identified by its native thread ID');
     assert.match(await page.locator('[data-item-id="agent-future-a"]').textContent(), /Agent activity.*\/root\/future-agent/s, 'An unfamiliar agent action still identifies the agent clearly');
     assert.doesNotMatch(await page.locator('[data-item-id="agent-future-a"]').textContent(), /UNEXPOSED_AGENT_OUTPUT/, 'Agent activity never falls back to unrecognized raw output fields');
+    const savedSearch = page.locator('[data-item-id="search-a"]');
+    await savedSearch.locator('summary').click();
+    const savedSearchBody = savedSearch.locator('details > :not(summary)');
+    assert.equal(await savedSearchBody.first().isVisible(), true, 'A saved search expands to visible action details');
+    assert.match((await savedSearchBody.allTextContents()).join('\n'), /Codex app-server web search/, 'The search body includes the query, not only the collapsed title');
+    assert.match((await savedSearchBody.allTextContents()).join('\n'), /Search action schema and complete search query/, 'A multi-query search displays every query');
+    assert.ok((await savedSearchBody.allTextContents()).join('\n').includes(hostile), 'Search queries remain literal text');
+    assert.equal(await savedSearch.locator('img').count(), 0, 'Hostile query markup cannot create DOM elements');
+    assert.match(await page.locator('[data-item-id="compaction-a"]').textContent(), /Context compacted/, 'Saved compaction shows its completed state');
+    assert.equal(await page.locator('[data-item-id="compaction-a"] details, [data-item-id="compaction-a"] summary').count(), 0, 'Compaction has no empty expandable body');
     await current({ method: 'turn/started', params: { threadId: 'thread-a', turn: { id: 'format-live-a', status: 'inProgress' } } });
     await current({ method: 'item/started', params: { threadId: 'thread-a', turnId: 'format-live-a', item: { id: 'live-reasoning-a', type: 'reasoning', summary: [] } } });
     await page.waitForSelector('[data-item-id="live-reasoning-a"]');
@@ -519,6 +534,40 @@ turns['thread-d'] = [{ id: 'short-d', status: 'completed', startedAt: now - 500,
     assert.match(await page.locator('[data-item-id="live-reasoning-a"] .role').textContent(), /Reasoning complete/);
     await page.locator('[data-item-id="live-reasoning-a"] summary').click();
     assert.equal(await page.locator('[data-item-id="live-reasoning-a"]').getByText('A public summary became available.', { exact: true }).isVisible(), true, 'A newly completed public summary becomes expandable');
+    const liveTool = (method, item) => current({ method, params: { threadId: 'thread-a', turnId: 'format-live-a', item } });
+    await liveTool('item/started', { id: 'live-search-a', type: 'webSearch', query: '', action: null, results: null });
+    await page.waitForSelector('[data-item-id="live-search-a"]');
+    assert.equal(await page.locator('[data-item-id="live-search-a"] details').count(), 0, 'A search with no query yet is a plain activity line');
+    const completeQuery = 'Detailed search '.repeat(60) + 'END_OF_FULL_SEARCH ' + hostile;
+    await liveTool('item/completed', { id: 'live-search-a', type: 'webSearch', query: completeQuery, action: { type: 'search', query: completeQuery, queries: null }, results: [{ title: 'Official result ' + hostile, url: 'https://example.com/search-result', snippet: 'Returned search detail' }] });
+    await page.locator('[data-item-id="live-search-a"] summary').click();
+    const liveSearchBody = page.locator('[data-item-id="live-search-a"] details > :not(summary)');
+    const liveSearchText = (await liveSearchBody.allTextContents()).join('\n');
+    assert.ok(liveSearchText.includes(completeQuery), 'Search expansion retains the full query beyond the title truncation');
+    assert.match(liveSearchText, /Official result|Returned search detail/, 'Search results are displayed when the runtime supplies them');
+    assert.equal(await page.locator('[data-item-id="live-search-a"] img').count(), 0, 'Query and result markup remain escaped');
+    for (const [id, action, expected] of [
+      ['open', { type: 'openPage', url: 'https://example.com/complete-page?param=1' }, 'https://example.com/complete-page?param=1'],
+      ['find', { type: 'findInPage', url: 'https://example.com/guide', pattern: 'Find this exact phrase ' + hostile }, 'Find this exact phrase ' + hostile],
+    ]) {
+      await liveTool('item/completed', { id: 'live-search-' + id, type: 'webSearch', query: '', action, results: id === 'open' ? [] : null });
+      const item = page.locator('[data-item-id="live-search-' + id + '"]');
+      await item.locator('summary').click();
+      assert.ok((await item.locator('details > :not(summary)').allTextContents()).join('\n').includes(expected), 'Search ' + id + ' expands its native action fields');
+      assert.equal(await item.locator('img').count(), 0, 'Search action fields remain safe text');
+    }
+    await liveTool('item/started', { id: 'live-compaction-a', type: 'contextCompaction' });
+    await page.waitForFunction(() => document.querySelector('[data-item-id="live-compaction-a"]')?.textContent.includes('Compacting context'));
+    assert.equal(await page.locator('[data-item-id="live-compaction-a"] details').count(), 0, 'Active compaction is a meaningful status rather than an empty expander');
+    await liveTool('item/completed', { id: 'live-compaction-a', type: 'contextCompaction' });
+    await page.waitForFunction(() => document.querySelector('[data-item-id="live-compaction-a"]')?.textContent.includes('Context compacted'));
+    assert.equal(await page.locator('[data-item-id="live-compaction-a"] details').count(), 0, 'Completed compaction stays nonexpandable');
+    await liveTool('item/started', { id: 'live-silent-tool-a', type: 'commandExecution', command: 'quiet-check', status: 'inProgress', aggregatedOutput: ' \n\u001b[31m\u001b[0m\t' });
+    await page.waitForSelector('[data-item-id="live-silent-tool-a"]');
+    assert.equal(await page.locator('[data-item-id="live-silent-tool-a"] details').count(), 0, 'Whitespace and ANSI-only tool output do not create an empty expander');
+    await liveTool('item/completed', { id: 'live-silent-tool-a', type: 'commandExecution', command: 'quiet-check', status: 'completed', aggregatedOutput: 'Tool output became available.', exitCode: 0 });
+    await page.locator('[data-item-id="live-silent-tool-a"] summary').click();
+    assert.equal(await page.locator('[data-item-id="live-silent-tool-a"]').getByText('Tool output became available.', { exact: true }).isVisible(), true, 'A bodyless tool becomes expandable when actual output arrives');
     await current({ method: 'turn/completed', params: { threadId: 'thread-a', turn: { id: 'format-live-a', status: 'completed' } } });
     // The activity channel includes sessions that are not selected. A pending
     // background question must be visible even while this viewer stays on A.
