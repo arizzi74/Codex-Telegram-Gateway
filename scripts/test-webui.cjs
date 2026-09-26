@@ -159,6 +159,18 @@ turns['thread-d'] = [{ id: 'short-d', status: 'completed', startedAt: now - 500,
     window.testActivityRevision = 1; window.testActivitySockets = []; window.testPauseActivityHeartbeats = false; window.testHoldActivitySnapshot = false;
     window.testActivityRows = sessions.map(session => ({ session_id: session.session_id, state: session.state, pending_questions: 0, worker_connectivity: 'connected', runtime_state: 'running', active_turn_id: session.state === 'running' ? 'running-' + session.session_id : '' }));
     window.testSettingsRevision = 0;
+    window.testPermissions = {
+      a: { sandbox: { type: 'workspaceWrite' }, approvalPolicy: 'on-request', approvalsReviewer: 'user', activePermissionProfile: { id: ':workspace' } },
+      b: { sandbox: { type: 'dangerFullAccess' }, approvalPolicy: 'never', approvalsReviewer: 'user', activePermissionProfile: { id: ':danger-full-access' } },
+    };
+    window.testPublishPermissions = (id, settings) => {
+      window.testPermissions[id] = settings;
+      const socket = window.testSockets.at(-1);
+      if (socket.session === id) {
+        const { sandbox, ...rest } = settings;
+        socket.emit({ method: 'thread/settings/updated', params: { threadId: 'thread-' + id, threadSettings: { model: 'codex-model', effort: 'high', sandboxPolicy: sandbox, ...rest } } });
+      }
+    };
     window.testPublishSettings = (id, model, effort, revision) => {
       const row = { ...window.testActivityRows.find(row => row.session_id === id), session_id: id, model, reasoning_effort: effort, settings_revision: revision || '1:' + (++window.testSettingsRevision) };
       window.testActivityRows = window.testActivityRows.map(current => current.session_id === id ? row : current);
@@ -193,7 +205,7 @@ turns['thread-d'] = [{ id: 'short-d', status: 'completed', startedAt: now - 500,
         if (frame.method === 'thread/resume') {
           if (window.testHoldResume) { this.held = frame; return; }
           if (window.testFailResume) { this.emit({ id: frame.id, error: { message: 'Thread unavailable' } }); return; }
-          result = { thread: { id: frame.params.threadId }, model: 'codex-model', reasoningEffort: 'high' };
+          result = { thread: { id: frame.params.threadId }, model: 'codex-model', reasoningEffort: 'high', ...window.testPermissions[this.session] };
         } else if (frame.method === 'thread/turns/list') {
           result = frame.params.itemsView === 'notLoaded' ? { data: (turns[frame.params.threadId] || []).slice(0, frame.params.limit || 1).map(({ items, ...turn }) => ({ ...turn, items: [] })), nextCursor: null }
             : frame.params.cursor ? { data: [{ id: 'earliest', status: 'completed', startedAt: 1600000000, items: [{ id: 'earliest-message', type: 'agentMessage', text: 'The first conversation.' }] }], nextCursor: null } : { data: turns[frame.params.threadId], nextCursor: frame.params.threadId === 'thread-a' ? 'older' : null };
@@ -261,6 +273,8 @@ turns['thread-d'] = [{ id: 'short-d', status: 'completed', startedAt: now - 500,
               const [model, effort] = frame.params.args.split(/\s+/); window.testPublishSettings(this.session, model, effort || '');
             } else if (frame.params.name === 'reasoning') {
               window.testPublishSettings(this.session, window.testActivityRows.find(row => row.session_id === this.session)?.model || 'codex-model', frame.params.args);
+            } else if (frame.params.name === 'permissions' && frame.params.args === 'confirm-full-access') {
+              window.testPublishPermissions(this.session, { sandbox: { type: 'dangerFullAccess' }, approvalPolicy: 'never', approvalsReviewer: 'user', activePermissionProfile: { id: ':danger-full-access' } });
             }
           }
           this.emit({ id: frame.id, result });
@@ -788,6 +802,7 @@ turns['thread-d'] = [{ id: 'short-d', status: 'completed', startedAt: now - 500,
       });
     });
     assert.ok(footerItems.some(item => item.label === 'model-controls'), 'Model controls share the status bar');
+    assert.equal(await page.locator('#session-status #permissions').isVisible(), true, 'Desktop permissions share the full-width status bar');
     assert.equal(await page.locator('.sidebar-footer').getByText('Powered by Codex', { exact: true }).count(), 0, 'The sidebar omits the redundant Powered by Codex caption');
     assert.equal(await page.locator('.sidebar-footer').getByRole('button', { name: 'Settings', exact: true }).count(), 1, 'The sidebar exposes its compact Settings entry');
     for (const item of footerItems) assert.ok(Math.abs(item.middle - footerItems[0].middle) < 2, `Wide desktop status item ${item.label} shares one row`);
@@ -1079,11 +1094,15 @@ turns['thread-d'] = [{ id: 'short-d', status: 'completed', startedAt: now - 500,
     await choose('a');
     await page.locator('#prompt').fill('/permissions');
     await page.locator('#send').click();
+    assert.equal(await page.locator('#permissions').textContent(), 'On request', 'Session resume supplies the current permission setting');
     await page.locator('#command-content').getByRole('button', { name: /^Full Access/ }).click();
     assert.equal(await page.locator('#command-panel').isVisible(), true, 'Full access remains open until its separate confirmation is accepted');
+    assert.equal(await page.locator('#permissions').textContent(), 'On request', 'Opening a confirmation cannot claim full access is already enabled');
     await page.locator('#command-content').getByRole('button', { name: 'Enable Full Access', exact: true }).click();
     await page.waitForFunction(() => document.querySelector('#command-panel').hidden && !document.querySelector('#show-commands').disabled);
     assert.equal(await page.locator('#command-content').textContent(), '', 'Confirmed permissions close without retaining explanatory text');
+    assert.equal(await page.locator('#permissions').textContent(), 'Full access', 'The native confirmation updates the status bar even after authoritative model events');
+    assert.match(await page.locator('#permissions').getAttribute('title'), /never|dangerFullAccess|danger-full-access/, 'The permission tooltip explains the native configuration');
     assert.deepEqual(await page.evaluate(() => window.testSent.filter(frame => frame.method === 'gateway/command' && frame.params.name === 'permissions').map(frame => frame.params.args || '')), ['', 'full-access', 'confirm-full-access'], 'Full access retains the worker’s separate confirmation step');
     await page.evaluate(() => { window.testRejectCommand = true; });
     await page.locator('#prompt').fill('/permissions read-only');
@@ -1092,6 +1111,7 @@ turns['thread-d'] = [{ id: 'short-d', status: 'completed', startedAt: now - 500,
     assert.equal(await page.locator('#command-panel').isVisible(), true, 'Rejected settings remain visible so the error can be read');
     assert.match(await page.locator('#command-content').textContent(), /Setting rejected by runtime/);
     assert.equal(await page.locator('#prompt').inputValue(), '/permissions read-only', 'A rejected setting preserves the command draft');
+    assert.equal(await page.locator('#permissions').textContent(), 'Full access', 'A rejected permission setting leaves the confirmed status unchanged');
     for (const command of ['/fast status', '/usage']) {
       await page.locator('#prompt').fill(command); await page.locator('#send').click();
       await page.waitForFunction(() => !document.querySelector('#show-commands').disabled && document.querySelector('#command-content').textContent.includes('completed.'));
@@ -1209,6 +1229,20 @@ turns['thread-d'] = [{ id: 'short-d', status: 'completed', startedAt: now - 500,
     assert.equal(await page.locator('#effort').textContent(), 'medium');
     await current({ method: 'thread/settings/updated', params: { threadId: 'thread-a', threadSettings: { model: 'older-native-frame', effort: 'low' } } });
     assert.match(await page.locator('#model').textContent(), /terminal-selected-model/, 'An unordered native frame cannot supersede confirmed settings from the global feed');
+    assert.equal(await page.locator('#permissions').textContent(), 'Full access', 'A model-only event preserves the independently confirmed permission mode');
+    for (const [label, settings] of [
+      ['Read only', { sandbox: { type: 'readOnly' }, approvalPolicy: 'on-request', approvalsReviewer: 'user', activePermissionProfile: { id: ':read-only' } }],
+      ['Auto review', { sandbox: { type: 'workspaceWrite' }, approvalPolicy: 'on-request', approvalsReviewer: 'auto_review', activePermissionProfile: { id: ':workspace' } }],
+      ['External', { sandbox: { type: 'externalSandbox' }, approvalPolicy: 'never', approvalsReviewer: 'user', activePermissionProfile: null }],
+      ['Custom', { sandbox: { type: 'workspaceWrite' }, approvalPolicy: 'untrusted', approvalsReviewer: 'user', activePermissionProfile: null }],
+      ['team profile ' + hostile, { sandbox: { type: 'workspaceWrite' }, approvalPolicy: 'on-request', approvalsReviewer: 'user', activePermissionProfile: { id: 'team profile ' + hostile } }],
+      ['On request', { sandbox: { type: 'workspaceWrite' }, approvalPolicy: 'on-request', approvalsReviewer: 'user', activePermissionProfile: { id: ':workspace' } }],
+    ]) {
+      await page.evaluate(({ settings }) => window.testPublishPermissions('a', settings), { settings });
+      assert.equal(await page.locator('#permissions').textContent(), label, 'Native permission changes update independently of the model activity feed');
+      assert.equal(await page.locator('#permissions img').count(), 0, 'Custom permission profile names remain literal text');
+      assert.match(await page.locator('#model').textContent(), /terminal-selected-model/, 'Permission changes cannot revert the independently confirmed model');
+    }
     await page.evaluate(() => { window.settingsBeforeFeedDrop = window.testActivitySocket; window.testActivitySocket.drop(1006); });
     await page.clock.fastForward(1100);
     await page.waitForFunction(() => window.testActivitySocket !== window.settingsBeforeFeedDrop && window.testActivitySocket.readyState === 1);
@@ -1218,21 +1252,27 @@ turns['thread-d'] = [{ id: 'short-d', status: 'completed', startedAt: now - 500,
     assert.match(await page.locator('#model').textContent(), /terminal-selected-model/, 'A background session setting cannot replace the selected session setting');
     assert.equal(await page.evaluate(() => window.testSockets.length), connectionsBeforeSettings, 'Live settings updates do not open extra transcript connections');
     await choose('b');
+    assert.equal(await page.locator('#permissions').textContent(), 'Full access', 'Selecting a different session displays that session’s actual permissions');
     assert.match(await page.locator('#model').textContent(), /telegram-background-model/, 'Selecting a background session restores its newest live model');
     assert.equal(await page.locator('#effort').textContent(), 'low', 'The saved live effort wins over an older native resume snapshot');
     await choose('a');
     assert.match(await page.locator('#model').textContent(), /terminal-selected-model/);
+    assert.equal(await page.locator('#permissions').textContent(), 'On request', 'Returning to a session restores its own permissions');
     await page.evaluate(() => { window.testHoldResume = true; });
-    await page.locator('#disconnect').click(); await page.locator('#reconnect').click();
+    await page.locator('#disconnect').click();
+    assert.equal(await page.locator('#permissions').textContent(), 'Permissions ?', 'Disconnect clears the permission state instead of displaying a stale configuration');
+    await page.locator('#reconnect').click();
     await page.waitForFunction(() => Boolean(window.testSockets.at(-1).held));
     await page.evaluate(() => {
       window.testPublishSettings('a', 'changed-during-resume', 'low');
+      window.testPublishPermissions('a', { sandbox: { type: 'readOnly' }, approvalPolicy: 'on-request', approvalsReviewer: 'user', activePermissionProfile: { id: ':read-only' } });
       const socket = window.testSockets.at(-1); window.testHoldResume = false;
-      socket.emit({ id: socket.held.id, result: { thread: { id: 'thread-a' }, model: 'old-resume-model', reasoningEffort: 'high' } });
+      socket.emit({ id: socket.held.id, result: { thread: { id: 'thread-a' }, model: 'old-resume-model', reasoningEffort: 'high', sandbox: { type: 'dangerFullAccess' }, approvalPolicy: 'never', activePermissionProfile: { id: ':danger-full-access' } } });
     });
     await connected();
     await page.waitForFunction(() => document.querySelector('#model').textContent.includes('changed-during-resume'));
     assert.equal(await page.locator('#effort').textContent(), 'low', 'A late resume response cannot revert a newer live setting');
+    assert.equal(await page.locator('#permissions').textContent(), 'Read only', 'A late resume response cannot revert a newer native permission update');
     await page.evaluate(() => window.testPublishSettings('a', 'codex-model', ''));
     await page.waitForFunction(() => /default/i.test(document.querySelector('#effort').textContent));
     assert.doesNotMatch(await page.locator('#effort').textContent(), /low|high|medium/, 'An authoritative default effort clears the previous explicit effort');
@@ -1256,6 +1296,9 @@ turns['thread-d'] = [{ id: 'short-d', status: 'completed', startedAt: now - 500,
     assert.equal(await page.locator('#questions').isHidden(), true, 'A stale form cannot add or answer a question in session B');
     await page.evaluate(() => window.stalePermissionButton.click());
     assert.equal(await page.evaluate(() => window.testSent.filter(frame => frame.method === 'gateway/command').length), commandsBeforeSwitch, 'An old permission button cannot change the newly selected session');
+    assert.equal(await page.locator('#permissions').textContent(), 'Full access', 'A stale permission action cannot replace the selected session’s mode');
+    await current({ method: 'thread/settings/updated', params: { threadId: 'thread-a', threadSettings: { sandboxPolicy: { type: 'readOnly' }, approvalPolicy: 'on-request', activePermissionProfile: { id: ':read-only' } } } });
+    assert.equal(await page.locator('#permissions').textContent(), 'Full access', 'An unrelated session’s native permission event cannot enter the current status bar');
     await page.waitForFunction(() => document.querySelector('#send').textContent.includes('Steer'));
     assert.equal(await page.locator('#prompt').inputValue(), '');
     assert.equal(await page.locator('[data-item-id="reply-a"]').count(), 0, 'Switch clears old conversation');
@@ -1327,6 +1370,7 @@ turns['thread-d'] = [{ id: 'short-d', status: 'completed', startedAt: now - 500,
     assert.equal(await page.locator('#model').evaluate(element => element.tagName), 'SPAN', 'The model status is read-only text');
     assert.equal(await page.locator('#effort').evaluate(element => element.tagName), 'SPAN', 'The reasoning status is read-only text');
     assert.equal(await page.locator('#session-status select').count(), 0, 'Status settings are selected through slash menus, not dropdowns');
+    assert.equal(await page.locator('#permissions').evaluate(element => element.tagName), 'SPAN', 'Permissions are read-only status text rather than another dropdown');
     await page.locator('#prompt').fill('/model codex-model low');
     await page.locator('#send').click();
     await page.waitForFunction(() => document.querySelector('#effort').textContent === 'low');
@@ -1591,6 +1635,7 @@ turns['thread-d'] = [{ id: 'short-d', status: 'completed', startedAt: now - 500,
       assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true, 'Mobile must not overflow at ' + width);
       assert.equal(await page.locator('#model').isVisible(), true);
       assert.equal(await page.locator('#effort').isVisible(), true);
+      assert.equal(await page.locator('#permissions').isVisible(), true, 'Permission mode is visible on mobile');
       assert.equal(await page.locator('#font-increase').isVisible(), false);
       assert.equal(await conversationFont(), 13, 'Desktop font preferences do not enlarge the mobile conversation');
       assert.equal(await promptFont(), 13, 'Mobile prompt keeps the conversation font size');
@@ -1600,7 +1645,11 @@ turns['thread-d'] = [{ id: 'short-d', status: 'completed', startedAt: now - 500,
         const originallyAtEnd = transcript.scrollHeight - transcript.scrollTop - transcript.clientHeight <= 2;
         const box = target => { const rect = target.getBoundingClientRect(); return { top: rect.top, bottom: rect.bottom, left: rect.left, right: rect.right, height: rect.height }; };
         const model = element.querySelector('.model-controls'), limits = element.querySelector('#rate-limits');
-        const geometry = { status: box(element), model: box(model), turn: box(element.querySelector('#turn-state')), usage: box(element.querySelector('#usage')), limits: box(limits), buckets: [...limits.querySelectorAll('.rate-limit')].map(box), rowGap: parseFloat(getComputedStyle(element).rowGap) };
+        const permissions = element.querySelector('#permissions');
+        const geometry = { status: box(element), model: box(model), effort: box(element.querySelector('#effort')), permissions: box(permissions), turn: box(element.querySelector('#turn-state')), usage: box(element.querySelector('#usage')), limits: box(limits), buckets: [...limits.querySelectorAll('.rate-limit')].map(box), rowGap: parseFloat(getComputedStyle(element).rowGap) };
+        const previousPermission = permissions.textContent; permissions.textContent = 'A long custom permission profile name that must stay within its allotted mobile space';
+        geometry.longProfile = { model: box(model), effort: box(element.querySelector('#effort')), permissions: box(permissions), turn: box(element.querySelector('#turn-state')), height: box(element).height };
+        permissions.textContent = previousPermission;
         const children = [...limits.childNodes]; limits.replaceChildren();
         geometry.emptyLimits = { height: box(element).height, visible: getComputedStyle(limits).display !== 'none' };
         limits.append(...children);
@@ -1613,6 +1662,12 @@ turns['thread-d'] = [{ id: 'short-d', status: 'completed', startedAt: now - 500,
         return geometry;
       });
       assert.ok(Math.abs(mobileStatus.model.top - mobileStatus.turn.top) < 2, width + 'px status aligns model/effort and turn state on the first row');
+      assert.ok(Math.abs(mobileStatus.permissions.top - mobileStatus.turn.top) < 2, width + 'px permission mode shares the first status row');
+      for (const layout of [mobileStatus, mobileStatus.longProfile]) {
+        assert.ok(layout.effort.right <= layout.permissions.left + 1, width + 'px model effort and permission mode never overlap');
+        assert.ok(layout.permissions.right <= layout.turn.left + 1, width + 'px permission mode leaves room for the turn state');
+      }
+      assert.ok(Math.abs(mobileStatus.longProfile.height - mobileStatus.status.height) < 2, width + 'px a long custom permission name does not add a third status line');
       assert.ok(Math.abs(mobileStatus.turn.right - mobileStatus.status.right) < 2, width + 'px turn state aligns to the right edge');
       assert.ok(mobileStatus.usage.top >= Math.max(mobileStatus.model.bottom, mobileStatus.turn.bottom), width + 'px context usage starts on the second row');
       assert.ok(Math.abs(mobileStatus.usage.left - mobileStatus.status.left) < 2, width + 'px context usage aligns to the left edge');
@@ -1804,6 +1859,7 @@ turns['thread-d'] = [{ id: 'short-d', status: 'completed', startedAt: now - 500,
     // summaries: a single 45-item turn must not fill the initial viewport.
     await page.setViewportSize({ width: 1440, height: 1000 });
     await choose('c');
+    assert.equal(await page.locator('#permissions').textContent(), 'Permissions ?', 'A session whose runtime omits permission metadata never inherits the previous session’s mode');
     await page.waitForFunction(() => document.querySelectorAll('#messages article').length === 20);
     const historyIDs = () => page.locator('#messages article').evaluateAll(items => items.map(item => item.dataset.itemId));
     const historyDiagnostics = async expected => {

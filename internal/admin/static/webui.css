@@ -51,12 +51,15 @@
 .session-group{background:var(--surface);background:color-mix(in srgb,var(--accent) 9%,var(--panel));border:1px solid var(--border);border-left:3px solid var(--accent);border-radius:8px;padding:.65rem .75rem}
 #steer-notice{margin:0 2px 6px;color:var(--success);font-size:calc(.8rem * var(--workspace-scale,1));line-height:1.5;overflow-wrap:anywhere}
 .notifications-control{min-width:0}.notifications-control button{width:100%;text-align:left;font-size:.78rem;min-height:38px}.notifications-control button[aria-pressed=true]{color:var(--success)}#notifications-status{margin:6px 0 0;font-size:.7rem;line-height:1.5;overflow-wrap:anywhere}
-/* Two mobile rows: model/effort and state, then context and account limits. */
+/* Two mobile rows: model/effort/permissions and state, then context and limits. */
+#permissions{color:var(--accent);max-width:26ch;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#permissions[data-mode=unknown]{color:var(--muted)}
 @media(max-width:650px){
   #session-status{display:grid;grid-template-columns:max-content minmax(0,1fr) max-content;align-items:baseline;justify-content:normal;gap:4px 6px;margin-top:8px;font-size:.8rem;line-height:1.5}
-  #session-status .model-controls{grid-column:1/3;grid-row:1;gap:5px;min-width:0;align-items:baseline;white-space:nowrap;overflow:hidden}
+  #session-status .model-controls{grid-column:1/3;grid-row:1;gap:5px;min-width:0;align-items:baseline;white-space:nowrap;overflow:hidden;flex-wrap:nowrap}
   #session-status #model{min-width:0;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   #session-status #effort{flex-shrink:0;max-width:100%;white-space:nowrap}
+  #session-status #permissions{flex-shrink:0;max-width:13ch}
   #session-status #turn-state{grid-column:3;grid-row:1;text-align:right;white-space:nowrap}
   #session-status #usage{grid-column:1;grid-row:2;min-width:0;white-space:nowrap}
   #session-status #rate-limits{grid-column:2/4;grid-row:2;min-width:0;justify-content:flex-end;flex-wrap:nowrap;gap:8px}

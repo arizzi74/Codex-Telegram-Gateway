@@ -15,6 +15,7 @@
   const activity = { socket: null, timer: null, generation: 0, revision: -1, sequence: -1, sessions: new Map(), attempts: 0, watchdog: null, ready: false };
   const sessionSettings = new Map(), activitySettingsRevisions = new Map();
   let settingsSerial = 0;
+  let permissionSettings = null, permissionRevision = 0;
   let loadingOlder = false, suppressHistoryScroll = false;
   let questionRevision = 0, questionSnapshotSequence = 0;
   let questionRefresh = null;
@@ -315,6 +316,40 @@
     updateSessionIndicators();
     commandUI?.update();
   }
+  function renderPermissions() {
+    const target = $('permissions'), settings = permissionSettings;
+    if (!settings) {
+      target.textContent = 'Permissions ?';
+      target.title = 'Permissions unavailable until confirmed by the connected session. Use /permissions to view choices.';
+      target.dataset.mode = 'unknown';
+      return;
+    }
+    const { sandbox, approval, reviewer, profile } = settings;
+    const automatic = reviewer === 'auto_review' || reviewer === 'guardian_subagent';
+    let label = 'Custom';
+    if (profile && !profile.startsWith(':')) label = profile;
+    else if (sandbox === 'dangerFullAccess' && approval === 'never') label = 'Full access';
+    else if (sandbox === 'readOnly' && approval === 'on-request' && reviewer === 'user') label = 'Read only';
+    else if (sandbox === 'workspaceWrite' && approval === 'on-request') label = automatic ? 'Auto review' : reviewer === 'user' ? 'On request' : 'Custom';
+    else if (sandbox === 'externalSandbox') label = 'External';
+    target.textContent = label;
+    target.dataset.mode = sandbox;
+    const sandboxNames = { dangerFullAccess: 'Full system access', readOnly: 'Read only', workspaceWrite: 'Workspace write', externalSandbox: 'External sandbox' };
+    target.title = ['Permissions: ' + label, 'Sandbox: ' + (sandboxNames[sandbox] || sandbox), 'Approvals: ' + (typeof approval === 'string' ? approval : JSON.stringify(approval)), 'Reviewer: ' + (reviewer || 'unavailable'), ...(profile ? ['Profile: ' + profile] : []), 'Use /permissions to change the setting.'].join('\n');
+    settleBottom();
+  }
+  function clearPermissions() { permissionSettings = null; permissionRevision++; renderPermissions(); }
+  function applyPermissions(settings, sandboxKey) {
+    if (!settings || ![sandboxKey, 'approvalPolicy', 'approvalsReviewer', 'activePermissionProfile'].some(key => Object.hasOwn(settings, key))) return;
+    const sandbox = settings[sandboxKey]?.type, approval = settings.approvalPolicy;
+    permissionSettings = typeof sandbox === 'string' && sandbox && (typeof approval === 'string' && approval || approval?.granular) ? {
+      sandbox: clean(sandbox), approval,
+      reviewer: typeof settings.approvalsReviewer === 'string' ? clean(settings.approvalsReviewer) : '',
+      profile: typeof settings.activePermissionProfile?.id === 'string' ? clean(settings.activePermissionProfile.id) : '',
+    } : null;
+    permissionRevision++;
+    renderPermissions();
+  }
   function saveDraft() {
     if (state.selected) state.drafts.set(state.selected.session_id, $('prompt').value);
     syncRecoveryDrafts();
@@ -383,6 +418,7 @@
     state.connected = false;
     state.loading = false;
     state.submitting = false;
+    clearPermissions();
     clearRateLimits();
   }
   function rpc(method, params = {}, timeout = 30000) {
@@ -758,13 +794,19 @@
         }
         return;
       }
-      if (state.loading) state.queuedEvents.push(message);
+      if (state.loading) {
+        // Permissions are authoritative even while history is still loading.
+        // A newer notification must win over a delayed resume snapshot.
+        if (message.method === 'thread/settings/updated' && message.params?.threadId === state.selected?.codex_thread_id) applyPermissions(message.params.threadSettings, 'sandboxPolicy');
+        state.queuedEvents.push(message);
+      }
       else handleEvent(message);
     };
     socket.onclose = async event => {
       clearTimeout(handshakeTimer);
       if (generation !== state.generation || state.socket !== socket) return;
       state.connected = false; state.loading = false;
+      clearPermissions();
       clearRateLimits();
       rejectPending('Connection interrupted. No input was resent. Check the conversation before retrying.');
       updateControls();
@@ -813,9 +855,11 @@
     const threadId = state.selected.codex_thread_id;
     const current = () => generation === state.generation && state.socket === socket && state.connected;
     const settingsBeforeResume = settingsCheckpoint();
+    const permissionsBeforeResume = permissionRevision;
     const resume = await rpc('thread/resume', { threadId });
     if (!current()) return;
     const thread = resume?.thread || {};
+    if (permissionRevision === permissionsBeforeResume) applyPermissions(resume, 'sandbox');
     if (resume?.model && settingsCheckpoint() === settingsBeforeResume && sessionSettings.get(state.selected.session_id)?.source !== 'activity') {
       applySessionSettings(state.selected.session_id, resume.model, resume.reasoningEffort || '', 'resume');
     }
@@ -1134,6 +1178,7 @@
       // Once the versioned activity feed has confirmed settings, its ordered
       // revisions are authoritative across all connections and sessions.
       const settings = p.threadSettings;
+      if (p.threadId === state.selected?.codex_thread_id) applyPermissions(settings, 'sandboxPolicy');
       if (p.threadId === state.selected?.codex_thread_id && settings && typeof settings.model === 'string' && (typeof settings.effort === 'string' || settings.effort === null) && sessionSettings.get(state.selected.session_id)?.source !== 'activity') {
         applySessionSettings(state.selected.session_id, settings.model, settings.effort || '', 'native');
       }

@@ -65,7 +65,7 @@
         <input id="image-file" type="file" accept="image/png,image/jpeg,image/gif" hidden>
         <div class="input-row"><button id="attach-image" type="button" class="quiet" aria-label="Attach image" title="Paste an image or choose a PNG, JPEG or GIF">＋</button><span class="prompt-mark" aria-hidden="true">›</span><label for="prompt" class="sr-only">Message Codex</label><textarea id="prompt" rows="1" placeholder="Ask Codex to do anything" maxlength="200000" spellcheck="true"></textarea><div class="send-controls"><button id="stop" type="button" class="quiet" hidden>Stop</button><button id="send" type="submit" class="primary" disabled>Send ↑</button></div></div>
         <div id="session-status" class="statusline">
-          <div class="model-controls"><span id="model" aria-label="Model" title="Use /model to change the model">Session model</span><span aria-hidden="true">·</span><span id="effort" aria-label="Reasoning effort" title="Use /reasoning to change reasoning effort">Session effort</span></div>
+          <div class="model-controls"><span id="model" aria-label="Model" title="Use /model to change the model">Session model</span><span aria-hidden="true">·</span><span id="effort" aria-label="Reasoning effort" title="Use /reasoning to change reasoning effort">Session effort</span><span aria-hidden="true">·</span><span id="permissions" aria-label="Session permissions" title="Permissions unavailable until the session connects">Permissions ?</span></div>
           <span id="turn-state">Disconnected</span><span id="usage"></span><span id="rate-limits" aria-label="Codex usage limits"></span><span id="workspace-path"></span>
           <span class="keyboard-hint"><kbd>Enter</kbd> send · <kbd>Shift Enter</kbd> newline</span>
         </div>
