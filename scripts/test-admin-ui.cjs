@@ -34,6 +34,8 @@ const data = {
   let dashboardReads = 0;
   const mutations = [];
   const paths = [];
+  const nextDashboardResponse = () => page.waitForResponse(response =>
+    new URL(response.url()).pathname === '/tgw/api/v1/admin/dashboard' && response.request().method() === 'GET');
   await page.route('http://admin.test/**', async route => {
     const request = route.request();
     const url = new URL(request.url());
@@ -104,9 +106,17 @@ const data = {
     // Exercise existing enrollment-token flows without placing the token in the DOM.
     const dialogs = [];
     page.on('dialog', async dialog => { dialogs.push({ message: dialog.message(), value: dialog.defaultValue() }); await dialog.accept(dialog.message() === 'Worker display name' ? 'Fresh worker' : ''); });
-    await page.getByRole('button', { name: 'Rotate token', exact: true }).click();
+    // The POST and token dialog finish before load() disables Refresh. An
+    // already-enabled button does not prove that the resulting refresh ran.
+    await Promise.all([
+      nextDashboardResponse(),
+      page.getByRole('button', { name: 'Rotate token', exact: true }).click(),
+    ]);
     await page.waitForFunction(() => !document.getElementById('refresh').disabled);
-    await page.locator('#new-worker').click();
+    await Promise.all([
+      nextDashboardResponse(),
+      page.locator('#new-worker').click(),
+    ]);
     await page.waitForFunction(() => !document.getElementById('refresh').disabled);
     assert.ok(mutations.some(entry => entry.path.endsWith('/worker-1/rotate-token') && entry.method === 'POST'));
     assert.ok(mutations.some(entry => entry.path.endsWith('/workers') && entry.body.includes('Fresh worker')));
@@ -116,8 +126,11 @@ const data = {
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
     if (process.env.ADMIN_UI_SCREENSHOTS) await page.screenshot({ path: path.join(process.env.ADMIN_UI_SCREENSHOTS, 'admin-desktop.png'), fullPage: true });
     if (page.clock) {
+      await page.waitForFunction(() => !document.getElementById('refresh').disabled);
       const before = dashboardReads;
-      await page.clock.fastForward(16000);
+      // Advancing the browser clock schedules fetch; it does not wait for the
+      // Node-side route handler or the browser's response/render continuation.
+      await Promise.all([nextDashboardResponse(), page.clock.fastForward(16000)]);
       await page.waitForFunction(() => !document.getElementById('refresh').disabled);
       assert.ok(dashboardReads > before, 'Visible authenticated dashboard refreshes automatically');
     }
