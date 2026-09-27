@@ -794,18 +794,27 @@ turns['thread-d'] = [{ id: 'short-d', status: 'completed', startedAt: now - 500,
     // footer still left most of a wide desktop unused. Check actual placement.
     await page.setViewportSize({ width: 1920, height: 1000 });
     await page.waitForFunction(() => document.querySelector('#rate-limits').textContent.includes('Weekly'));
-    await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
-    const footerItems = await page.locator('#session-status').evaluate(element => {
-      return [...element.children].filter(child => getComputedStyle(child).display !== 'none').map(child => {
-        const rect = child.getBoundingClientRect();
-        return { label: child.id || child.className, middle: rect.top + rect.height / 2, font: parseFloat(getComputedStyle(child).fontSize) };
-      });
+    // Media queries can update before the native resize event and the app's
+    // scheduled viewport sync. Wait for the actual shell width rather than
+    // assuming a fixed number of mocked animation frames is sufficient.
+    await page.waitForFunction(() => Math.abs(visualViewport.width - 1920) < 1 && Math.abs(document.querySelector('#shell').getBoundingClientRect().width - 1920) < 1);
+    const footerGeometry = await page.locator('#session-status').evaluate(element => {
+      return {
+        viewportWidth: visualViewport.width,
+        shellWidth: document.querySelector('#shell').getBoundingClientRect().width,
+        statusWidth: element.getBoundingClientRect().width,
+        items: [...element.children].filter(child => getComputedStyle(child).display !== 'none').map(child => {
+          const rect = child.getBoundingClientRect();
+          return { label: child.id || child.className, middle: rect.top + rect.height / 2, width: rect.width, height: rect.height, font: parseFloat(getComputedStyle(child).fontSize) };
+        }),
+      };
     });
+    const footerItems = footerGeometry.items;
     assert.ok(footerItems.some(item => item.label === 'model-controls'), 'Model controls share the status bar');
     assert.equal(await page.locator('#session-status #permissions').isVisible(), true, 'Desktop permissions share the full-width status bar');
     assert.equal(await page.locator('.sidebar-footer').getByText('Powered by Codex', { exact: true }).count(), 0, 'The sidebar omits the redundant Powered by Codex caption');
     assert.equal(await page.locator('.sidebar-footer').getByRole('button', { name: 'Settings', exact: true }).count(), 1, 'The sidebar exposes its compact Settings entry');
-    for (const item of footerItems) assert.ok(Math.abs(item.middle - footerItems[0].middle) < 2, `Wide desktop status item ${item.label} shares one row`);
+    for (const item of footerItems) assert.ok(Math.abs(item.middle - footerItems[0].middle) < 2, `Wide desktop status item ${item.label} shares one row: ${JSON.stringify(footerGeometry)}`);
     assert.ok(footerItems.find(item => item.label === 'usage').font >= 12, 'Desktop metrics use readable text rather than tiny metadata');
     assert.equal(await page.locator('#usage').textContent(), '9% context', 'Desktop status retains the context percentage without displaying a token count');
     assert.doesNotMatch(await page.locator('#session-status').textContent(), /tokens/i, 'The status bar omits token counts on every viewport');
