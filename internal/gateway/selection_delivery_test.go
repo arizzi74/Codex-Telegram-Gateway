@@ -15,6 +15,7 @@ type selectionBarrierStore struct {
 	row             registry.Delivery
 	checks, deferAt int
 	retryDelay      time.Duration
+	pending         error
 }
 
 func (s *selectionBarrierStore) ClaimDeliveries(context.Context, int) ([]registry.Delivery, error) {
@@ -24,9 +25,33 @@ func (s *selectionBarrierStore) ClaimDeliveries(context.Context, int) ([]registr
 func (s *selectionBarrierStore) SuppressTelegramDelivery(context.Context, string) (bool, error) {
 	s.checks++
 	if s.deferAt > 0 && s.checks >= s.deferAt {
+		if s.pending != nil {
+			return false, s.pending
+		}
 		return false, registry.ErrTelegramSelectionPending
 	}
 	return false, nil
+}
+
+func TestSenderDefersToolUntilCommentaryWithoutCancelling(t *testing.T) {
+	for _, deferAt := range []int{1, 2, 3} {
+		base, api := progressReplacementFixture()
+		row := eventRow(t, "tool_progress_message", protocol.Result{TurnID: "turn-a", Text: "Latest tool"}, testSessionID.String())
+		store := &selectionBarrierStore{progressReplacementStoreFake: base, row: row, deferAt: deferAt, pending: registry.ErrTelegramProgressOrderPending}
+		if err := NewSender(store, api, nil).flush(t.Context()); !errors.Is(err, registry.ErrTelegramProgressOrderPending) {
+			t.Fatalf("check %d: error = %v", deferAt, err)
+		}
+		if len(api.messages) != 0 || len(api.edits) != 0 || len(store.marked) != 0 || len(store.skipped) != 0 || store.retryDelay <= 0 {
+			t.Fatalf("check %d: waiting tool sent/cancelled instead of retried", deferAt)
+		}
+		store.deferAt = 0
+		if err := NewSender(store, api, nil).flush(t.Context()); err != nil {
+			t.Fatal(err)
+		}
+		if len(api.messages) != 1 || len(store.marked) != 1 || len(store.skipped) != 0 {
+			t.Fatalf("check %d: deferred tool was lost", deferAt)
+		}
+	}
 }
 
 func (s *selectionBarrierStore) RetryDelivery(_ context.Context, _ string, delay time.Duration, _ string) error {

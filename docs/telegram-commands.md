@@ -369,8 +369,12 @@ refreshing stops. API failures do not fail the underlying command.
 By default, turn progress and completion messages follow the selected session.
 Switching from A to B removes A's temporary messages and restores the latest
 commentary and tool message for B if its turn is running. The **Connected to**
-confirmation is delivered before B's commentary or tool messages, including
-progress arriving while the confirmation is being retried. A subsequent
+confirmation is delivered first, followed by B's latest commentary and then its
+tool message. When both are available, the tool waits for the commentary's
+delivery even if Telegram retries it or the gateway restarts. If no commentary
+is available, the tool can appear on its own. Subsequent updates edit the same
+two messages in place. These safeguards also cover progress arriving while the
+confirmation is being retried. A subsequent
 completion from A stays hidden. Final answers already displayed remain in the chat; use
 `/tglastmessages` to read a session's saved responses later.
 

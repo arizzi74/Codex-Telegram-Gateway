@@ -312,25 +312,27 @@ func TestTelegramProgressKeepsIndependentCommentaryAndToolSlotsIntegration(t *te
 	progressEvent(t, env, 2, "agent_progress_message", "turn-a", "")
 	progressEvent(t, env, 3, "tool_progress_message", "turn-a", "")
 	var commentary, tool Delivery
-	for _, delivery := range claimProgress(t, env.store, 2) {
+	for i := range 2 {
+		delivery := claimProgress(t, env.store, 1)[0]
 		assertProgressTarget(t, env.store, delivery, 0)
 		if delivery.Kind == "agent_progress_message" {
 			commentary = delivery
 		} else {
 			tool = delivery
 		}
+		checkpointProgress(t, env.store, delivery, int64(100+i))
+	}
+	if commentary.Kind != "agent_progress_message" || tool.Kind != "tool_progress_message" {
+		t.Fatal("initial commentary and tool slots were not established")
 	}
 	progressEvent(t, env, 4, "agent_progress_message", "turn-a", "")
+	supersededCommentary := claimProgress(t, env.store, 1)[0]
 	latest := progressEvent(t, env, 5, "agent_progress_message", "turn-a", "")
-	if suppress, err := env.store.SuppressProgressDelivery(ctx, commentary.ID); err != nil || !suppress {
+	if suppress, err := env.store.SuppressProgressDelivery(ctx, supersededCommentary.ID); err != nil || !suppress {
 		t.Fatalf("older commentary remained current: %v: %v", suppress, err)
 	}
-	if suppress, err := env.store.SuppressProgressDelivery(ctx, tool.ID); err != nil || suppress {
-		t.Fatalf("newer commentary suppressed the tool slot: %v: %v", suppress, err)
-	}
 	claimProgress(t, env.store, 0)
-	checkpointProgress(t, env.store, commentary, 100)
-	checkpointProgress(t, env.store, tool, 101)
+	checkpointProgress(t, env.store, supersededCommentary, 100)
 	nextCommentary := claimProgress(t, env.store, 1)[0]
 	var event protocol.Event
 	if err := json.Unmarshal(nextCommentary.Payload, &event); err != nil || event.ID != latest.ID {

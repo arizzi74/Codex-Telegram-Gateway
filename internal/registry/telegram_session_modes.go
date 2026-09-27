@@ -230,7 +230,7 @@ func reconcileTelegramSelection(ctx context.Context, tx *dbTx, in IncomingUpdate
 	if _, err := tx.Exec(ctx, `UPDATE telegram_deliveries AS delivery SET visibility_revoked=1 WHERE bot_id=$1 AND chat_id=$2 AND message_thread_id=$3 AND status IN ('pending','failed','sending') AND EXISTS(SELECT 1 FROM events event WHERE event.event_id=delivery.event_id AND NOT `+eventVisibleSQL()+`)`, in.BotID, in.ChatID, in.TopicID); err != nil {
 		return err
 	}
-	rows, err := tx.Query(ctx, `SELECT event.event_id,event.worker_id,event.runtime_id,event.runtime_generation,event.session_id,event.event_seq,event.kind,event.payload,event.occurred_at FROM events event JOIN sessions session ON session.session_id=event.session_id JOIN runtimes runtime ON runtime.runtime_id=event.runtime_id WHERE event.kind IN ('agent_progress_message','tool_progress_message') AND session.archived=FALSE AND session.state IN ('running','waiting_input','waiting_approval') AND event.runtime_generation=runtime.generation AND json_extract(event.payload,'$.turn_id')=session.active_turn_id AND `+sessionVisibleSQL("$1", "$2", "$3", "event.session_id")+` AND NOT EXISTS(SELECT 1 FROM events newer WHERE newer.session_id=event.session_id AND newer.runtime_generation=event.runtime_generation AND newer.kind=event.kind AND json_extract(newer.payload,'$.turn_id')=session.active_turn_id AND newer.event_seq>event.event_seq) AND NOT EXISTS(SELECT 1 FROM telegram_deliveries pending WHERE pending.event_id=event.event_id AND pending.bot_id=$1 AND pending.chat_id=$2 AND pending.message_thread_id=$3 AND pending.status IN ('pending','failed','sending') AND pending.visibility_revoked=0) AND NOT EXISTS(SELECT 1 FROM telegram_progress_messages shown JOIN telegram_deliveries delivery ON delivery.delivery_id=shown.delivery_id WHERE delivery.event_id=event.event_id AND shown.bot_id=$1 AND shown.chat_id=$2 AND shown.message_thread_id=$3 AND shown.status='pending' AND shown.retire_requested=0)`, in.BotID, in.ChatID, in.TopicID)
+	rows, err := tx.Query(ctx, `SELECT event.event_id,event.worker_id,event.runtime_id,event.runtime_generation,event.session_id,event.event_seq,event.kind,event.payload,event.occurred_at FROM events event JOIN sessions session ON session.session_id=event.session_id JOIN runtimes runtime ON runtime.runtime_id=event.runtime_id WHERE event.kind IN ('agent_progress_message','tool_progress_message') AND session.archived=FALSE AND session.state IN ('running','waiting_input','waiting_approval') AND event.runtime_generation=runtime.generation AND json_extract(event.payload,'$.turn_id')=session.active_turn_id AND `+sessionVisibleSQL("$1", "$2", "$3", "event.session_id")+` AND NOT EXISTS(SELECT 1 FROM events newer WHERE newer.session_id=event.session_id AND newer.runtime_generation=event.runtime_generation AND newer.kind=event.kind AND json_extract(newer.payload,'$.turn_id')=session.active_turn_id AND newer.event_seq>event.event_seq) AND NOT EXISTS(SELECT 1 FROM telegram_deliveries pending WHERE pending.event_id=event.event_id AND pending.bot_id=$1 AND pending.chat_id=$2 AND pending.message_thread_id=$3 AND pending.status IN ('pending','failed','sending') AND pending.visibility_revoked=0) AND NOT EXISTS(SELECT 1 FROM telegram_progress_messages shown JOIN telegram_deliveries delivery ON delivery.delivery_id=shown.delivery_id WHERE delivery.event_id=event.event_id AND shown.bot_id=$1 AND shown.chat_id=$2 AND shown.message_thread_id=$3 AND shown.status='pending' AND shown.retire_requested=0) ORDER BY event.session_id,CASE event.kind WHEN 'agent_progress_message' THEN 0 ELSE 1 END`, in.BotID, in.ChatID, in.TopicID)
 	if err != nil {
 		return err
 	}
@@ -270,12 +270,13 @@ func (s *Store) SuppressTelegramDelivery(ctx context.Context, id string) (bool, 
 	if suppress, err := s.SuppressProgressDelivery(ctx, id); err != nil || suppress {
 		return suppress, err
 	}
-	var suppress, awaitingSelection, awaitingReposition, awaitingPickerCleanup bool
+	var suppress, awaitingSelection, awaitingReposition, awaitingPickerCleanup, awaitingProgressOrder bool
 	err := s.pool.QueryRow(ctx, `SELECT delivery.status IN ('cancelled','sent') OR delivery.visibility_revoked=1 OR NOT `+eventVisibleSQL()+`,
         delivery.kind IN ('agent_progress_message','tool_progress_message') AND `+pendingSelectionConfirmationSQL+`,
         delivery.kind IN ('agent_progress_message','tool_progress_message') AND `+pendingProgressRepositionSQL+`,
-        `+pendingPickerCleanupSQL+`
-        FROM telegram_deliveries delivery LEFT JOIN events event ON event.event_id=delivery.event_id WHERE delivery.delivery_id=$1`, id).Scan(&suppress, &awaitingSelection, &awaitingReposition, &awaitingPickerCleanup)
+        `+pendingPickerCleanupSQL+`,
+        `+pendingProgressOrderSQL+`
+        FROM telegram_deliveries delivery LEFT JOIN events event ON event.event_id=delivery.event_id WHERE delivery.delivery_id=$1`, id).Scan(&suppress, &awaitingSelection, &awaitingReposition, &awaitingPickerCleanup, &awaitingProgressOrder)
 	if err != nil || suppress {
 		return suppress, err
 	}
@@ -287,6 +288,9 @@ func (s *Store) SuppressTelegramDelivery(ctx context.Context, id string) (bool, 
 	}
 	if awaitingPickerCleanup {
 		return false, ErrTelegramPickerCleanupPending
+	}
+	if awaitingProgressOrder {
+		return false, ErrTelegramProgressOrderPending
 	}
 	return false, nil
 }

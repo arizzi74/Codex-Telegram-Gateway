@@ -59,8 +59,12 @@ func TestTelegramSessionSwitchRestoresProgressAndSuppressesOldFinalIntegration(t
 	progressEvent(t, other, 3, "turn_started", "turn-b", "")
 	progressEvent(t, env, 4, "agent_progress_message", "turn-a", "")
 	progressEvent(t, env, 5, "tool_progress_message", "turn-a", "")
-	for i, d := range sessionModeDeliveries(t, env.store) {
-		checkpointProgress(t, env.store, d, int64(100+i))
+	for i := range 2 {
+		rows := sessionModeDeliveries(t, env.store)
+		if len(rows) != 1 {
+			t.Fatalf("initial progress slot %d: %+v", i, rows)
+		}
+		checkpointProgress(t, env.store, rows[0], int64(100+i))
 	}
 	progressEvent(t, other, 6, "agent_progress_message", "turn-b", "")
 	progressEvent(t, other, 7, "tool_progress_message", "turn-b", "")
@@ -68,11 +72,12 @@ func TestTelegramSessionSwitchRestoresProgressAndSuppressesOldFinalIntegration(t
 		t.Fatalf("hidden progress delivered: %+v", got)
 	}
 	acceptModeUpdate(t, env, 2, "select", other.session.String(), "")
-	restored := sessionModeDeliveries(t, env.store)
-	if len(restored) != 2 {
-		t.Fatalf("restored %d messages, want2", len(restored))
-	}
-	for _, d := range restored {
+	for i, kind := range []string{"agent_progress_message", "tool_progress_message"} {
+		restored := sessionModeDeliveries(t, env.store)
+		if len(restored) != 1 || restored[0].Kind != kind {
+			t.Fatalf("restored slot %d: %+v", i, restored)
+		}
+		d := restored[0]
 		var event protocol.Event
 		if err := json.Unmarshal(d.Payload, &event); err != nil {
 			t.Fatal(err)
@@ -83,6 +88,7 @@ func TestTelegramSessionSwitchRestoresProgressAndSuppressesOldFinalIntegration(t
 		if suppress, err := env.store.SuppressTelegramDelivery(ctx, d.ID); err != nil || suppress {
 			t.Fatalf("restoration suppressed %v %v", suppress, err)
 		}
+		checkpointProgress(t, env.store, d, int64(200+i))
 	}
 	due, err := env.store.ClaimTelegramDeletions(ctx, 100)
 	if err != nil || len(due) != 2 {

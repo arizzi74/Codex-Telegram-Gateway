@@ -151,7 +151,13 @@ func TestSessionPickerLateMultipartCheckpointAndProgressOrdering(t *testing.T) {
 	if err := env.store.MarkDeliverySent(ctx, confirmation.ID, 102, "", "", ""); err != nil {
 		t.Fatal(err)
 	}
-	claimProgress(t, env.store, 2)
+	for i, kind := range []string{"agent_progress_message", "tool_progress_message"} {
+		row := claimProgress(t, env.store, 1)[0]
+		if row.Kind != kind {
+			t.Fatalf("progress %d = %s, want %s", i, row.Kind, kind)
+		}
+		checkpointProgress(t, env.store, row, int64(103+i))
+	}
 	if result := acceptPicker(t, env, 1, token, 100); !result.Duplicate {
 		t.Fatalf("duplicate accepted: %+v", result)
 	}

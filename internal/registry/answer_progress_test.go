@@ -20,7 +20,8 @@ func answerProgressEnv(t *testing.T) eventTestEnv {
 	progressEvent(t, env, 2, "turn_started", "turn-a", "")
 	progressEvent(t, env, 3, "agent_progress_message", "turn-a", "")
 	progressEvent(t, env, 4, "tool_progress_message", "turn-a", "")
-	for i, row := range claimProgress(t, env.store, 2) {
+	for i := range 2 {
+		row := claimProgress(t, env.store, 1)[0]
 		checkpointProgress(t, env.store, row, 100+int64(i))
 	}
 	return env
@@ -141,7 +142,8 @@ func TestAnswerProgressMovesAfterTypedAndButtonAnswers(t *testing.T) {
 			if err := reopened.MarkDeliveryChunkSent(ctx, ack.ID, 1, 911, "", "", ""); err != nil {
 				t.Fatal(err)
 			}
-			for i, row := range claimProgress(t, reopened, 2) {
+			for i := range 2 {
+				row := claimProgress(t, reopened, 1)[0]
 				assertProgressTarget(t, reopened, row, 0)
 				checkpointProgress(t, reopened, row, 200+int64(i))
 			}
@@ -157,12 +159,14 @@ func TestAnswerProgressMovesAfterTypedAndButtonAnswers(t *testing.T) {
 			// Even a sent acknowledgement cannot replay before deletion completes.
 			claimProgress(t, env.store, 0)
 			deleteAnswerProgress(t, env.store, 2)
-			for _, row := range claimProgress(t, env.store, 2) {
+			for i := range 2 {
+				row := claimProgress(t, env.store, 1)[0]
 				assertProgressTarget(t, env.store, row, 0)
 				var event protocol.Event
 				if err := json.Unmarshal(row.Payload, &event); err != nil || (event.Seq != 3 && event.Seq != 4) {
 					t.Fatalf("answer replayed old progress: %+v %v", event, err)
 				}
+				checkpointProgress(t, env.store, row, int64(300+i))
 			}
 			var routes int
 			if err := env.store.pool.QueryRow(ctx, `SELECT count(*) FROM bot_message_routes WHERE message_id IN (900,901)`).Scan(&routes); err != nil || routes != 2 {
@@ -200,8 +204,10 @@ func TestAnswerProgressWaitsForLateRevokedSendCheckpoint(t *testing.T) {
 	if rows := deleteAnswerProgress(t, env.store, 1); rows[0].MessageID != 303 {
 		t.Fatalf("late message was not retired: %+v", rows)
 	}
-	for _, row := range claimProgress(t, env.store, 2) {
+	for i := range 2 {
+		row := claimProgress(t, env.store, 1)[0]
 		assertProgressTarget(t, env.store, row, 0)
+		checkpointProgress(t, env.store, row, int64(400+i))
 	}
 }
 
@@ -239,7 +245,8 @@ func TestAnswerProgressDeletionFailuresDoNotFreezeChat(t *testing.T) {
 			}
 		}
 	}
-	for i, row := range claimProgress(t, env.store, 2) {
+	for i := range 2 {
+		row := claimProgress(t, env.store, 1)[0]
 		assertProgressTarget(t, env.store, row, 0)
 		checkpointProgress(t, env.store, row, 200+int64(i))
 	}
@@ -313,7 +320,8 @@ func TestAnswerProgressIgnoresOpenInvalidAndRepeatedQuestionButtons(t *testing.T
 		t.Fatal(err)
 	}
 	deleteAnswerProgress(t, env.store, 2)
-	for i, row := range claimProgress(t, env.store, 2) {
+	for i := range 2 {
+		row := claimProgress(t, env.store, 1)[0]
 		checkpointProgress(t, env.store, row, 200+int64(i))
 	}
 	answer.UpdateID = 5
@@ -352,10 +360,12 @@ func TestAnswerProgressPreservesOtherDestinations(t *testing.T) {
 			t.Fatalf("answer retired another destination: %+v", row)
 		}
 	}
-	for _, row := range claimProgress(t, env.store, 2) {
+	for i := range 2 {
+		row := claimProgress(t, env.store, 1)[0]
 		if row.BotID != "bot" || row.ChatID != 20 || row.TopicID != 0 {
 			t.Fatalf("answer replayed another destination: %+v", row)
 		}
+		checkpointProgress(t, env.store, row, int64(400+i))
 	}
 	var unaffected int
 	if err := env.store.pool.QueryRow(ctx, `SELECT count(*) FROM telegram_progress_messages WHERE (bot_id<>'bot' OR chat_id<>20 OR message_thread_id<>0) AND status='pending' AND retire_requested=0`).Scan(&unaffected); err != nil || unaffected != 3 {
@@ -388,7 +398,8 @@ func TestAnswerProgressKeepsSelectionAndVisibleMultiSessionTurns(t *testing.T) {
 			count := 2
 			if multi {
 				count = 4
-				for i, row := range claimProgress(t, env.store, 2) {
+				for i := range 2 {
+					row := claimProgress(t, env.store, 1)[0]
 					checkpointProgress(t, env.store, row, 200+int64(i))
 				}
 			} else {
@@ -409,13 +420,16 @@ func TestAnswerProgressKeepsSelectionAndVisibleMultiSessionTurns(t *testing.T) {
 			}
 			deleteAnswerProgress(t, env.store, count)
 			seen := make(map[string]int)
-			for _, row := range claimProgress(t, env.store, count) {
-				var event protocol.Event
-				if err := json.Unmarshal(row.Payload, &event); err != nil {
-					t.Fatal(err)
+			for i := range 2 {
+				for j, row := range claimProgress(t, env.store, count/2) {
+					var event protocol.Event
+					if err := json.Unmarshal(row.Payload, &event); err != nil {
+						t.Fatal(err)
+					}
+					seen[event.SessionID]++
+					assertProgressTarget(t, env.store, row, 0)
+					checkpointProgress(t, env.store, row, int64(400+i*count+j))
 				}
-				seen[event.SessionID]++
-				assertProgressTarget(t, env.store, row, 0)
 			}
 			if seen[env.session.String()] != 2 || (multi && seen[other.session.String()] != 2) || (!multi && len(seen) != 1) {
 				t.Fatalf("wrong visible turns replayed: %+v", seen)

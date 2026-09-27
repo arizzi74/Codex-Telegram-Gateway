@@ -58,7 +58,11 @@ func TestSelectedConfirmationPrecedesReplayedAndLiveProgress(t *testing.T) {
 	if err := reopened.MarkDeliveryChunkSent(ctx, retry.ID, 1, 81, "", "", ""); err != nil {
 		t.Fatal(err)
 	}
-	for _, row := range claimProgress(t, reopened, 2) {
+	for i, kind := range []string{"agent_progress_message", "tool_progress_message"} {
+		row := claimProgress(t, reopened, 1)[0]
+		if row.Kind != kind {
+			t.Fatalf("progress %d = %s, want %s", i, row.Kind, kind)
+		}
 		var event protocol.Event
 		if err := json.Unmarshal(row.Payload, &event); err != nil {
 			t.Fatal(err)
@@ -69,6 +73,7 @@ func TestSelectedConfirmationPrecedesReplayedAndLiveProgress(t *testing.T) {
 		if skip, err := reopened.SuppressTelegramDelivery(ctx, row.ID); skip || err != nil {
 			t.Fatalf("confirmed progress still blocked: %v %v", skip, err)
 		}
+		checkpointProgress(t, reopened, row, int64(100+i))
 	}
 }
 

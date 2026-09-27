@@ -45,7 +45,7 @@ const claimDeliveriesSQL = `WITH claimed AS (
  WHERE delivery.status IN ('pending','failed','sending') AND delivery.visibility_revoked=0 AND delivery.next_attempt_at <= ` + sqliteNow + `
    AND NOT (` + pendingPickerCleanupSQL + `)
    AND NOT EXISTS(SELECT 1 FROM telegram_input_reply_helpers helper WHERE helper.delivery_id=delivery.delivery_id AND (helper.retired=1 OR helper.backfill_pending=1))
-   AND (delivery.kind NOT IN ('agent_progress_message','tool_progress_message') OR (NOT ` + pendingSelectionConfirmationSQL + ` AND NOT ` + pendingProgressRepositionSQL + ` AND NOT ` + newerProgressDeliverySQL + ` AND NOT EXISTS (
+   AND (delivery.kind NOT IN ('agent_progress_message','tool_progress_message') OR (NOT ` + pendingSelectionConfirmationSQL + ` AND NOT ` + pendingProgressRepositionSQL + ` AND NOT ` + pendingProgressOrderSQL + ` AND NOT ` + newerProgressDeliverySQL + ` AND NOT EXISTS (
      SELECT 1 FROM events progress
      JOIN events active_event ON active_event.runtime_id=progress.runtime_id
        AND active_event.runtime_generation=progress.runtime_generation AND active_event.session_id=progress.session_id
@@ -68,6 +68,7 @@ RETURNING delivery_id,bot_id,chat_id,message_thread_id,kind,payload,attempt_coun
 // Only the latest event of each progress kind at each destination is eligible.
 // An existing send of that kind must finish or expire before its replacement.
 // Newly selected progress also waits for the connection confirmation to send.
+// The first tool slot then waits for any pending commentary slot to be sent.
 func (s *Store) ClaimDeliveries(ctx context.Context, limit int) ([]Delivery, error) {
 	if limit < 1 || limit > 100 {
 		return nil, errors.New("registry: invalid delivery claim limit")
