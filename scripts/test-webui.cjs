@@ -1424,6 +1424,43 @@ turns['thread-d'] = [{ id: 'short-d', status: 'completed', startedAt: now - 500,
     await page.waitForFunction(() => document.querySelector('#image-preview').hidden);
     assert.deepEqual(await page.evaluate(() => window.testSent.filter(frame => ['turn/start', 'turn/steer'].includes(frame.method)).at(-1).params.input), [{ type: 'image', url: imageOnly.dataURL }], 'An image-only prompt is supported without fabricated text');
     await page.locator('#stop').click(); await page.waitForFunction(() => document.querySelector('#stop').hidden);
+    // /tgsteer image captions must use the active turn and keep the draft on
+    // idle/rejected delivery; other slash commands cannot consume an image.
+    const imageSteer = await pasteImage('steer-caption.png');
+    await page.locator('#prompt').fill('/tgsteer Describe the new screenshot.');
+    const beforeImageSteer = await page.evaluate(() => window.testSent.filter(frame => ['turn/start', 'turn/steer', 'gateway/command'].includes(frame.method)).length);
+    await page.locator('#send').click();
+    assert.equal(await page.evaluate(() => window.testSent.filter(frame => ['turn/start', 'turn/steer', 'gateway/command'].includes(frame.method)).length), beforeImageSteer, '/tgsteer with an image cannot start an idle turn');
+    assert.equal(await page.locator('#image-preview').isVisible(), true, 'Idle image steering preserves the attached image');
+    assert.equal(await page.locator('#prompt').inputValue(), '/tgsteer Describe the new screenshot.');
+    await current({ method: 'turn/started', params: { threadId: 'thread-a', turn: { id: 'image-steer-a', status: 'inProgress' } } });
+    await page.locator('#send').click();
+    await page.waitForFunction(() => document.querySelector('#image-preview').hidden && document.querySelector('#prompt').value === '');
+    const imageSteerFrame = await page.evaluate(() => window.testSent.filter(frame => ['turn/start', 'turn/steer'].includes(frame.method)).at(-1));
+    assert.equal(imageSteerFrame.method, 'turn/steer');
+    assert.equal(imageSteerFrame.params.expectedTurnId, 'image-steer-a');
+    assert.deepEqual(imageSteerFrame.params.input, [{ type: 'text', text: 'Describe the new screenshot.' }, { type: 'image', url: imageSteer.dataURL }], 'Image steering strips only the /tgsteer command prefix');
+    const onlySteerImage = await pasteImage('steer-image-only.png');
+    await page.locator('#prompt').fill('/tgsteer'); await page.locator('#send').click();
+    await page.waitForFunction(() => document.querySelector('#image-preview').hidden && document.querySelector('#prompt').value === '');
+    const onlySteerFrame = await page.evaluate(() => window.testSent.filter(frame => ['turn/start', 'turn/steer'].includes(frame.method)).at(-1));
+    assert.equal(onlySteerFrame.method, 'turn/steer');
+    assert.deepEqual(onlySteerFrame.params.input, [{ type: 'image', url: onlySteerImage.dataURL }], 'Image-only /tgsteer adds no fabricated text');
+    await pasteImage('rejected-steer.png');
+    await page.locator('#prompt').fill('/model');
+    const beforeRejectedImageCommand = await page.evaluate(() => window.testSent.filter(frame => ['turn/start', 'turn/steer', 'gateway/command'].includes(frame.method)).length);
+    await page.locator('#send').click();
+    assert.equal(await page.evaluate(() => window.testSent.filter(frame => ['turn/start', 'turn/steer', 'gateway/command'].includes(frame.method)).length), beforeRejectedImageCommand, 'Non-steering slash commands still cannot send or consume an image');
+    assert.equal(await page.locator('#image-preview').isVisible(), true);
+    assert.equal(await page.locator('#prompt').inputValue(), '/model');
+    await page.evaluate(() => { window.testRejectSteer = true; });
+    await page.locator('#prompt').fill('/tgsteer Keep this screenshot after rejection.');
+    await page.locator('#send').click();
+    await page.waitForFunction(() => document.querySelector('#notice').textContent.includes('Steering rejected by runtime'));
+    assert.equal(await page.locator('#image-preview').isVisible(), true, 'Rejected image steering keeps the attached image available for retry');
+    assert.equal(await page.locator('#prompt').inputValue(), '/tgsteer Keep this screenshot after rejection.');
+    await page.locator('#remove-image').click(); await page.locator('#prompt').fill('');
+    await page.locator('#stop').click(); await page.waitForFunction(() => document.querySelector('#stop').hidden);
     await pasteImage('session-a-draft.png');
     await page.locator('#prompt').fill('Image draft belonging to A');
     await choose('b');
@@ -1639,6 +1676,34 @@ turns['thread-d'] = [{ id: 'short-d', status: 'completed', startedAt: now - 500,
       assert.equal(await page.locator('#font-increase').isVisible(), false);
       assert.equal(await conversationFont(), 13, 'Desktop font preferences do not enlarge the mobile conversation');
       assert.equal(await promptFont(), 13, 'Mobile prompt keeps the conversation font size');
+      // A running turn adds Stop beside Steer without growing an empty composer.
+      await page.locator('#prompt').fill('');
+      const composerGeometry = () => page.evaluate(() => {
+        const box = selector => { const rect = document.querySelector(selector).getBoundingClientRect(); return { top: rect.top, bottom: rect.bottom, left: rect.left, right: rect.right, height: rect.height, width: rect.width }; };
+        return { composer: box('#composer'), input: box('.input-row'), prompt: box('#prompt'), stop: box('#stop'), send: box('#send') };
+      });
+      assert.equal(await page.locator('#stop').isHidden(), true);
+      const idleComposer = await composerGeometry();
+      await current({ method: 'turn/started', params: { threadId: 'thread-a', turn: { id: 'mobile-controls-' + width, status: 'inProgress' } } });
+      await page.locator('#stop').waitFor();
+      assert.equal(await page.locator('#send').textContent(), 'Steer ↑');
+      const runningComposer = await composerGeometry();
+      assert.ok(Math.abs(runningComposer.stop.top - runningComposer.send.top) < 1, width + 'px Stop and Steer share one row');
+      assert.ok(runningComposer.stop.right < runningComposer.send.left, width + 'px Stop is immediately left of Steer');
+      assert.ok(Math.abs(runningComposer.input.height - idleComposer.input.height) < 1, width + 'px an empty running input stays the same height as idle');
+      assert.ok(Math.abs(runningComposer.composer.height - idleComposer.composer.height) < 1, width + 'px starting a turn does not grow the empty composer');
+      assert.ok(runningComposer.prompt.width >= 80, width + 'px the prompt retains usable typing space beside both buttons');
+      for (const button of [runningComposer.stop, runningComposer.send]) {
+        assert.ok(button.height >= 36 && button.width >= 36, width + 'px both actions retain their mobile tap target size');
+        assert.ok(button.top >= runningComposer.input.top && button.bottom <= runningComposer.input.bottom && button.right <= runningComposer.input.right, width + 'px action buttons fit inside the input row');
+      }
+      await page.locator('#prompt').fill('Line one\nLine two\nLine three');
+      assert.ok((await composerGeometry()).input.height > runningComposer.input.height, width + 'px a multiline prompt still grows while a turn runs');
+      await page.locator('#prompt').fill('');
+      assert.ok(Math.abs((await composerGeometry()).input.height - idleComposer.input.height) < 1, width + 'px clearing a running prompt restores the compact input');
+      if (process.env.WEBUI_SCREENSHOTS) await page.screenshot({ path: path.join(process.env.WEBUI_SCREENSHOTS, 'webui-mobile-steer-controls-' + width + '.png') });
+      await current({ method: 'turn/completed', params: { threadId: 'thread-a', turn: { id: 'mobile-controls-' + width, status: 'completed' } } });
+      assert.equal(await page.locator('#stop').isHidden(), true);
       await page.waitForFunction(() => document.querySelector('#rate-limits .rate-limit'));
       const mobileStatus = await page.locator('#session-status').evaluate(element => {
         const transcript = document.querySelector('#transcript'), originalTop = transcript.scrollTop;
@@ -2172,7 +2237,7 @@ turns['thread-d'] = [{ id: 'short-d', status: 'completed', startedAt: now - 500,
     assert.equal(await page.evaluate(() => Object.keys(sessionStorage).length), 0);
     assert.ok(paths.every(value => value.startsWith('/tgw/')), 'All gateway routes use /tgw');
     assert.deepEqual(errors, []);
-    console.log('Web UI browser checks passed: slash autocomplete and CLI choices with keyboard/touch/current markers, successful setting auto-close without mobile autofocus, errors/read-only results remain visible, typed worker and gateway commands without a session, permission confirmation/stale-button isolation, unavailable commands never become prompts, native and global v2 model/effort changes with inventory/resume/command-ack isolation, read-only model status, clipboard images/text+image/image-only/per-session drafts/navigation races/no replay, tool colors in both themes, safe formatting/nonempty reasoning/native sub-agent activity, chronology/pagination, independent global activity events/sequence gaps/resync/heartbeat and handshake recovery/inventory races, static Working label plus matching green activity pulse/reduced motion, worker heading background/compact Settings footer/dialog/desktop/mobile/keyboard/focus, desktop font controls/persistence/mobile isolation, full-width responsive status, live quotas/reset tooltips/no polling/session isolation/unavailable fallback, responsive layout and bottom following through late layout changes, keyboard resize/pan/page scroll/delayed focus/dismissal/mobile menu without autofocus, native inner scrolling, blocking/async questions, rejected-answer recovery, approvals, live external prompts, session isolation, disconnect/reconnect, prompt and command drafts/no replay, scoped connection/history/retry error recovery without hiding uncertain-send or runtime warnings, ACK-only ephemeral queued-steer feedback/timer/switch/end/rejection/isolation, mobile status grid alignment/empty rows, failed resume, sidebar deletion confirmation/desktop/mobile/cancel/CSRF/scope/delayed result/failure/lost acknowledgement/unknown outcome/no POST replay, idle heartbeat, auth expiry.');
+    console.log('Web UI browser checks passed: slash autocomplete and CLI choices with keyboard/touch/current markers, successful setting auto-close without mobile autofocus, errors/read-only results remain visible, typed worker and gateway commands without a session, permission confirmation/stale-button isolation, unavailable commands never become prompts, native and global v2 model/effort changes with inventory/resume/command-ack isolation, read-only model status, clipboard images/text+image/image-only/image steering/idle and rejection preservation/per-session drafts/navigation races/no replay, tool colors in both themes, safe formatting/nonempty reasoning/native sub-agent activity, chronology/pagination, independent global activity events/sequence gaps/resync/heartbeat and handshake recovery/inventory races, static Working label plus matching green activity pulse/reduced motion, worker heading background/compact Settings footer/dialog/desktop/mobile/keyboard/focus, desktop font controls/persistence/mobile isolation, full-width responsive status, live quotas/reset tooltips/no polling/session isolation/unavailable fallback, responsive layout and bottom following through late layout changes, keyboard resize/pan/page scroll/delayed focus/dismissal/mobile menu without autofocus, native inner scrolling, blocking/async questions, rejected-answer recovery, approvals, live external prompts, session isolation, disconnect/reconnect, prompt and command drafts/no replay, scoped connection/history/retry error recovery without hiding uncertain-send or runtime warnings, ACK-only ephemeral queued-steer feedback/timer/switch/end/rejection/isolation, mobile status grid alignment/empty rows/compact horizontal Stop and Steer/multiline input, failed resume, sidebar deletion confirmation/desktop/mobile/cancel/CSRF/scope/delayed result/failure/lost acknowledgement/unknown outcome/no POST replay, idle heartbeat, auth expiry.');
   } catch (error) {
     if (process.env.WEBUI_SCREENSHOTS) {
       fs.mkdirSync(process.env.WEBUI_SCREENSHOTS, { recursive: true });

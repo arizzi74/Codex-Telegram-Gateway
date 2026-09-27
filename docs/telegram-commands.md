@@ -19,7 +19,7 @@ menu names, so `/debug_config` is the menu spelling of `/debug-config`; both wor
 | `/tgmultisession [on\|off]` | Toggle messages from all sessions, or explicitly enable/disable them. |
 | `/tgdisconnect` | Clear the selection. |
 | `/tgdeletesession [runtime]` | Choose a Codex session to delete while keeping its working directory and files. |
-| `/tgsteer TEXT` | Guide the exact active turn. |
+| `/tgsteer TEXT` | Guide the exact active turn; also works as an image caption, with optional text. |
 | `/tginterrupt` | Interrupt the exact active turn. |
 | `/tgquestions`, `/tginput` | List pending questions and approvals across all sessions; open one to answer without changing the selected session. |
 | `/tginput APPROVAL_ID QUESTION_ID ANSWER` | Answer an input request; replying to its message is easier. |
@@ -182,14 +182,21 @@ The gateway never silently redirects a failed command to a different chat.
 
 After selecting a session, send a photo or upload an image as a file. JPEG,
 PNG, WebP and GIF files up to 10 MiB are supported. A caption accompanies the
-image as prompt text; an image without a caption also starts a turn. Captions
-beginning with `/` remain prompt text. Send slash commands separately.
+image as prompt text; an image without a caption also starts a turn. To send an
+image to the currently running turn, use `/tgsteer` as its caption, optionally
+followed by your instructions: `/tgsteer use this screenshot instead`. Both the
+image and instructions are sent to that turn. Steering requires an active turn;
+it does not start a new one if the original turn ends during the download.
+Other captions beginning with `/` remain prompt text; send those commands
+separately.
 
 For a photo with multiple resolutions, the gateway selects the largest version
 that fits its size limit. Each image message is a separate submission; albums
 are not combined into one turn. Video, audio, voice messages, stickers,
 animations and non-image documents produce an unsupported-attachment reply.
-Reply to input requests with text, and send images separately.
+Reply to input requests with text, and send images separately. If Telegram still
+shows a reply to a question in its composer, close that preview with **×** before
+sending an image, including one with a `/tgsteer` caption.
 
 The gateway downloads images using Telegram's
 [getFile API](https://core.telegram.org/bots/api#getfile), checks their content
@@ -263,19 +270,18 @@ with several questions, it resumes at the first unanswered question and keeps
 answers already submitted. **Refresh**, **Previous**, and **Next** update the list.
 Opening or answering a request does not change the current session selection.
 
-For a text answer, tap **Reply with text**. In a private chat, the bot sends an
-**Answer for <session>** prompt and requests Telegram's reply composer. Type in
-the normal message box at the bottom, then press **Send**. If Telegram does not
-select the reply automatically, long-press that prompt and choose **Reply**
-first; use the same steps in a group. You can also reply directly to the original
-question. Keep the reply attached to the bot's question so the answer reaches
-that question's session, even when another session is selected. Ordinary messages
-without a reply continue to use the currently selected session.
+For a text answer, long-press the question and choose **Reply**, type in the
+normal message box at the bottom, then press **Send**. **Reply with text** sends
+a fresh **Answer for <session>** helper with the same instructions; long-press
+that helper and choose **Reply** before typing. These steps work in private
+chats and groups. Keep the reply attached to the bot's question so the answer
+reaches that question's session, even when another session is selected.
+Ordinary messages without a reply continue to use the currently selected session.
 
-Only tapping **Reply with text** opens the composer; incoming questions and
-opening `/tgquestions` do not interrupt a message you are already typing. Use
-the original question's buttons or `/tgquestions` to choose an option or dismiss
-the request after opening text reply mode.
+The bot does not force Telegram's reply composer open, including when retrying
+older prepared helpers. Select **Reply** yourself when ready to answer. Use the
+original question's buttons or `/tgquestions` to choose an option or dismiss
+the request.
 
 Answered requests and requests for archived sessions or superseded runtimes are
 excluded. Ordinary blocking questions expire when their turn ends. Asynchronous

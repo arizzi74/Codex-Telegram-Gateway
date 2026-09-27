@@ -294,7 +294,8 @@
     const prompt = $('prompt');
     if (!$('composer').hidden) {
       prompt.style.height = 'auto';
-      prompt.style.height = Math.min(prompt.scrollHeight, 140) + 'px';
+      // A wrapping placeholder must not make an empty one-line input taller.
+      if (prompt.value) prompt.style.height = Math.min(prompt.scrollHeight, 140) + 'px';
       if (keepBottom) jump();
     }
   }
@@ -1385,10 +1386,14 @@
   function renderEfforts() { const settings = sessionSettings.get(state.selected?.session_id); $('effort').textContent = currentEffort() || (settings && settings.source !== 'unconfirmed' ? 'Default' : 'Session effort'); settleBottom(); }
   async function send(event) {
     event.preventDefault();
-    const text = $('prompt').value.trim();
+    let text = $('prompt').value.trim();
     const image = imageDrafts.get(state.selected?.session_id);
-    if (image && text.startsWith('/')) { notice('Send the image with a message, or remove it before using a / command.'); return; }
-    if (text && commandUI?.handle(text)) return;
+    const imageSteer = image && /^\/tgsteer(?:\s|$)/i.test(text);
+    if (imageSteer) {
+      if (!state.turn) { notice('There is no running turn to steer. Your image and message are kept.'); return; }
+      text = text.replace(/^\/tgsteer(?:\s+|$)/i, '').trim();
+    } else if (image && text.startsWith('/')) { notice('Send the image with a message, or use /tgsteer during a running turn. Remove the image before using other / commands.'); return; }
+    if (!imageSteer && text && commandUI?.handle(text)) return;
     if ((!text && !image) || image?.loading || !state.connected || state.loading || state.submitting) return;
     if (new TextEncoder().encode(text).length > 256 * 1024) { notice('This prompt is too long. Shorten it before sending.'); return; }
     const generation = state.generation;
@@ -1409,7 +1414,7 @@
       if (steerTurn) result = await rpc('turn/steer', { ...params, expectedTurnId: steerTurn });
       else result = await rpc('turn/start', params);
       if (generation !== state.generation) return;
-      if ($('prompt').value === original) { $('prompt').value = ''; state.drafts.delete(sessionId); uncertainDrafts.delete(sessionId); syncRecoveryDrafts(); resizePrompt(); }
+      if ($('prompt').value === original) { $('prompt').value = ''; state.drafts.delete(sessionId); uncertainDrafts.delete(sessionId); syncRecoveryDrafts(); resizePrompt(); if (imageSteer) commandUI?.close(); }
       if (image) removeImage(sessionId, image);
       if (result?.turn?.id) { state.turn = result.turn.id; ingestTurn(result.turn); }
       if (steerTurn) queuedSteer(steerTurn);

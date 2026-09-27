@@ -116,8 +116,8 @@ func TestTerminalQuestionAnswerEditsOriginalInBackgroundSession(t *testing.T) {
 	}
 	flush()
 	helperID := int64(len(api.messages))
-	if helperID != 3 || api.live[helperID].Keyboard == nil || !api.live[helperID].Keyboard.ForceReply {
-		t.Fatalf("native reply helper not delivered: %+v", api.live)
+	if helperID != 3 || api.live[helperID].Keyboard != nil || !strings.Contains(api.live[helperID].Text, "choose Reply") {
+		t.Fatalf("manual reply helper missing or forced the native composer: %+v", api.live)
 	}
 	answer := "Yes, while captured.\nControl+Option releases it."
 	approval.Answers = map[string][]string{"q1": {answer}}

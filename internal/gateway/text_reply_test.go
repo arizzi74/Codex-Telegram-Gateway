@@ -3,6 +3,7 @@ package gateway
 import (
 	"context"
 	"encoding/json"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -22,7 +23,7 @@ func textReplyFixture(t *testing.T) (*renderStoreFake, registry.Delivery) {
 	return store, row
 }
 
-func TestTextReplyExplicitlyOpensPrivateComposerAndKeepsQuestionRoute(t *testing.T) {
+func TestTextReplyExplainsManualReplyAndKeepsQuestionRoute(t *testing.T) {
 	store, row := textReplyFixture(t)
 	sender := testSender(store, nil)
 	messages, err := sender.renderDeliveryMessages(context.Background(), row)
@@ -30,17 +31,17 @@ func TestTextReplyExplicitlyOpensPrivateComposerAndKeepsQuestionRoute(t *testing
 		t.Fatalf("render text reply: %d %v", len(messages), err)
 	}
 	message, err := sender.deliveryMessageForSend(context.Background(), row, messages[0])
-	if err != nil || message.Keyboard == nil || !message.Keyboard.ForceReply || len(message.Keyboard.Rows) != 0 || len(store.callbacks) != 0 {
-		t.Fatalf("button repeated instead of opening composer: %+v %v", message, err)
+	if err != nil || message.Keyboard != nil || len(store.callbacks) != 0 {
+		t.Fatalf("text reply helper changed the native composer or repeated buttons: %+v %v", message, err)
 	}
-	for _, want := range []string{"Answer for auth-fix", "Which equipment is available?", "message box below", "press Send", "choose Reply", "/tgquestions"} {
+	for _, want := range []string{"Answer for auth-fix", "Which equipment is available?", "Long-press this message", "press Send", "choose Reply", "/tgquestions"} {
 		if !strings.Contains(message.Text, want) {
 			t.Fatalf("missing %q in %q", want, message.Text)
 		}
 	}
 	session, _, approval := deliveryRoute(row)
 	if session != testSessionID.String() || approval != testApproval.String() || deliveryQuestion(row) != "equipment" {
-		t.Fatal("text composer lost its question route")
+		t.Fatal("text reply helper lost its question route")
 	}
 
 	// Opening a request without choosing text must keep its answer buttons.
@@ -98,7 +99,7 @@ func TestQueuedQuestionAnsweredInTerminalDoesNotRetryOrRestoreControls(t *testin
 	}
 }
 
-func TestLongTextReplyForcesOnlyLastChunkAndSurvivesSessionFormatting(t *testing.T) {
+func TestLongTextReplyNeverForcesComposerAndSurvivesSessionFormatting(t *testing.T) {
 	store, row := textReplyFixture(t)
 	store.approval.Questions[0].Prompt = strings.Repeat("Long question text. ", 500)
 	sender := testSender(store, nil)
@@ -111,13 +112,61 @@ func TestLongTextReplyForcesOnlyLastChunkAndSurvivesSessionFormatting(t *testing
 		if err := json.Unmarshal(raw, &message); err != nil {
 			t.Fatal(err)
 		}
-		forced := message.Keyboard != nil && message.Keyboard.ForceReply
-		if forced != (i == len(messages)-1) {
-			t.Fatalf("wrong composer chunk %d: %+v", i, message)
+		if message.Keyboard != nil {
+			t.Fatalf("helper chunk %d changed the native composer: %+v", i, message)
 		}
 		formatted := formatSessionDeliveryMessage(sessionDeliveryMessage{SendMessage: message, SessionName: "Other session", SessionBody: message.Text}, true, row.Kind)
-		if (formatted.Keyboard != nil && formatted.Keyboard.ForceReply) != forced || telegramTextLength(formatted.Text) > 4096 {
-			t.Fatal("multisession formatting lost composer or exceeded Telegram limit")
+		if formatted.Keyboard != nil || telegramTextLength(formatted.Text) > 4096 {
+			t.Fatal("multisession formatting added composer markup or exceeded Telegram limit")
 		}
+	}
+}
+
+func TestPersistedTextReplyCannotRestoreForcedComposer(t *testing.T) {
+	for _, sessionMetadata := range []bool{false, true} {
+		name := "plain checkpoint"
+		if sessionMetadata {
+			name = "multisession checkpoint"
+		}
+		t.Run(name, func(t *testing.T) {
+			store, row := textReplyFixture(t)
+			sender := NewSender(&sessionViewStore{renderStoreFake: store, presentation: registry.TelegramSessionPresentation{MultiSession: true}}, nil, nil)
+			checkpoint := sessionDeliveryMessage{SendMessage: SendMessage{
+				ChatID: row.ChatID, Text: "Saved answer instructions",
+				Keyboard: &TelegramKeyboard{ForceReply: true, InputFieldPlaceholder: "Type your answer, then press Send"},
+			}}
+			if sessionMetadata {
+				checkpoint.SessionName, checkpoint.SessionBody = "Other session", checkpoint.Text
+			}
+			raw, err := json.Marshal(checkpoint)
+			if err != nil {
+				t.Fatal(err)
+			}
+			// A helper rendered by an older gateway can still be queued when
+			// the service restarts. Enforce the policy at the sending boundary.
+			message, err := sender.deliveryMessageForSend(t.Context(), row, raw)
+			if err != nil || message.Keyboard != nil || message.ChatID != row.ChatID || !strings.Contains(message.Text, checkpoint.Text) {
+				t.Fatalf("old helper restored a forced reply or changed destination: %+v %v", message, err)
+			}
+		})
+	}
+}
+
+func TestPersistedQuestionKeepsInlineAnswerButtons(t *testing.T) {
+	store, row := textReplyFixture(t)
+	var response registry.AcceptResult
+	if err := json.Unmarshal(row.Payload, &response); err != nil {
+		t.Fatal(err)
+	}
+	response.TextReply = false
+	row.Payload, _ = json.Marshal(response)
+	markup := &TelegramKeyboard{Rows: [][]TelegramButton{{{Text: "Mac", Data: "cb:answer"}}, {{Text: "Reply with text", Data: "cb:text"}}}}
+	raw, err := json.Marshal(SendMessage{ChatID: row.ChatID, Text: "Which equipment is available?", Keyboard: markup})
+	if err != nil {
+		t.Fatal(err)
+	}
+	message, err := testSender(store, nil).deliveryMessageForSend(t.Context(), row, raw)
+	if err != nil || !reflect.DeepEqual(message.Keyboard, markup) {
+		t.Fatalf("composer protection removed normal answer buttons: %+v %v", message, err)
 	}
 }

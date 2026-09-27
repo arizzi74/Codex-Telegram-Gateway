@@ -97,10 +97,24 @@ func (h *Webhook) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		in.CallbackToken = strings.TrimPrefix(update.Callback.Data, "cb:")
 		in.CallbackMessageID = message.ID
 	} else if message.hasMedia() {
-		// Captions are prompt text, including any leading slash. Never execute
-		// a caption as a gateway command while discarding its attachment.
+		// Captions stay literal except for explicit steering, which carries the
+		// image to the active turn. Other slash commands must not execute while
+		// silently discarding their attachment.
 		in.Action = "text"
 		in.Text = strings.TrimSpace(message.Caption)
+		head := in.Text
+		if split := strings.IndexFunc(head, unicode.IsSpace); split >= 0 {
+			head = head[:split]
+		}
+		command, _, _ := strings.Cut(head, "@")
+		if strings.EqualFold(command, "/tgsteer") {
+			action, _, text, ignore := parseTelegramText(in.Text, h.cfg.Secrets.BotName)
+			if ignore {
+				w.WriteHeader(200)
+				return
+			}
+			in.Action, in.Text = action, text
+		}
 		ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 		in, err = h.store.PrepareTelegramImage(ctx, in)
 		cancel()

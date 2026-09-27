@@ -80,6 +80,58 @@ func TestWebhookImagesAndCaptions(t *testing.T) {
 	}
 }
 
+func TestWebhookImageSteerCaption(t *testing.T) {
+	for _, tc := range []struct {
+		name, media, caption, action, text, file string
+		ignore                                   bool
+	}{
+		{"photo", `"photo":[{"file_id":"photo","width":200,"height":200}]`, "/tgsteer inspect this instead", "steer", "inspect this instead", "photo", false},
+		{"document", `"document":{"file_id":"document"}`, "/tgsteer use this screenshot", "steer", "use this screenshot", "document", false},
+		{"image only", `"document":{"file_id":"document"}`, "/tgsteer", "steer", "", "document", false},
+		{"bot mention", `"photo":[{"file_id":"photo","width":200,"height":200}]`, "  /TGSTEER@MyBot\ncheck this  ", "steer", "check this", "photo", false},
+		{"other bot", `"document":{"file_id":"document"}`, "/tgsteer@otherbot ignore this", "", "", "", true},
+		{"ordinary slash command", `"document":{"file_id":"document"}`, "/tginterrupt", "text", "/tginterrupt", "document", false},
+		{"codex slash command", `"document":{"file_id":"document"}`, "/model gpt-6", "text", "/model gpt-6", "document", false},
+		{"command prefix", `"document":{"file_id":"document"}`, "/tgsteering inspect this", "text", "/tgsteering inspect this", "document", false},
+		{"embedded steer", `"document":{"file_id":"document"}`, "Explain /tgsteer", "text", "Explain /tgsteer", "document", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := &mediaPreflightStore{}
+			api := &mediaWebhookAPI{data: testTelegramImage(t)}
+			h := NewWebhook(store, config.GatewayConfig{AllowedUserIDs: []int64{7}, Secrets: config.BotSecrets{BotName: "mybot"}}, "secret", api, slog.New(slog.NewTextHandler(io.Discard, nil)))
+			caption, err := json.Marshal(tc.caption)
+			if err != nil {
+				t.Fatal(err)
+			}
+			body := `{"update_id":1,"message":{"message_id":1,"from":{"id":7},"chat":{"id":7},"message_thread_id":11,"reply_to_message":{"message_id":22},"caption":` + string(caption) + `,` + tc.media + `}}`
+			r := httptest.NewRequest("POST", "/", strings.NewReader(body))
+			r.Header.Set("X-Telegram-Bot-Api-Secret-Token", "secret")
+			w := httptest.NewRecorder()
+			h.ServeHTTP(w, r)
+			if w.Code != 200 {
+				t.Fatalf("status=%d", w.Code)
+			}
+			if tc.ignore {
+				if len(store.prepared) != 0 || len(store.calls) != 0 || len(api.files) != 0 {
+					t.Fatal("foreign bot command reached routing or download")
+				}
+				return
+			}
+			if len(store.prepared) != 1 || len(store.calls) != 1 || len(api.files) != 1 || api.files[0] != tc.file {
+				t.Fatal("caption lost image preparation, download or delivery")
+			}
+			for _, in := range []registry.IncomingUpdate{store.prepared[0], store.calls[0]} {
+				if in.Action != tc.action || in.Text != tc.text || in.Target != "" || in.TopicID != 11 || in.ReplyToMessageID != 22 {
+					t.Fatalf("unexpected media route: %+v", in)
+				}
+			}
+			if images := store.calls[0].Images; len(images) != 1 || !bytes.Equal(images[0].Data, api.data) {
+				t.Fatal("steer attachment was dropped")
+			}
+		})
+	}
+}
+
 func TestWebhookAuthorizesBeforeImageDownload(t *testing.T) {
 	store := &webhookStore{}
 	api := &mediaWebhookAPI{data: testTelegramImage(t)}
@@ -88,7 +140,7 @@ func TestWebhookAuthorizesBeforeImageDownload(t *testing.T) {
 		user, chat int
 		secret     string
 	}{{8, 9, "secret"}, {7, 8, "secret"}, {7, 9, "wrong"}} {
-		r := httptest.NewRequest("POST", "/", strings.NewReader(fmt.Sprintf(`{"update_id":1,"message":{"from":{"id":%d},"chat":{"id":%d},"document":{"file_id":"image"}}}`, tc.user, tc.chat)))
+		r := httptest.NewRequest("POST", "/", strings.NewReader(fmt.Sprintf(`{"update_id":1,"message":{"from":{"id":%d},"chat":{"id":%d},"document":{"file_id":"image"},"caption":"/tgsteer inspect this"}}`, tc.user, tc.chat)))
 		r.Header.Set("X-Telegram-Bot-Api-Secret-Token", tc.secret)
 		w := httptest.NewRecorder()
 		h.ServeHTTP(w, r)
@@ -116,11 +168,13 @@ func TestWebhookImageFailureProducesFeedback(t *testing.T) {
 
 type mediaPreflightStore struct {
 	webhookStore
-	code string
-	err  error
+	code     string
+	err      error
+	prepared []registry.IncomingUpdate
 }
 
 func (s *mediaPreflightStore) PrepareTelegramImage(_ context.Context, in registry.IncomingUpdate) (registry.IncomingUpdate, error) {
+	s.prepared = append(s.prepared, in)
 	in.MediaError = s.code
 	return in, s.err
 }
@@ -138,7 +192,7 @@ func TestWebhookImagePreflightFailureSkipsDownload(t *testing.T) {
 		store := &mediaPreflightStore{code: tc.code, err: tc.err}
 		api := &mediaWebhookAPI{}
 		h := NewWebhook(store, config.GatewayConfig{AllowedUserIDs: []int64{7}}, "secret", api, slog.New(slog.NewTextHandler(io.Discard, nil)))
-		r := httptest.NewRequest("POST", "/", strings.NewReader(`{"update_id":1,"message":{"from":{"id":7},"chat":{"id":7},"document":{"file_id":"image"}}}`))
+		r := httptest.NewRequest("POST", "/", strings.NewReader(`{"update_id":1,"message":{"from":{"id":7},"chat":{"id":7},"document":{"file_id":"image"},"caption":"/tgsteer inspect this"}}`))
 		r.Header.Set("X-Telegram-Bot-Api-Secret-Token", "secret")
 		w := httptest.NewRecorder()
 		h.ServeHTTP(w, r)

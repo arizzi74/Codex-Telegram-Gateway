@@ -135,6 +135,17 @@ func (s *Sender) deliveryMessageForSend(ctx context.Context, row registry.Delive
 	if err := json.Unmarshal(raw, &checkpoint); err != nil {
 		return SendMessage{}, err
 	}
+	// Older releases persisted ForceReply in text-answer helper checkpoints.
+	// Strip it at the final send boundary too: retrying a frozen chunk after an
+	// upgrade must not reopen Telegram's sticky native reply composer. Keep any
+	// inline controls and the original message destination unchanged.
+	if keyboard := checkpoint.Keyboard; keyboard != nil && (keyboard.ForceReply || keyboard.InputFieldPlaceholder != "") {
+		keyboard.ForceReply = false
+		keyboard.InputFieldPlaceholder = ""
+		if len(keyboard.Rows) == 0 {
+			checkpoint.Keyboard = nil
+		}
+	}
 	if checkpoint.SessionName == "" {
 		return checkpoint.SendMessage, nil
 	}
