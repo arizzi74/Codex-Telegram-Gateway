@@ -28,10 +28,14 @@ func (s *Server) webuiRoutes() {
 		})
 	}
 	s.mux.HandleFunc("/tgw/webui/", s.webuiPage)
+	s.mux.HandleFunc("/tgw/webui/diagram-renderer", s.webuiDiagramRenderer)
+	s.mux.HandleFunc("/tgw/webui/static/webui-mermaid-runtime.js", s.webuiDiagramRuntime)
 	for _, asset := range []struct{ name, contentType string }{
 		{"webui.css", "text/css; charset=utf-8"},
 		{"webui.js", "application/javascript; charset=utf-8"},
 		{"webui-format.js", "application/javascript; charset=utf-8"},
+		{"webui-diagrams.js", "application/javascript; charset=utf-8"},
+		{"webui-mermaid-LICENSE.txt", "text/plain; charset=utf-8"},
 		{"webui-commands.js", "application/javascript; charset=utf-8"},
 		{"webui-command-ui.js", "application/javascript; charset=utf-8"},
 		{"webui-drafts.js", "application/javascript; charset=utf-8"},
@@ -45,6 +49,27 @@ func (s *Server) webuiRoutes() {
 	s.mux.HandleFunc("/tgw/api/v1/webui/connect", s.webuiConnect)
 	s.mux.HandleFunc("/tgw/api/v1/webui/commands", s.webuiCommands)
 	s.mux.HandleFunc("/tgw/api/v1/webui/activity", s.webuiActivity)
+}
+
+func (s *Server) webuiDiagramRenderer(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		method(w)
+		return
+	}
+	page, err := versionedWebUIDiagramPage()
+	if err != nil {
+		fail(w, err)
+		return
+	}
+	// Mermaid needs inline SVG styles while measuring its diagram. Keep that
+	// permission inside an opaque-origin sandbox, including direct navigation
+	// to this endpoint. The authenticated application retains its strict CSP.
+	// Only our bundled renderer can execute; diagrams cannot fetch resources,
+	// embed pages, submit forms or access the parent application's origin.
+	w.Header().Set("Content-Security-Policy", "default-src 'none'; base-uri 'none'; frame-ancestors 'self'; form-action 'none'; object-src 'none'; connect-src 'none'; script-src "+s.origin+"/tgw/webui/static/webui-mermaid-runtime.js; style-src 'unsafe-inline'; img-src 'none'; font-src 'none'; frame-src 'none'; worker-src 'none'; sandbox allow-scripts")
+	w.Header().Set("X-Frame-Options", "SAMEORIGIN")
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	_, _ = w.Write(page)
 }
 
 func (s *Server) webuiPage(w http.ResponseWriter, r *http.Request) {

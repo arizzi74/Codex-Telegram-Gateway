@@ -115,10 +115,11 @@ turns['thread-d'] = [{ id: 'short-d', status: 'completed', startedAt: now - 500,
       const command = request.command;
       return route.fulfill({ status: authStatus !== 200 ? authStatus : command === 'tgstatus' ? gatewayStatusCode : 200, contentType: 'application/json', body: JSON.stringify({ command, text: command === 'tgupdateworkers' ? 'Linux worker: update queued after active turns finish.' : command === 'tginstances' ? 'Linux worker / Primary Codex · online' : gatewayStatusText, workers: command === 'tgupdateworkers' ? gatewayUpdateWorkers.map(worker => ({ ...worker, state: 'queued' })) : gatewayUpdateWorkers, gateway_version: '0.5.test' }) });
     }
-    const staticFiles = ['session-auth.js', 'session-auth.css', 'webui-drafts.js', 'webui-format.js', 'webui-commands.js', 'webui-command-ui.js', 'webui-notifications.js', 'webui.js', 'webui.css', 'webui-icon.svg', 'webui-icon-180.png', 'webui-icon-192.png', 'webui-icon-512.png'];
-    const filename = url.pathname.endsWith('/manifest.webmanifest') ? 'webui-manifest.webmanifest' : staticFiles.find(name => url.pathname.endsWith('/' + name)) || 'webui.html';
+    const staticFiles = ['session-auth.js', 'session-auth.css', 'webui-drafts.js', 'webui-format.js', 'webui-diagrams.js', 'webui-mermaid-runtime.js', 'webui-commands.js', 'webui-command-ui.js', 'webui-notifications.js', 'webui.js', 'webui.css', 'webui-icon.svg', 'webui-icon-180.png', 'webui-icon-192.png', 'webui-icon-512.png'];
+    const filename = url.pathname.endsWith('/diagram-renderer') ? 'webui-mermaid-frame.html' : url.pathname.endsWith('/manifest.webmanifest') ? 'webui-manifest.webmanifest' : staticFiles.find(name => url.pathname.endsWith('/' + name)) || 'webui.html';
     const contentType = filename.endsWith('.js') ? 'text/javascript' : filename.endsWith('.css') ? 'text/css' : filename.endsWith('.png') ? 'image/png' : filename.endsWith('.svg') ? 'image/svg+xml' : filename.endsWith('.webmanifest') ? 'application/manifest+json' : 'text/html';
-    await route.fulfill({ contentType, headers: { 'Content-Security-Policy': "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'" }, body: fs.readFileSync(path.join(assets, filename)) });
+    const csp = filename === 'webui-mermaid-frame.html' ? "default-src 'none'; base-uri 'none'; frame-ancestors 'self'; form-action 'none'; object-src 'none'; connect-src 'none'; script-src https://webui.test/tgw/webui/static/webui-mermaid-runtime.js; style-src 'unsafe-inline'; img-src 'none'; font-src 'none'; frame-src 'none'; worker-src 'none'; sandbox allow-scripts" : "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' blob:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'";
+    await route.fulfill({ contentType, headers: { 'Content-Security-Policy': csp }, body: fs.readFileSync(path.join(assets, filename)) });
   });
   await page.addInitScript(({ turns, rateLimits, sessions }) => {
     // Desktop automation has no native phone keyboard. Keep ordinary viewport
@@ -2224,6 +2225,30 @@ turns['thread-d'] = [{ id: 'short-d', status: 'completed', startedAt: now - 500,
     await page.waitForSelector('[data-session-id="a"]');
     assert.equal(await page.evaluate(() => window.testSockets.length), 0, 'An invalid startup deep link cannot attach to a runtime');
     await choose('d');
+    const showDiagram = async () => {
+      await current({ method: 'item/completed', params: { threadId: 'thread-d', turnId: 'short-d', item: { id: 'diagram-live', type: 'agentMessage', text: '```mermaid\nflowchart LR\nGateway --> Worker\n```' } } });
+      await page.locator('figure.mermaid-diagram').scrollIntoViewIfNeeded();
+      await page.waitForFunction(() => document.querySelector('figure.mermaid-diagram')?.dataset.state === 'ready');
+      assert.equal(await page.locator('img.mermaid-image').evaluate(image => image.complete && image.naturalWidth > 0), true);
+    };
+    await showDiagram();
+    await page.getByRole('button', { name: 'Zoom in diagram', exact: true }).click();
+    await page.locator('details.mermaid-source summary').click();
+    const diagramBeforeUpdate = await page.locator('figure.mermaid-diagram').evaluate(element => {
+      window.savedLiveDiagram = element;
+      return { url: element.querySelector('img').src, width: element.querySelector('img').style.width };
+    });
+    await current({ method: 'item/completed', params: { threadId: 'thread-d', turnId: 'short-d', item: { id: 'diagram-followup', type: 'agentMessage', text: 'The worker is ready for another prompt.' } } });
+    await page.getByText('The worker is ready for another prompt.', { exact: true }).waitFor();
+    const diagramAfterUpdate = await page.locator('figure.mermaid-diagram').evaluate(element => ({ sameNode: element === window.savedLiveDiagram, url: element.querySelector('img').src, width: element.querySelector('img').style.width, sourceOpen: element.querySelector('details').open }));
+    assert.equal(diagramAfterUpdate.sameNode, true, 'Live transcript updates preserve the existing diagram node');
+    assert.equal(diagramAfterUpdate.url, diagramBeforeUpdate.url, 'Live transcript updates reuse the rendered diagram image');
+    assert.equal(diagramAfterUpdate.width, diagramBeforeUpdate.width, 'Live transcript updates preserve diagram zoom');
+    assert.equal(diagramAfterUpdate.sourceOpen, true, 'Live transcript updates preserve expanded diagram source');
+    await choose('a');
+    assert.equal(await page.locator('iframe').count(), 0, 'Switching sessions clears the diagram renderer and private diagram cache');
+    await choose('d');
+    await showDiagram();
     await page.locator('#disconnect').click();
     assert.equal(await page.evaluate(() => window.testSockets.at(-1).readyState), 3, 'The conversation socket is closed before testing activity-only authentication');
     await requestWorkerUpdates();
@@ -2239,6 +2264,8 @@ turns['thread-d'] = [{ id: 'short-d', status: 'completed', startedAt: now - 500,
       await page.screenshot({ path: path.join(process.env.WEBUI_SCREENSHOTS, 'webui-signin.png') });
     }
     assert.equal(await page.locator('#messages article').count(), 0);
+    assert.equal(await page.locator('iframe').count(), 0, 'Authentication expiry disposes the diagram renderer');
+    assert.equal(await page.locator('img.mermaid-image').count(), 0, 'Authentication expiry removes private diagram images');
     assert.equal(await page.locator('.session-button').count(), 0);
     assert.equal(await page.locator('#prompt').inputValue(), '');
     assert.deepEqual(await page.evaluate(() => Object.keys(localStorage)), ['codex-webui-font-size'], 'Expired authentication keeps only the harmless font preference');
@@ -2246,7 +2273,7 @@ turns['thread-d'] = [{ id: 'short-d', status: 'completed', startedAt: now - 500,
     assert.equal(await page.evaluate(() => Object.keys(sessionStorage).length), 0);
     assert.ok(paths.every(value => value.startsWith('/tgw/')), 'All gateway routes use /tgw');
     assert.deepEqual(errors, []);
-    console.log('Web UI browser checks passed: slash autocomplete and CLI choices with keyboard/touch/current markers, successful setting auto-close without mobile autofocus, errors/read-only results remain visible, typed worker and gateway commands without a session, permission confirmation/stale-button isolation, unavailable commands never become prompts, native and global v2 model/effort changes with inventory/resume/command-ack isolation, read-only model status, clipboard images/text+image/image-only/image steering/idle and rejection preservation/per-session drafts/navigation races/no replay, tool colors in both themes, safe formatting/nonempty reasoning/native sub-agent activity, chronology/pagination, independent global activity events/sequence gaps/resync/heartbeat and handshake recovery/inventory races, static Working label plus matching green activity pulse/reduced motion, worker heading background/compact Settings footer/dialog/desktop/mobile/keyboard/focus, desktop font controls/persistence/mobile isolation, full-width responsive status, live quotas/reset tooltips/no polling/session isolation/unavailable fallback, responsive layout and bottom following through late layout changes, keyboard resize/pan/page scroll/delayed focus/dismissal/mobile menu without autofocus, native inner scrolling, blocking/async questions, rejected-answer recovery, approvals, live external prompts, session isolation, disconnect/reconnect, prompt and command drafts/no replay, scoped connection/history/retry error recovery without hiding uncertain-send or runtime warnings, ACK-only ephemeral queued-steer feedback/timer/switch/end/rejection/isolation, mobile status grid alignment/empty rows/compact horizontal Stop and Steer/multiline input, failed resume, sidebar deletion confirmation/desktop/mobile/cancel/CSRF/scope/delayed result/failure/lost acknowledgement/unknown outcome/no POST replay, idle heartbeat, auth expiry.');
+    console.log('Web UI browser checks passed: Mermaid live-update state/session/auth cleanup, slash autocomplete and CLI choices with keyboard/touch/current markers, successful setting auto-close without mobile autofocus, errors/read-only results remain visible, typed worker and gateway commands without a session, permission confirmation/stale-button isolation, unavailable commands never become prompts, native and global v2 model/effort changes with inventory/resume/command-ack isolation, read-only model status, clipboard images/text+image/image-only/image steering/idle and rejection preservation/per-session drafts/navigation races/no replay, tool colors in both themes, safe formatting/nonempty reasoning/native sub-agent activity, chronology/pagination, independent global activity events/sequence gaps/resync/heartbeat and handshake recovery/inventory races, static Working label plus matching green activity pulse/reduced motion, worker heading background/compact Settings footer/dialog/desktop/mobile/keyboard/focus, desktop font controls/persistence/mobile isolation, full-width responsive status, live quotas/reset tooltips/no polling/session isolation/unavailable fallback, responsive layout and bottom following through late layout changes, keyboard resize/pan/page scroll/delayed focus/dismissal/mobile menu without autofocus, native inner scrolling, blocking/async questions, rejected-answer recovery, approvals, live external prompts, session isolation, disconnect/reconnect, prompt and command drafts/no replay, scoped connection/history/retry error recovery without hiding uncertain-send or runtime warnings, ACK-only ephemeral queued-steer feedback/timer/switch/end/rejection/isolation, mobile status grid alignment/empty rows/compact horizontal Stop and Steer/multiline input, failed resume, sidebar deletion confirmation/desktop/mobile/cancel/CSRF/scope/delayed result/failure/lost acknowledgement/unknown outcome/no POST replay, idle heartbeat, auth expiry.');
   } catch (error) {
     if (process.env.WEBUI_SCREENSHOTS) {
       fs.mkdirSync(process.env.WEBUI_SCREENSHOTS, { recursive: true });

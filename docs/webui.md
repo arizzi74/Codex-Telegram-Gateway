@@ -60,6 +60,43 @@ check the conversation before submitting again.
 
 The relay preserves the gateway's complete-message secret-redaction boundary: it suppresses raw content deltas that could expose a secret split across chunks. Turn status, tool starts/completions, completed commentary, and questions arrive live. Assistant text appears when its item is complete rather than token by token. This is intentional; the interface must not bypass protections applied to Telegram traffic.
 
+## Mermaid diagrams
+
+Codex responses containing a fenced `mermaid` block display a diagram on desktop
+and mobile. Diagrams fit the conversation width and follow the interface's light
+or dark theme. Use **+**, **−**, and **Fit** to adjust their size; a magnified diagram
+scrolls inside its own panel. **Source** reveals the original diagram text.
+
+For example, ask Codex to explain an architecture using a Mermaid diagram:
+
+````markdown
+```mermaid
+flowchart LR
+  Telegram --> Gateway
+  Browser --> Gateway
+  Gateway --> Worker
+  Worker --> Sessions
+```
+````
+
+The renderer supports flowcharts, sequence and class diagrams, and the other
+diagram types included in Mermaid 12. An unfinished code fence stays as code;
+invalid or oversized diagrams retain their source with a short explanation.
+If loading the renderer fails, **Retry** attempts the diagram again.
+External images, fonts, clickable diagram links, configuration directives and
+YAML configuration frontmatter are disabled. Use ordinary Markdown links beside
+the diagram when needed. Rendering is limited to 32 KiB / 500 source lines,
+200 edges, 2 MiB of SVG and 16,384 pixels per dimension.
+
+Mermaid is bundled with the gateway and loaded only when a diagram needs it.
+Rendering runs locally in the browser inside an opaque-origin sandbox, with no
+network access or access to the signed-in page. The conversation displays its
+output as a noninteractive SVG image. Completed renders share a bounded,
+in-memory cache, cleared on session changes and authentication expiry. There is
+no external rendering service or additional runtime to install on the gateway.
+The public library is compressed in transit and cached by its content version;
+private diagram sources and generated images are never stored in that cache.
+
 ## Command menu
 
 The catalog recognizes the user-facing slash-command names and aliases in official Codex **0.156.0**, plus gateway commands. It distinguishes runnable worker operations, browser controls, and features that require the native client. Unknown commands and unavailable commands are never submitted as model prompts. A command requiring an idle session is checked again on the worker even when its browser menu is already open.
@@ -136,7 +173,7 @@ The interface follows new output only while you are near the bottom. Selecting a
 
 Embedded stylesheet and script URLs include a content fingerprint so a page reload after deployment loads a matching set of assets. An already open tab needs a browser refresh to use the new interface.
 
-The web UI uses the admin authentication boundary and therefore grants the same trusted operator access. HTTPS, secure session cookies, exact WebSocket Origin checks, selected-session authorization, and the worker's existing execution permissions apply. Message rendering builds DOM text nodes rather than accepting HTML. Remote image embeds are not fetched. Only HTTP, HTTPS, and mail links become clickable; local paths remain text. Third-party assets are not loaded.
+The web UI uses the admin authentication boundary and therefore grants the same trusted operator access. HTTPS, secure session cookies, exact WebSocket Origin checks, selected-session authorization, and the worker's existing execution permissions apply. Message rendering builds DOM text nodes rather than accepting HTML. Remote image embeds are not fetched. Only HTTP, HTTPS, and mail links become clickable; local paths remain text. Assets are served by the gateway; no third-party hosts are contacted. Mermaid's separate sandbox permits diagram styles without relaxing the application or admin console's content security policy.
 
 ## Upstream formatting reference and attribution
 
@@ -155,6 +192,8 @@ This is an independent JavaScript/DOM implementation informed by the actual Open
 
 OpenAI Codex is copyright 2025 OpenAI, licensed under Apache License 2.0. Its upstream notice also identifies Ratatui-derived code and the Ratatui copyright holders. Copies of the upstream [LICENSE](../third_party/codex/LICENSE) and [NOTICE](../third_party/codex/NOTICE) are included for attribution. The browser renderer is new code adapted to browser accessibility, responsive layout, and the gateway's security requirements; no native terminal renderer is bundled.
 
+The local diagram bundle uses [Mermaid 12.0.0](https://github.com/mermaid-js/mermaid/releases/tag/mermaid%4012.0.0), under the MIT license. Its [third-party notices](../internal/admin/static/webui-mermaid-LICENSE.txt) include the dependencies actually bundled. The lockfile pins build dependencies; `npm run build:mermaid` regenerates the runtime and notices from `internal/admin/mermaid/renderer.js`. `npm run build:mermaid -- --check` verifies committed output byte for byte and runs in the browser CI checks. These are development steps; Go builds and installations use the committed assets and need no Node.js tooling.
+
 ## Browser regression checks
 
 Install the pinned development browser tooling and run all browser checks:
@@ -167,6 +206,6 @@ npm run test:browser
 
 With an existing Playwright installation, `PLAYWRIGHT_MODULE=/path/to/playwright node scripts/test-webui.cjs` runs just the Web UI checks. See [website maintenance](website.md) for reproducible public desktop/mobile screenshots using fictional demo data.
 
-Set `WEBUI_SCREENSHOTS=/tmp/webui-screenshots` to save desktop and mobile screenshots. These development tools are optional; they are not dependencies of an installed gateway. The browser checks use a simulated app-server transport and verify safe rendering, mobile wrapping, pagination, model controls, questions/approvals, session switching, disconnection/reconnection, draft preservation, no automatic prompt replay, and authentication expiry. Go integration tests exercise the authenticated gateway/worker relay separately.
+Set `WEBUI_SCREENSHOTS=/tmp/webui-screenshots` to save desktop and mobile screenshots. These development tools are optional; they are not dependencies of an installed gateway. The browser checks use a simulated app-server transport and verify safe rendering, mobile wrapping, pagination, model controls, questions/approvals, session switching, disconnection/reconnection, draft preservation, no automatic prompt replay, and authentication expiry. Mermaid checks exercise the actual bundled library and sandbox, including theme changes, mobile zoom, invalid input, resource isolation and cache cleanup. Go integration tests exercise the authenticated gateway/worker relay separately.
 
 The mobile shell uses the visual viewport's document coordinates (`pageTop`/`pageLeft`) with absolute positioning. Safari can pan the layout viewport too, so a fixed shell using only `offsetTop` is insufficient; WebKit's [viewport implementation](https://github.com/WebKit/WebKit/blob/main/Source/WebCore/page/VisualViewport.cpp) distinguishes those coordinates. Focus and keyboard transitions receive a brief, bounded geometry recheck because [WebKit can report stale offsets during an event](https://bugs.webkit.org/show_bug.cgi?id=237851). There is no continuous viewport polling while idle, and keyboard panning does not repeatedly resize the focused textarea. The browser checks simulate keyboard resizing, panning, document scrolling, and delayed metrics; they do not emulate an iPhone's native keyboard or Safari compositor. Verify keyboard opening, dismissal, question entry, and session search on an actual iPhone when changing this behavior.

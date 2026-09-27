@@ -5,6 +5,9 @@ Codex sessions through an allowlisted Telegram bot or a responsive browser inter
 The gateway includes a passkey-authenticated admin console. Workers supervise
 private Codex app-server processes and support local terminal attachment.
 
+The browser interface displays Markdown and Mermaid diagrams on desktop and
+mobile, with local rendering, zoom controls and access to the diagram source.
+
 [Explore the website](https://arizzi74.github.io/Codex-Telegram-Gateway/) ·
 [Installation guide](docs/installation.md) ·
 [Latest release](https://github.com/arizzi74/Codex-Telegram-Gateway/releases/latest)

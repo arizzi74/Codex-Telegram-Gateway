@@ -449,6 +449,7 @@
   function expire() { if (sessionAuth) sessionAuth.expire('expired'); else lockAuthentication('expired'); }
   function lockAuthentication(reason) {
     captureAuthPosition();
+    window.CodexDiagrams?.clear();
     clearTimeout(draftSaveTimer); draftSaveTimer = null; draftDirty = false;
     if (['logout', 'revoked'].includes(reason)) draftRecovery?.clear();
     draftRecovery?.expireAuth(); recoveredDrafts = null; $('draft-recovery-offer').hidden = true;
@@ -602,6 +603,7 @@
     activity.sessions.delete(id);
     sessionSettings.delete(id); activitySettingsRevisions.delete(id);
     if (state.selected?.session_id === id) {
+      window.CodexDiagrams?.clear();
       commandUI?.sessionChanged(); state.generation++; state.stopped = true; closeSocket(); state.selected = null;
       state.items.clear(); state.questions.clear(); state.models = []; state.turn = null; state.cursor = null; state.queuedEvents = [];
       $('messages').replaceChildren(); $('questions').replaceChildren(); $('questions').hidden = true; $('prompt').value = ''; renderImageDraft();
@@ -721,6 +723,7 @@
     showSessions(false);
     if (sessionUUID.test(session.session_id)) notificationLocation(session.session_id);
     if (state.selected?.session_id === session.session_id && state.connected) return;
+    window.CodexDiagrams?.clear();
     commandUI?.sessionChanged();
     if (state.selected) { saveDraft(); state.positions.set(state.selected.session_id, { top: $('transcript').scrollTop, bottom: atBottom() }); }
     state.generation++;
@@ -1115,11 +1118,19 @@
   function renderMessages(follow = true) {
     const bottom = followLatest;
     const top = $('transcript').scrollTop;
-    const expanded = new Set([...$('messages').querySelectorAll('article:has(details[open])')].map(item => item.dataset.itemId));
+    const expanded = new Set([...$('messages').querySelectorAll('article:has(details[open]:not(.mermaid-source))')].map(item => item.dataset.itemId));
+    const diagrams = new Map([...$('messages').children].map(article => [article.dataset.itemId, [...article.querySelectorAll('figure.mermaid-diagram')]]));
     const fragment = document.createDocumentFragment();
     for (const item of state.items.values()) {
       const article = renderItem(item);
-      if (expanded.has(article.dataset.itemId)) article.querySelector('details')?.setAttribute('open', '');
+      if (expanded.has(article.dataset.itemId)) article.querySelector('details:not(.mermaid-source)')?.setAttribute('open', '');
+      // Reuse diagrams within the same message so live activity doesn't reset
+      // their zoom/source controls or replace a decoded image with a spinner.
+      const previous = diagrams.get(article.dataset.itemId) || [];
+      [...article.querySelectorAll('figure.mermaid-diagram')].forEach((figure, index) => {
+        const old = previous[index];
+        if (old && old.querySelector('.mermaid-source code')?.textContent === figure.querySelector('.mermaid-source code')?.textContent) figure.replaceWith(old);
+      });
       fragment.append(article);
     }
     $('messages').replaceChildren(fragment);
@@ -1501,6 +1512,7 @@
       }
       notice('Session created. Refresh the session list to connect when its worker inventory arrives.');
     } else if (['archive', 'delete'].includes(name)) {
+      window.CodexDiagrams?.clear();
       disconnect(); state.selected = null; state.items.clear(); state.questions.clear();
       $('messages').replaceChildren(); $('questions').replaceChildren(); $('questions').hidden = true;
       for (const id of ['transcript', 'composer', 'disconnect', 'jump-latest']) $(id).hidden = true;

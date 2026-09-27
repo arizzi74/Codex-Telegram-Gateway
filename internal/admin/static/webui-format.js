@@ -71,9 +71,12 @@ window.CodexFormat = (() => {
       if (fence) {
         const body = [];
         i++;
-        while (i < lines.length && !lines[i].trim().startsWith(fence[1])) body.push(lines[i++]);
-        if (i < lines.length) i++;
-        root.append(code(body.join('\n'), fence[2]));
+        const closing = new RegExp('^\\s*' + fence[1][0] + '{' + fence[1].length + ',}\\s*$');
+        while (i < lines.length && !closing.test(lines[i])) body.push(lines[i++]);
+        const complete = i < lines.length;
+        if (complete) i++;
+        const source = body.join('\n');
+        root.append(complete && /^mermaid$/i.test(fence[2]) && window.CodexDiagrams ? window.CodexDiagrams.create(source) : code(source, fence[2]));
         continue;
       }
       const heading = line.match(/^(#{1,6})\s+(.+)$/);

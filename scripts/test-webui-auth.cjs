@@ -41,9 +41,10 @@ const selected = { session_id: sessionID, codex_thread_id: 'thread', worker_name
     }
     if (url.pathname === '/tgw/api/v1/webui/sessions') return json({ sessions: [selected] }, auth ? 200 : 401);
     if (url.pathname === '/tgw/api/v1/webui/push/config') return json({ supported: false, subscribed: false });
-    const filename = url.pathname.includes('/static/') ? path.basename(url.pathname) : 'webui.html';
+    const filename = url.pathname.endsWith('/diagram-renderer') ? 'webui-mermaid-frame.html' : url.pathname.includes('/static/') ? path.basename(url.pathname) : 'webui.html';
     if (!fs.existsSync(path.join(assets, filename))) return route.fulfill({ status: 404, body: '' });
-    return route.fulfill({ contentType: filename.endsWith('.js') ? 'text/javascript' : filename.endsWith('.css') ? 'text/css' : 'text/html', body: fs.readFileSync(path.join(assets, filename)) });
+    const headers = filename === 'webui-mermaid-frame.html' ? { 'Content-Security-Policy': "default-src 'none'; base-uri 'none'; frame-ancestors 'self'; form-action 'none'; object-src 'none'; connect-src 'none'; script-src https://auth.test/tgw/webui/static/webui-mermaid-runtime.js; style-src 'unsafe-inline'; img-src 'none'; font-src 'none'; frame-src 'none'; worker-src 'none'; sandbox allow-scripts" } : {};
+    return route.fulfill({ contentType: filename.endsWith('.js') ? 'text/javascript' : filename.endsWith('.css') ? 'text/css' : 'text/html', headers, body: fs.readFileSync(path.join(assets, filename)) });
   });
   await context.addInitScript(({ sessionID }) => {
     window.authSockets = []; window.authFrames = []; window.passkeyMode = 'success'; window.holdSend = false;

@@ -2,10 +2,16 @@
   "name": "codex-telegram-gateway-browser-checks",
   "private": true,
   "scripts": {
-    "test:browser": "node scripts/test-admin-ui.cjs && node scripts/test-webui.cjs && node scripts/test-webui-auth.cjs && node scripts/test-webui-drafts.cjs && node scripts/test-webui-notifications.cjs && node scripts/test-site.cjs",
+    "build:mermaid": "node scripts/build-mermaid.mjs",
+    "test:browser": "npm run build:mermaid -- --check && node scripts/test-admin-ui.cjs && node scripts/test-webui.cjs && node scripts/test-webui-mermaid.cjs && node scripts/test-webui-auth.cjs && node scripts/test-webui-drafts.cjs && node scripts/test-webui-notifications.cjs && node scripts/test-site.cjs",
     "screenshots": "node scripts/capture-site-screenshots.cjs"
   },
   "devDependencies": {
+    "esbuild": "0.28.2",
+    "mermaid": "12.0.0",
     "playwright": "1.63.0"
+  },
+  "overrides": {
+    "lodash-es": "4.18.1"
   }
 }

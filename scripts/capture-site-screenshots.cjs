@@ -43,10 +43,11 @@ async function prepare(page, pendingQuestions = true) {
     if (url.pathname === '/tgw/api/v1/admin/session') return json({ authenticated: true, session_id: 'aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa', owner_id: 'screenshot-owner', server_time: new Date().toISOString(), expires_at: new Date(Date.now() + 8 * 3600000).toISOString(), reauthenticated_at: new Date().toISOString() });
     if (url.pathname === '/tgw/api/v1/webui/sessions') return json({ sessions });
     if (url.pathname === '/tgw/api/v1/webui/push/config') return json({ supported: true, public_key: 'fictional-demo-public-key', subscribed: false, scope: 'all' });
-    let name = url.pathname === '/tgw/webui/' ? 'webui.html' : url.pathname.endsWith('/manifest.webmanifest') ? 'webui-manifest.webmanifest' : path.basename(url.pathname);
+    let name = url.pathname.endsWith('/diagram-renderer') ? 'webui-mermaid-frame.html' : url.pathname === '/tgw/webui/' ? 'webui.html' : url.pathname.endsWith('/manifest.webmanifest') ? 'webui-manifest.webmanifest' : path.basename(url.pathname);
     if (!/^(webui[\w.-]*|session-auth)\.(html|js|css|svg|png|webmanifest)$/.test(name) || !fs.existsSync(path.join(assets, name))) return route.fulfill({ status: 404, body: 'Not part of the demo fixture' });
     const mime = { html: 'text/html', js: 'text/javascript', css: 'text/css', svg: 'image/svg+xml', png: 'image/png', webmanifest: 'application/manifest+json' }[name.split('.').pop()];
-    return route.fulfill({ contentType: mime, body: fs.readFileSync(path.join(assets, name)) });
+    const headers = name === 'webui-mermaid-frame.html' ? { 'Content-Security-Policy': "default-src 'none'; base-uri 'none'; frame-ancestors 'self'; form-action 'none'; object-src 'none'; connect-src 'none'; script-src https://webui.example.test/tgw/webui/static/webui-mermaid-runtime.js; style-src 'unsafe-inline'; img-src 'none'; font-src 'none'; frame-src 'none'; worker-src 'none'; sandbox allow-scripts" } : {};
+    return route.fulfill({ contentType: mime, headers, body: fs.readFileSync(path.join(assets, name)) });
   });
   await page.addInitScript(({ sessions, turns, now, pendingQuestions }) => {
     // Present an unconfigured browser's notification state. Headless Chromium
