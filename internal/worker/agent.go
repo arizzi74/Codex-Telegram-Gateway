@@ -549,6 +549,7 @@ type sessionActor struct {
 	userPrompts                     []codexadapter.UserPrompt
 	asyncQuestions                  map[string]protocol.Approval
 	asyncRecoveredGeneration        uint64
+	usageResets                     map[string]*usageResetChoice
 }
 
 func (s *sessionActor) runtimeEvents() chan actorEvent     { return s.eventQueue }

@@ -583,24 +583,32 @@ func applySettingsMenuEvent(ctx context.Context, tx *dbTx, workerID uuid.UUID, e
 	var envelope struct {
 		Permissions json.RawMessage `json:"permissions"`
 		ModelMenu   json.RawMessage `json:"model_menu"`
+		UsageMenu   json.RawMessage `json:"usage_menu"`
 	}
 	if err := json.Unmarshal(event.Data, &envelope); err != nil {
 		return false, false, nil, ErrEventTarget
 	}
 	hasPermissions := len(envelope.Permissions) > 0 && !bytes.Equal(envelope.Permissions, []byte("null"))
 	hasModelMenu := len(envelope.ModelMenu) > 0 && !bytes.Equal(envelope.ModelMenu, []byte("null"))
-	if !hasPermissions && !hasModelMenu {
+	hasUsageMenu := len(envelope.UsageMenu) > 0 && !bytes.Equal(envelope.UsageMenu, []byte("null"))
+	if !hasPermissions && !hasModelMenu && !hasUsageMenu {
 		return false, false, nil, nil
 	}
 	var result protocol.Result
 	if json.Unmarshal(event.Data, &result) != nil || event.Kind != "command_completed" ||
 		target.runtimeID == nil || target.sessionID == nil || result.TurnID != "" ||
 		result.Session != nil || result.History != nil || result.Workspace != nil || result.Error != nil ||
-		(result.State != "" && result.State != "completed") || (hasPermissions && hasModelMenu) {
+		(result.State != "" && result.State != "completed") || (hasPermissions && hasModelMenu) ||
+		(hasUsageMenu && (hasPermissions || hasModelMenu)) {
 		return true, false, nil, ErrEventTarget
 	}
 	name := "permissions"
-	if hasModelMenu {
+	if hasUsageMenu {
+		name = "usage"
+		if result.UsageMenu.Validate() != nil {
+			return true, false, nil, ErrEventTarget
+		}
+	} else if hasModelMenu {
 		name = "model"
 		if result.ModelMenu.Validate() != nil {
 			return true, false, nil, ErrEventTarget

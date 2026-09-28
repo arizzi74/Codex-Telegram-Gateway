@@ -5,6 +5,18 @@ import (
 	"testing"
 )
 
+func TestNativeResetRedemptionIsSynchronousButMutating(t *testing.T) {
+	const method = "account/rateLimitResetCredit/consume"
+	if nativeReadOnlyRequest(method) || !nativeSynchronousRequest(method) {
+		t.Fatal("reset redemption must be a synchronous mutation")
+	}
+	var activity nativeActivity
+	activity.clientMessage([]byte(`{"id":7,"method":"account/rateLimitResetCredit/consume","params":{"idempotencyKey":"test"}}`))
+	assertNativeBusy(t, &activity, "worker update: native CLI requests are still in flight")
+	activity.serverMessage([]byte(`{"id":7,"result":{"outcome":"reset"}}`))
+	assertNativeIdle(t, &activity)
+}
+
 func TestNativeActivityTracksTypedIDsAndSuccessfulOrFailedReplies(t *testing.T) {
 	var activity nativeActivity
 	assertNativeIdle(t, &activity)

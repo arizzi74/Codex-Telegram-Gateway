@@ -228,7 +228,7 @@ turns['thread-d'] = [{ id: 'short-d', status: 'completed', startedAt: now - 500,
         else if (frame.method === 'account/rateLimits/read') {
           if (window.testHoldLimits) { this.heldLimits = frame; return; }
           if (window.testFailLimits) { setTimeout(() => this.emit({ id: frame.id, error: { message: 'Rate limits unavailable' } }), 1); return; }
-          result = window.testMissingLimits ? { rateLimits: null } : { rateLimits };
+          result = window.testMissingLimits ? { rateLimits: null } : { rateLimits: window.testUsageRedeemed ? { ...rateLimits, primary: { ...rateLimits.primary, usedPercent: 0 } } : rateLimits };
         }
         else if (frame.method === 'gateway/questions') {
           result = { questions: this.session === 'c' && !window.testAnsweredOldQuestion ? [{ approvalId: window.testReplacementQuestion ? 'approval-replacement-c' : 'approval-old-c', async: false, method: 'item/tool/requestUserInput', params: { threadId: 'thread-c', turnId: 'old-c', questions: [{ id: 'question-c', question: window.testReplacementQuestion ? 'Replacement question with the same pending count?' : 'Pending question outside the latest 20 items?' }] } }] : [] };
@@ -257,6 +257,21 @@ turns['thread-d'] = [{ id: 'short-d', status: 'completed', startedAt: now - 500,
               : { text: 'Model updated: ' + args };
           else if (name === 'new') { const options = JSON.parse(args); result = { text: 'Created ' + options.name, session: { session_id: 'created', codex_thread_id: 'thread-created', worker_id: 'w', runtime_id: 'runtime', name: options.name, cwd: options.cwd || '/projects/new' } }; }
           else if (name === 'status') result = { text: 'Codex session\nModel: codex-model\nWorkspace: /projects/gateway\nPrimary limit used: 26%' };
+          else if (name === 'usage') {
+            const credit = '11111111-1111-4111-8111-111111111111', confirmation = '22222222-2222-4222-8222-222222222222';
+            const back = { args: '--menu', label: 'Back to usage' }, cancel = { args: 'cancel', label: 'Cancel' };
+            if (args === 'cancel') result = { text: 'Usage menu closed. No reset was redeemed.' };
+            else if (args === 'confirm ' + confirmation) {
+              window.testUsageRedeemed = true;
+              result = { text: 'Banked reset redeemed. Your account limits have been refreshed.' };
+            } else if (args === 'redeem' || args === 'redeem ' + credit) result = { text: 'Redeem one banked reset? This consumes one reset for the Codex account used by this worker, including its other sessions.', usage_menu: { options: [{ args: 'confirm ' + confirmation, label: 'Redeem this reset', description: 'This action cannot be undone.' }, cancel] } };
+            else if (args === 'resets') result = { text: 'Banked resets: 1\nWeekly reset · Expires 2030-10-01 00:00 UTC', usage_menu: { options: [{ args: 'redeem ' + credit, label: 'Weekly reset', description: 'Expires 2030-10-01 00:00 UTC' }, back, cancel] } };
+            else if (['daily', 'weekly', 'cumulative'].includes(args)) result = { text: args + ' token activity: 12,345 tokens', usage_menu: { options: [back, cancel] } };
+            else result = { text: 'Codex usage\nBanked resets: 1', usage_menu: { options: [
+              { args: 'daily', label: 'Daily token activity' }, { args: 'weekly', label: 'Weekly token activity' },
+              { args: 'cumulative', label: 'Cumulative token activity' }, { args: 'resets', label: 'View banked resets' }, cancel,
+            ] } };
+          }
           else result = { text: name === 'permissions' ? 'Permissions updated: ' + args : '/' + name + (args ? ' ' + args : '') + ' completed.' };
         }
         else if (frame.method === 'turn/start') {
@@ -1122,11 +1137,98 @@ turns['thread-d'] = [{ id: 'short-d', status: 'completed', startedAt: now - 500,
     assert.match(await page.locator('#command-content').textContent(), /Setting rejected by runtime/);
     assert.equal(await page.locator('#prompt').inputValue(), '/permissions read-only', 'A rejected setting preserves the command draft');
     assert.equal(await page.locator('#permissions').textContent(), 'Full access', 'A rejected permission setting leaves the confirmed status unchanged');
-    for (const command of ['/fast status', '/usage']) {
+    for (const command of ['/fast status']) {
       await page.locator('#prompt').fill(command); await page.locator('#send').click();
       await page.waitForFunction(() => !document.querySelector('#show-commands').disabled && document.querySelector('#command-content').textContent.includes('completed.'));
       assert.equal(await page.locator('#command-panel').isVisible(), true, command + ' keeps read-only output open');
     }
+    const usageChoice = name => page.locator('#command-content').getByRole('button', { name, exact: false });
+    const openUsage = async (args = '') => {
+      await page.locator('#prompt').fill('/usage' + (args ? ' ' + args : '')); await page.locator('#send').click();
+      await page.waitForFunction(() => !document.querySelector('#show-commands').disabled && document.querySelector('#command-content .command-choice'));
+    };
+    const openUsageConfirmation = async () => {
+      await openUsage('resets');
+      await usageChoice('Weekly reset').click(); await usageChoice('Redeem this reset').waitFor();
+      await page.waitForFunction(() => !document.querySelector('#show-commands').disabled);
+    };
+    const usageRedemptions = () => page.evaluate(() => window.testSent.filter(frame => frame.method === 'gateway/command' && frame.params.name === 'usage' && /^confirm\s/.test(frame.params.args)).length);
+    const usageCancellations = () => page.evaluate(() => window.testSent.filter(frame => frame.method === 'gateway/command' && frame.params.name === 'usage' && frame.params.args === 'cancel').length);
+    await openUsage();
+    assert.match(await page.locator('#command-content').textContent(), /Banked resets: 1/, 'Usage exposes the banked reset balance');
+    for (const period of ['Daily', 'Weekly', 'Cumulative']) {
+      await usageChoice(period + ' token activity').click();
+      await page.waitForFunction(period => document.querySelector('#command-content').textContent.includes(period.toLowerCase() + ' token activity: 12,345'), period);
+      await usageChoice('Back to usage').click(); await usageChoice('View banked resets').waitFor();
+    }
+    await usageChoice('View banked resets').click();
+    await page.waitForFunction(() => document.querySelector('#command-content').textContent.includes('Expires 2030-10-01'));
+    assert.equal(await usageRedemptions(), 0, 'Browsing usage and reset details cannot redeem a credit');
+    await usageChoice('Weekly reset').click();
+    await usageChoice('Redeem this reset').waitFor();
+    await page.waitForFunction(() => document.activeElement?.classList.contains('command-choice') && document.activeElement.textContent.includes('Cancel'));
+    assert.match(await page.locator('#command-content').textContent(), /including its other sessions/, 'Confirmation explains the account-wide scope');
+    await page.evaluate(() => { window.testHoldCommand = true; delete window.testSockets.at(-1).heldCommand; });
+    await page.keyboard.press('Enter');
+    await page.waitForFunction(() => Boolean(window.testSockets.at(-1).heldCommand));
+    assert.equal(await usageCancellations(), 1, 'Cancel explicitly revokes pending reset choices through the worker');
+    assert.equal(await page.locator('#command-panel').isVisible(), true, 'The usage menu stays visible until cancellation is acknowledged');
+    await page.evaluate(() => {
+      const socket = window.testSockets.at(-1); window.testHoldCommand = false;
+      socket.emit({ id: socket.heldCommand.id, result: { text: 'Usage menu closed. No reset was redeemed.' } });
+    });
+    await page.waitForFunction(() => document.querySelector('#command-panel').hidden && !document.querySelector('#show-commands').disabled);
+    assert.equal(await page.locator('#command-panel').isHidden(), true, 'Enter defaults to cancelling a banked-reset confirmation');
+    assert.equal(await usageRedemptions(), 0, 'Cancelling cannot consume a credit');
+    await openUsageConfirmation(); await page.keyboard.press('Escape');
+    await usageChoice('Weekly reset').waitFor();
+    assert.equal(await usageRedemptions(), 0, 'Escape returns to reset details without redemption');
+    await openUsageConfirmation();
+    await usageChoice('Redeem this reset').evaluate(button => { window.staleUsageConfirm = button; });
+    await choose('b'); await page.evaluate(() => window.staleUsageConfirm.click());
+    assert.equal(await usageRedemptions(), 0, 'A confirmation from another session cannot redeem for the new worker account');
+    await page.evaluate(() => { window.testHoldLimits = true; });
+    await choose('a');
+    await page.waitForFunction(() => Boolean(window.testSockets.at(-1).heldLimits));
+    await openUsageConfirmation();
+    const limitsBeforeRedemption = await page.evaluate(() => window.testSent.filter(frame => frame.method === 'account/rateLimits/read').length);
+    await page.evaluate(() => { window.testHoldCommand = true; delete window.testSockets.at(-1).heldCommand; });
+    await usageChoice('Redeem this reset').click();
+    await page.waitForFunction(() => Boolean(window.testSockets.at(-1).heldCommand));
+    await page.evaluate(() => window.staleUsageConfirm.click());
+    assert.equal(await usageRedemptions(), 1, 'Only one explicit confirmation is submitted while redemption is pending');
+    await page.evaluate(() => {
+      const socket = window.testSockets.at(-1); window.testHoldCommand = false; window.testUsageRedeemed = true; window.testHoldLimits = false;
+      socket.emit({ id: socket.heldCommand.id, result: { text: 'Banked reset redeemed. Your account limits have been refreshed.' } });
+    });
+    await page.waitForFunction(() => document.querySelector('#command-content').textContent.includes('Banked reset redeemed.') && !document.querySelector('#show-commands').disabled);
+    assert.equal(await page.locator('#command-panel').isVisible(), true, 'Redemption results remain visible');
+    await page.waitForFunction(() => document.querySelector('#rate-limits').textContent.includes('5h 100% left'));
+    assert.equal(await page.evaluate(() => window.testSent.filter(frame => frame.method === 'account/rateLimits/read').length), limitsBeforeRedemption + 1, 'A completed confirmation triggers one read-only status refresh');
+    await page.evaluate(rateLimits => {
+      const socket = window.testSockets.at(-1); socket.emit({ id: socket.heldLimits.id, result: { rateLimits } });
+    }, rateLimits);
+    assert.match(await page.locator('#rate-limits').textContent(), /5h 100% left/, 'A slow pre-redemption bootstrap read cannot overwrite refreshed account limits');
+    const usageViewport = page.viewportSize(); await page.setViewportSize({ width: 390, height: 844 });
+    await openUsageConfirmation();
+    assert.equal(await usageChoice('Cancel').getAttribute('data-active'), 'true', 'Mobile confirmation also defaults to Cancel');
+    const usageBounds = await page.locator('#command-panel').boundingBox();
+    assert.ok(usageBounds.x >= 0 && usageBounds.x + usageBounds.width <= 391, 'The usage confirmation fits the mobile viewport');
+    await usageChoice('Cancel').click();
+    await page.waitForFunction(() => document.querySelector('#command-panel').hidden && !document.querySelector('#show-commands').disabled);
+    assert.equal(await usageCancellations(), 2, 'Mobile Cancel also revokes pending reset choices');
+    assert.equal(await usageRedemptions(), 1, 'Mobile cancellation does not redeem');
+    await page.setViewportSize(usageViewport); await openUsageConfirmation();
+    await page.evaluate(() => { window.testDropCommand = true; });
+    await usageChoice('Redeem this reset').click();
+    await page.waitForFunction(() => document.querySelector('#command-content').textContent.includes('No input was resent'));
+    assert.match(await page.locator('#command-content').textContent(), /Reopen \/usage resets/, 'An uncertain redemption points to the balance instead of inviting a blind retry');
+    const redemptionsBeforeReconnect = await usageRedemptions();
+    await page.evaluate(() => { window.testDropCommand = false; window.testUsageRedeemed = false; });
+    await page.clock.fastForward(1500); await connected();
+    assert.equal(await usageRedemptions(), redemptionsBeforeReconnect, 'A lost redemption acknowledgement is never replayed on reconnect');
+    assert.equal(await usageCancellations(), 2, 'Reconnect does not replay cancellation requests');
+    await page.getByRole('button', { name: 'Close command menu', exact: true }).click();
     for (const command of ['/plan on', '/plan off', '/fast off', '/personality friendly', '/memories enabled', '/approvals on-request', '/goal pause']) {
       await page.locator('#prompt').fill(command); await page.locator('#send').click();
       await page.waitForFunction(() => document.querySelector('#command-panel').hidden && !document.querySelector('#show-commands').disabled);
@@ -2273,7 +2375,7 @@ turns['thread-d'] = [{ id: 'short-d', status: 'completed', startedAt: now - 500,
     assert.equal(await page.evaluate(() => Object.keys(sessionStorage).length), 0);
     assert.ok(paths.every(value => value.startsWith('/tgw/')), 'All gateway routes use /tgw');
     assert.deepEqual(errors, []);
-    console.log('Web UI browser checks passed: Mermaid live-update state/session/auth cleanup, slash autocomplete and CLI choices with keyboard/touch/current markers, successful setting auto-close without mobile autofocus, errors/read-only results remain visible, typed worker and gateway commands without a session, permission confirmation/stale-button isolation, unavailable commands never become prompts, native and global v2 model/effort changes with inventory/resume/command-ack isolation, read-only model status, clipboard images/text+image/image-only/image steering/idle and rejection preservation/per-session drafts/navigation races/no replay, tool colors in both themes, safe formatting/nonempty reasoning/native sub-agent activity, chronology/pagination, independent global activity events/sequence gaps/resync/heartbeat and handshake recovery/inventory races, static Working label plus matching green activity pulse/reduced motion, worker heading background/compact Settings footer/dialog/desktop/mobile/keyboard/focus, desktop font controls/persistence/mobile isolation, full-width responsive status, live quotas/reset tooltips/no polling/session isolation/unavailable fallback, responsive layout and bottom following through late layout changes, keyboard resize/pan/page scroll/delayed focus/dismissal/mobile menu without autofocus, native inner scrolling, blocking/async questions, rejected-answer recovery, approvals, live external prompts, session isolation, disconnect/reconnect, prompt and command drafts/no replay, scoped connection/history/retry error recovery without hiding uncertain-send or runtime warnings, ACK-only ephemeral queued-steer feedback/timer/switch/end/rejection/isolation, mobile status grid alignment/empty rows/compact horizontal Stop and Steer/multiline input, failed resume, sidebar deletion confirmation/desktop/mobile/cancel/CSRF/scope/delayed result/failure/lost acknowledgement/unknown outcome/no POST replay, idle heartbeat, auth expiry.');
+    console.log('Web UI browser checks passed: banked-reset usage views/keyboard/mobile/default-cancel/account confirmation/stale-button isolation/status refresh/lost-ack no-replay, Mermaid live-update state/session/auth cleanup, slash autocomplete and CLI choices with keyboard/touch/current markers, successful setting auto-close without mobile autofocus, errors/read-only results remain visible, typed worker and gateway commands without a session, permission confirmation/stale-button isolation, unavailable commands never become prompts, native and global v2 model/effort changes with inventory/resume/command-ack isolation, read-only model status, clipboard images/text+image/image-only/image steering/idle and rejection preservation/per-session drafts/navigation races/no replay, tool colors in both themes, safe formatting/nonempty reasoning/native sub-agent activity, chronology/pagination, independent global activity events/sequence gaps/resync/heartbeat and handshake recovery/inventory races, static Working label plus matching green activity pulse/reduced motion, worker heading background/compact Settings footer/dialog/desktop/mobile/keyboard/focus, desktop font controls/persistence/mobile isolation, full-width responsive status, live quotas/reset tooltips/no polling/session isolation/unavailable fallback, responsive layout and bottom following through late layout changes, keyboard resize/pan/page scroll/delayed focus/dismissal/mobile menu without autofocus, native inner scrolling, blocking/async questions, rejected-answer recovery, approvals, live external prompts, session isolation, disconnect/reconnect, prompt and command drafts/no replay, scoped connection/history/retry error recovery without hiding uncertain-send or runtime warnings, ACK-only ephemeral queued-steer feedback/timer/switch/end/rejection/isolation, mobile status grid alignment/empty rows/compact horizontal Stop and Steer/multiline input, failed resume, sidebar deletion confirmation/desktop/mobile/cancel/CSRF/scope/delayed result/failure/lost acknowledgement/unknown outcome/no POST replay, idle heartbeat, auth expiry.');
   } catch (error) {
     if (process.env.WEBUI_SCREENSHOTS) {
       fs.mkdirSync(process.env.WEBUI_SCREENSHOTS, { recursive: true });

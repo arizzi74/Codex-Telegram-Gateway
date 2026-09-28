@@ -9,6 +9,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
+	"unicode"
+	"unicode/utf8"
+
+	"github.com/google/uuid"
 )
 
 type EffectiveConfig struct {
@@ -68,6 +73,12 @@ type TokenUsage struct {
 	LongestRunningTurn  *int64
 	ThreadCreditsMicros *int64
 	ThreadUSDMicros     *int64
+	DailyUsageBuckets   []UsageBucket
+}
+
+type UsageBucket struct {
+	StartDate string `json:"startDate"`
+	Tokens    int64  `json:"tokens"`
 }
 
 func (c *Client) ReadTokenUsage(ctx context.Context, threadID string) (TokenUsage, error) {
@@ -83,6 +94,7 @@ func (c *Client) ReadTokenUsage(ctx context.Context, threadID string) (TokenUsag
 			CreditsMicros int64  `json:"estimatedUsageCreditsMicros"`
 			USDMicros     *int64 `json:"estimatedUsageUsdMicros"`
 		} `json:"threadUsage"`
+		DailyUsageBuckets []UsageBucket `json:"dailyUsageBuckets"`
 	}
 	params := map[string]any{}
 	if threadID != "" {
@@ -92,6 +104,7 @@ func (c *Client) ReadTokenUsage(ctx context.Context, threadID string) (TokenUsag
 		return TokenUsage{}, err
 	}
 	usage := TokenUsage{LifetimeTokens: reply.Summary.LifetimeTokens, PeakDailyTokens: reply.Summary.PeakDailyTokens, CurrentStreakDays: reply.Summary.CurrentStreakDays, LongestStreakDays: reply.Summary.LongestStreakDays, LongestRunningTurn: reply.Summary.LongestRunningTurn}
+	usage.DailyUsageBuckets = reply.DailyUsageBuckets
 	if reply.ThreadUsage != nil {
 		usage.ThreadCreditsMicros = &reply.ThreadUsage.CreditsMicros
 		usage.ThreadUSDMicros = reply.ThreadUsage.USDMicros
@@ -106,30 +119,67 @@ type RateLimitWindow struct {
 }
 
 type RateLimits struct {
+	// AccountID pins explicit reset confirmation to the account that supplied
+	// the snapshot. It is internal bookkeeping, not display metadata.
+	AccountID            string `json:"-"`
 	PlanType             string
 	OrdinaryUsageAllowed *bool
 	Primary              *RateLimitWindow
 	Secondary            *RateLimitWindow
+	ResetCredits         *RateLimitResetCredits
+}
+
+// RateLimitResetCredits is distinct from purchased workspace credits. The
+// count is authoritative: detail rows can be unavailable or capped upstream.
+type RateLimitResetCredits struct {
+	AvailableCount int                    `json:"availableCount"`
+	Credits        []RateLimitResetCredit `json:"credits"`
+}
+
+type RateLimitResetCredit struct {
+	ID          string `json:"id"`
+	ResetType   string `json:"resetType"`
+	Status      string `json:"status"`
+	GrantedAt   int64  `json:"grantedAt"`
+	ExpiresAt   *int64 `json:"expiresAt"`
+	Title       string `json:"title"`
+	Description string `json:"description"`
 }
 
 func (c *Client) ReadRateLimits(ctx context.Context) (RateLimits, error) {
+	return c.readRateLimits(ctx, true)
+}
+
+// ReadUsageRateLimits requests reset details only for the explicit /usage
+// flow. Background status reads continue to use the lightweight endpoint.
+func (c *Client) ReadUsageRateLimits(ctx context.Context) (RateLimits, error) {
+	return c.readRateLimits(ctx, false)
+}
+
+func (c *Client) readRateLimits(ctx context.Context, excludeResetCreditDetails bool) (RateLimits, error) {
 	type window struct {
 		UsedPercent int    `json:"usedPercent"`
 		Duration    *int64 `json:"windowDurationMins"`
 		ResetsAt    *int64 `json:"resetsAt"`
 	}
 	var reply struct {
-		OrdinaryUsageAllowed *bool `json:"ordinaryUsageAllowed"`
+		AccountID            string `json:"accountId"`
+		OrdinaryUsageAllowed *bool  `json:"ordinaryUsageAllowed"`
 		RateLimits           struct {
 			PlanType  string  `json:"planType"`
 			Primary   *window `json:"primary"`
 			Secondary *window `json:"secondary"`
 		} `json:"rateLimits"`
+		ResetCredits *RateLimitResetCredits `json:"rateLimitResetCredits"`
 	}
-	if err := c.request(ctx, "account/rateLimits/read", map[string]any{"excludeResetCreditDetails": true}, &reply, false); err != nil {
+	if err := c.request(ctx, "account/rateLimits/read", map[string]any{"excludeResetCreditDetails": excludeResetCreditDetails}, &reply, false); err != nil {
 		return RateLimits{}, err
 	}
 	result := RateLimits{PlanType: reply.RateLimits.PlanType, OrdinaryUsageAllowed: reply.OrdinaryUsageAllowed}
+	if !excludeResetCreditDetails {
+		result.AccountID = reply.AccountID
+		result.ResetCredits = reply.ResetCredits
+	}
 	if reply.RateLimits.Primary != nil {
 		w := reply.RateLimits.Primary
 		result.Primary = &RateLimitWindow{UsedPercent: w.UsedPercent, WindowDurationMins: w.Duration, ResetsAt: w.ResetsAt}
@@ -139,6 +189,49 @@ func (c *Client) ReadRateLimits(ctx context.Context) (RateLimits, error) {
 		result.Secondary = &RateLimitWindow{UsedPercent: w.UsedPercent, WindowDurationMins: w.Duration, ResetsAt: w.ResetsAt}
 	}
 	return result, nil
+}
+
+// ConsumeRateLimitResetCredit submits exactly one already-confirmed attempt.
+// Callers must retain the same key for retries; this method never retries or
+// creates a key. An empty creditID lets the service select the next credit.
+func (c *Client) ConsumeRateLimitResetCredit(ctx context.Context, idempotencyKey, creditID string) (string, error) {
+	key, err := uuid.Parse(idempotencyKey)
+	if err != nil || key == uuid.Nil || key.String() != idempotencyKey {
+		return "", errors.New("reset idempotency key must be a canonical UUID")
+	}
+	if creditID != "" && (len(creditID) > 4096 || !utf8.ValidString(creditID) || strings.TrimSpace(creditID) != creditID || strings.IndexFunc(creditID, unicode.IsControl) >= 0) {
+		return "", errors.New("invalid reset credit identifier")
+	}
+	params := map[string]any{"idempotencyKey": idempotencyKey}
+	if creditID != "" {
+		params["creditId"] = creditID
+	}
+	var reply resetCreditConsumeResponse
+	if err := c.request(ctx, "account/rateLimitResetCredit/consume", params, &reply, false); err != nil {
+		return "", err
+	}
+	return reply.Outcome, nil
+}
+
+type resetCreditConsumeResponse struct {
+	Outcome string `json:"outcome"`
+}
+
+// Validate inside request decoding so an unknown or malformed result remains
+// an unconfirmed mutation for update safety, rather than an assumed success.
+func (r *resetCreditConsumeResponse) UnmarshalJSON(data []byte) error {
+	fields, ok := uniqueJSONObject(data)
+	var outcome string
+	if !ok || json.Unmarshal(fields["outcome"], &outcome) != nil {
+		return errors.New("invalid reset redemption response")
+	}
+	switch outcome {
+	case "reset", "alreadyRedeemed", "nothingToReset", "noCredit":
+		r.Outcome = outcome
+		return nil
+	default:
+		return errors.New("unrecognized reset redemption outcome; refresh usage before another attempt")
+	}
 }
 
 type ModelInfo struct {

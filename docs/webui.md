@@ -105,7 +105,8 @@ The catalog recognizes the user-facing slash-command names and aliases in offici
 | --- | --- |
 | `/model`, `/reasoning` | Model and reasoning buttons, with changes applied through the worker to the selected session. |
 | `/permissions`, `/approvals` | Permission presets and approval-policy choices. Full Access retains the explicit second confirmation. |
-| `/status`, `/usage`, `/pwd` (`/cwd`), `/debug-config` | Read session configuration, context, account limits, working directory or effective settings. |
+| `/usage [daily\|weekly\|cumulative\|resets\|redeem]` | View token activity, account limits and banked resets; choose an available reset and confirm redemption. |
+| `/status`, `/pwd` (`/cwd`), `/debug-config` | Read session configuration, context, account limits, working directory or effective settings. |
 | `/new`, `/clear`, `/resume`, `/rename`, `/fork`, `/archive`, `/delete` | Create, browse, rename, fork, archive or delete sessions. New sessions use a named, existing allowed directory. Archive and delete ask for confirmation; deletion preserves working-directory files. |
 | `/review`, `/compact`, `/init` | Start a review, compact history or generate project instructions. |
 | `/plan`, `/fast`, `/personality`, `/memories`, `/goal` | Configure planning, service tier, communication style, session memory and goals using forms/buttons or inline arguments. |
@@ -122,6 +123,16 @@ The catalog recognizes the user-facing slash-command names and aliases in offici
 Some native features cannot be reproduced with the current browser/runtime bridge. These remain visible with an availability explanation: native IDE/desktop integration, voice transport, configuration import, managed worktree creation, native recap generation, temporary side conversations, child-agent switching, automatic-review retries, worker-account logout, diagnostics/feedback, terminal keymaps/Vim/pets, Windows sandbox setup and experimental configuration. `/cd` also remains a terminal operation: official Codex 0.156 reports live and saved working directories differently until another turn, so the browser does not change this security-sensitive setting. The menu does not claim to perform these actions. `/tgmultisession` belongs to a Telegram chat; use separate browser tabs for multiple web sessions. Internal debugging commands are recognized but hidden from normal suggestions.
 
 Worker commands use a typed, session-bound `gateway/command` bridge and reuse the worker’s existing command handlers. Requests are serialized with native session events and fenced against updater maintenance. Browser command results do not become Telegram command replies or alter Telegram’s selected session. New native turns and accepted user input keep their existing cross-client event behavior. Runtime commands depend on the selected worker/runtime supporting the operation; older workers need updating.
+
+The `/usage` choices work with touch and keyboard navigation. Banked-reset
+redemption requires a separate confirmation, with **Cancel** selected by default.
+A reset belongs to the selected worker's Codex account and can affect other
+sessions or workers using that account. The result stays visible and the status
+bar refreshes its allowances after a completed confirmation. Changing sessions
+invalidates old menu buttons. A lost response is never replayed on reconnect;
+reopen `/usage resets` to check the balance before attempting another redemption.
+Availability, eligibility and reset details depend on the installed official
+Codex runtime and the account's plan.
 
 Gateway maintenance commands use the passkey-protected API with exact Origin and CSRF validation. Repeated worker-update requests share a pending request; browser requests create no Telegram notification subscriptions. `/tgupdateworkers` checks both worker releases and the latest stable Codex runtime, reporting installed, running, and available versions. Updates retain the normal idle checks. Runtime updates restart app servers and their worker supervisor; when both versions are current, no restart is needed. Explicit runtime checks do not change the daily background schedule. Runtime reports require the v0.5.61 updater; repeat the command after upgrading an older updater.
 

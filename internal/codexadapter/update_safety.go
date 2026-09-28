@@ -182,7 +182,7 @@ func updateMethodName(method string) string {
 		return method
 	}
 	switch method {
-	case "initialize", "thread/start", "thread/resume", "turn/start", "turn/steer", "turn/interrupt", "thread/settings/update", "thread/compact/start", "thread/name/set", "thread/fork", "review/start", "thread/goal/set", "thread/goal/clear", "thread/backgroundTerminals/clean", "thread/archive", "thread/delete", "thread/memoryMode/set":
+	case "initialize", "thread/start", "thread/resume", "turn/start", "turn/steer", "turn/interrupt", "thread/settings/update", "thread/compact/start", "thread/name/set", "thread/fork", "review/start", "thread/goal/set", "thread/goal/clear", "thread/backgroundTerminals/clean", "thread/archive", "thread/delete", "thread/memoryMode/set", "account/rateLimitResetCredit/consume":
 		return method
 	default:
 		return "unknown"

@@ -65,8 +65,7 @@ func (s *sessionActor) executeCodexCommand(ctx context.Context, client *codexada
 		text, err := s.codexStatus(ctx, client)
 		return protocol.Result{Text: text}, err
 	case "usage":
-		text, err := codexUsage(ctx, client, s.session.ThreadID)
-		return protocol.Result{Text: text}, err
+		return s.codexUsageMenu(ctx, client, args)
 	case "model":
 		return s.codexModelMenu(ctx, client, args)
 	case "reasoning":
@@ -642,20 +641,6 @@ func (s *sessionActor) codexMemories(ctx context.Context, client *codexadapter.C
 	return "Memory mode set to " + mode + ".", nil
 }
 
-func codexUsage(ctx context.Context, client *codexadapter.Client, threadID string) (string, error) {
-	usage, err := client.ReadTokenUsage(ctx, threadID)
-	if err != nil {
-		return "", err
-	}
-	limits, limitErr := client.ReadRateLimits(ctx)
-	lines := append([]string{"Codex usage"}, tokenUsageLines(usage)...)
-	if limitErr == nil {
-		lines = append(lines, rateLimitLines(limits)...)
-	} else {
-		lines = append(lines, "Rate limits: unavailable ("+shortError(limitErr)+")")
-	}
-	return strings.Join(lines, "\n"), nil
-}
 func tokenUsageLines(u codexadapter.TokenUsage) []string {
 	var lines []string
 	if u.LifetimeTokens != nil {

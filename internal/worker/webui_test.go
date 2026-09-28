@@ -95,7 +95,7 @@ func TestWebUIRateLimitsReadRequiresResumeAndExcludesAccountDetails(t *testing.T
 			t.Fatalf("unsafe account option accepted: %s", params)
 		}
 	}
-	for _, method := range []string{"account/read", "account/login/start", "account/logout", "account/rateLimits/reset", "account/usage/read"} {
+	for _, method := range []string{"account/read", "account/login/start", "account/logout", "account/rateLimits/reset", "account/rateLimitResetCredit/consume", "account/usage/read"} {
 		if _, err := r.clientMessage([]byte(`{"id":1,"method":"` + method + `","params":{}}`)); err == nil {
 			t.Fatalf("unrelated account method allowed: %s", method)
 		}

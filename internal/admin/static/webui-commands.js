@@ -14,7 +14,7 @@
     command('model', 'Choose the model and reasoning effort', 'worker', '[model] [effort]'),
     command('permissions', 'Choose the permissions for this session', 'worker', '[read-only|workspace-write|full-access]', { busy: false }),
     command('status', 'Inspect session settings, context and account limits', 'worker'),
-    command('usage', 'View account usage and rate-limit resets', 'worker'),
+    command('usage', 'View token activity, account limits and banked resets', 'worker', '[daily|weekly|cumulative|resets|redeem]'),
     command('review', 'Review changes, a branch or a commit', 'worker', '[instructions]', { busy: false }),
     command('plan', 'View or change planning mode', 'worker', '[on|off]', { busy: false }),
     command('goal', 'View, set, pause or clear the current goal', 'worker', '[objective|pause|resume|clear]'),

@@ -930,21 +930,26 @@
       state.questionsStatus = 'error';
       sessionConnectionReady();
     });
-    const limitRevision = rateLimitRevision;
-    const limitEpoch = rateLimitEpoch;
-    if (!rateLimitSnapshot) $('rate-limits').textContent = 'Loading limits…';
-    rpc('account/rateLimits/read', {}).then(result => {
-      if (!current() || limitEpoch !== rateLimitEpoch) return;
-      const snapshot = result?.rateLimitsByLimitId?.codex || result?.rateLimits;
-      updateRateLimits(!snapshot?.limitId || snapshot.limitId === 'codex' ? snapshot : null, limitRevision !== rateLimitRevision);
-    }).catch(() => {
-      if (current() && limitRevision === rateLimitRevision) clearRateLimits('Limits unavailable');
-    });
+    refreshRateLimits();
     rpc('model/list', {}).then(result => {
       if (!current()) return;
       state.models = result?.data || result?.models || [];
       renderModels(); updateControls();
     }).catch(() => { /* Session defaults remain usable if this runtime has no model listing. */ });
+  }
+  function refreshRateLimits() {
+    // A newer explicit refresh also supersedes an older bootstrap read. Live
+    // quota events still take precedence over either in-flight snapshot.
+    const generation = state.generation, limitRevision = rateLimitRevision, limitEpoch = ++rateLimitEpoch;
+    const current = () => generation === state.generation && state.connected && state.authenticated && limitEpoch === rateLimitEpoch;
+    if (!rateLimitSnapshot) $('rate-limits').textContent = 'Loading limits…';
+    rpc('account/rateLimits/read', {}).then(result => {
+      if (!current()) return;
+      const snapshot = result?.rateLimitsByLimitId?.codex || result?.rateLimits;
+      updateRateLimits(!snapshot?.limitId || snapshot.limitId === 'codex' ? snapshot : null, limitRevision !== rateLimitRevision);
+    }).catch(() => {
+      if (current() && limitRevision === rateLimitRevision) clearRateLimits('Limits unavailable');
+    });
   }
   function rememberTurns(turns) {
     for (const turn of turns) turnTimes.set(turn.id, { id: turn.id, startedAt: turn.startedAt, status: turn.status });
@@ -1498,6 +1503,10 @@
     } finally { clearTimeout(timeout); if (gatewayCommandAbort === controller) gatewayCommandAbort = null; }
   }
   async function applyCommandResult(name, args, result, settingsBeforeCommand) {
+    // A confirmed redemption can change this account's allowances even when
+    // the runtime does not publish a quota event. Refresh once, without ever
+    // retrying the account mutation or delaying its visible result.
+    if (name === 'usage' && /^confirm\s/.test(args) && !result.error) refreshRateLimits();
     if (result.turn_id) { state.turn = result.turn_id; updateControls(); }
     if (result.session && ['new', 'fork'].includes(name)) {
       const generation = state.generation;

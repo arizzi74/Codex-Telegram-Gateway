@@ -241,6 +241,7 @@ type EventAck struct {
 }
 
 type Result struct {
+	UsageMenu   *UsageMenu      `json:"usage_menu,omitempty"`
 	ModelMenu   *ModelMenu      `json:"model_menu,omitempty"`
 	Permissions *PermissionMenu `json:"permissions,omitempty"`
 	Workspace   *WorkspacePage  `json:"workspace,omitempty"`

@@ -107,7 +107,7 @@ becoming model prompts.
 | Command | Telegram behavior |
 | --- | --- |
 | `/status` | Session model, reasoning, workspace, recorded context and token counts, configuration defaults and account limits. Historical counters and policies are labeled as recorded values. |
-| `/usage` | Account usage and rate limits reported by Codex. |
+| `/usage [daily\|weekly\|cumulative\|resets\|redeem]` | Account limits, token activity and banked reset details, with buttons to redeem an available reset after confirmation. |
 | `/model [MODEL [EFFORT]]` | Open model buttons followed by reasoning-effort buttons, or update the session model directly. |
 | `/reasoning [EFFORT]` | Inspect or change reasoning effort. |
 | `/permissions` | Open buttons for the session's Codex permission presets and allowed custom profiles. |
@@ -144,6 +144,17 @@ apply both settings together. **Back to models** returns to the model list and
 turn; wait for it to finish before applying a change. The menu stays tied to the
 session where you opened it, even if you select another session before answering.
 Text shortcuts such as `/model MODEL high` and `/reasoning high` remain available.
+
+The `/usage` menu includes daily, weekly and cumulative token activity, plus
+the banked resets reported by the selected worker's Codex account. Reset details
+include availability and expiry when the runtime provides them. **View banked
+resets** opens the reset picker; choosing a reset requires a separate confirmation.
+`/usage redeem` opens confirmation for the next available reset. Viewing the menu
+or cancelling does not use a reset. Redemption affects the Codex account, including other sessions
+and workers signed in to that account. An interrupted redemption is not retried
+automatically; reopen `/usage resets` to check the current balance before trying
+again. Older runtimes or accounts without this feature show its availability
+instead of offering an unsupported action.
 
 The `/permissions` menu offers **Ask for approval**, **Full Access**, and
 **Read Only**, subject to the runtime's managed requirements. **Approve for me**

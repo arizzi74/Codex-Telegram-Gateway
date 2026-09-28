@@ -56,7 +56,7 @@ var codex = []Command{
 	{"stop", "Codex: stop background terminals"},
 	{"clean", "Codex: alias for stopping background terminals"},
 	{"copy", "Codex: show the last response"},
-	{"usage", "Codex: inspect account usage limits"},
+	{"usage", "Codex: usage limits and banked resets"},
 	{"rollout", "Codex: local transcript location instructions"},
 	{"agent", "Codex: select an agent session"},
 	{"subagents", "Codex: select an agent session"},

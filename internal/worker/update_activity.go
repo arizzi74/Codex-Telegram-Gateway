@@ -670,7 +670,7 @@ func nativeSynchronousRequest(method string) bool {
 		"model/list", "modelProvider/capabilities/read", "collaborationMode/list", "experimentalFeature/list", "permissionProfile/list", "experimentalFeature/enablement/set",
 		"config/read", "config/value/write", "config/batchWrite", "configRequirements/read", "config/mcpServer/reload", "skills/list", "skills/config/write", "skills/extraRoots/set", "hooks/list",
 		"plugin/list", "plugin/search", "plugin/installed", "plugin/read", "plugin/skill/read", "plugin/share/list", "app/list", "app/read", "app/installed", "mcpServerStatus/list", "mcpServer/resource/read",
-		"account/read", "account/rateLimits/read", "account/usage/read", "account/workspaceMessages/read", "account/login/cancel", "account/logout",
+		"account/read", "account/rateLimits/read", "account/usage/read", "account/workspaceMessages/read", "account/login/cancel", "account/logout", "account/rateLimitResetCredit/consume",
 		"project/list", "project/read", "project/create", "project/update", "project/move", "project/delete", "threadSection/list", "threadSection/create", "threadSection/update", "threadSection/delete",
 		"fs/readFile", "fs/writeFile", "fs/createDirectory", "fs/getMetadata", "fs/readDirectory", "fs/remove", "fs/copy", "fs/watch", "fs/unwatch",
 		"command/exec", "command/exec/write", "command/exec/resize", "command/exec/terminate", "process/writeStdin", "process/kill", "process/resizePty",

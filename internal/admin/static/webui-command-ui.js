@@ -276,7 +276,13 @@
     }
     function worker(name, args = '', original = '') {
       const settingsCheckpoint = ctx.settingsCheckpoint?.();
-      return perform('/' + name, () => ctx.rpc('gateway/command', { name, args }, 60000), async result => {
+      return perform('/' + name, async () => {
+        try { return await ctx.rpc('gateway/command', { name, args }, 60000); }
+        catch (error) {
+          if (name === 'usage' && /^confirm\s/.test(args)) throw new Error((error.message || 'The redemption result could not be confirmed.') + ' Reopen /usage resets to check the balance before trying again. This request will not be resent automatically.');
+          throw error;
+        }
+      }, async result => {
         consume(original);
         const generation = state.generation, ticket = epoch;
         await ctx.applyResult(name, args, result, settingsCheckpoint);
@@ -284,7 +290,8 @@
         if (result.session && ['new', 'fork'].includes(name)) { close(); return; }
         // Menus and confirmations remain until the worker accepts the final
         // selection. Closing without focus also keeps mobile keyboards closed.
-        if (!result.permissions && !result.model_menu && settingChange(name, args)) { close(); return; }
+        if (name === 'usage' && args === 'cancel' && !result.usage_menu) { close(); return; }
+        if (!result.permissions && !result.model_menu && !result.usage_menu && settingChange(name, args)) { close(); return; }
         if (result.text) text(result.text);
         if (result.permissions) {
           const options = result.permissions.options || [];
@@ -301,7 +308,15 @@
           for (const option of options) button(option.label, () => option.args === '--cancel' ? close(true) : worker('model', option.args === '--menu' ? '' : option.args), '', { current: currentModelOption(option.args) });
           if (reasoning && !options.some(option => option.args === '--menu')) button('Back to models', menuBack);
         }
-        if (!result.text && !result.permissions && !result.model_menu) text('Command completed.');
+        if (result.usage_menu) {
+          const options = result.usage_menu.options || [];
+          const confirmation = options.some(option => /^confirm\s/.test(option.args));
+          if (confirmation) menuBack = () => worker('usage', 'resets');
+          else if (args && args !== '--menu') menuBack = () => worker('usage', '--menu');
+          for (const option of options) button(option.label, () => worker('usage', option.args), option.description || '',
+            { preferred: confirmation && option.args === 'cancel' });
+        }
+        if (!result.text && !result.permissions && !result.model_menu && !result.usage_menu) text('Command completed.');
       });
     }
     function choices(name, description, values) {
