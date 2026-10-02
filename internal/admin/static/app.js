@@ -12,6 +12,11 @@ let rotationPending = false;
 let sessionAuth = null;
 let dashboard = null;
 let sessionPage = 0;
+// Enrollment URLs exist only in this open dialog, never in browser storage.
+let workerEnrollment = null;
+let enrollmentBusy = false;
+let enrollmentSequence = 0;
+let enrollmentTimer = null;
 // Only the built-in web interface and a single canonical session link are
 // allowed after login. Never turn notification links into an open redirect.
 const requestedReturn = new URLSearchParams(location.search).get('next') || '';
@@ -158,6 +163,7 @@ function lockConsole(reason) {
   authenticated = false;
   dashboard = null;
   reloadPending = false;
+  closeWorkerEnrollment();
   $('console').hidden = true;
   $('logout').hidden = true;
   $('auth').hidden = false;
@@ -429,19 +435,149 @@ async function load(includeKeys = true) {
   }
 }
 function showToken(workerID, token) {
-  prompt('Worker ID: ' + workerID + '\n\nThe worker installer needs this ID and the enrollment token below. Copy this token now; it will not be shown again:', token);
+  prompt('Worker ID: ' + workerID + '\n\nCopy this replacement token now; it will not be shown again. Update the worker’s private token file and restart its service:', token);
+}
+function clearEnrollmentLink() {
+  $('enrollment-link').hidden = true;
+  $('enrollment-url').value = '';
+  $('enrollment-code').textContent = '';
+  $('enrollment-copy-status').textContent = '';
+}
+function updateEnrollment() {
+  const remaining = workerEnrollment ? Math.max(0, Math.ceil((workerEnrollment.expiresAt - Date.now()) / 1000)) : 0;
+  if (workerEnrollment && !remaining) {
+    workerEnrollment.usable = false;
+    workerEnrollment.url = '';
+    clearEnrollmentLink();
+    if (!enrollmentBusy) $('enrollment-status').textContent = 'This URL has expired. Create a new URL to continue.';
+  } else if (workerEnrollment?.usable && !enrollmentBusy) {
+    $('enrollment-status').textContent = `Use once · expires in ${Math.floor(remaining / 60)}:${String(remaining % 60).padStart(2, '0')}`;
+  }
+  for (const id of ['enrollment-access', 'enrollment-new', 'enrollment-cancel', 'enrollment-close']) $(id).disabled = enrollmentBusy;
+  $('enrollment-copy').disabled = enrollmentBusy || !workerEnrollment?.usable || !remaining;
+}
+function closeWorkerEnrollment() {
+  enrollmentSequence++;
+  enrollmentBusy = false;
+  workerEnrollment = null;
+  clearInterval(enrollmentTimer);
+  enrollmentTimer = null;
+  clearEnrollmentLink();
+  $('enrollment-error').hidden = true;
+  $('enrollment-status').textContent = '';
+  if ($('worker-enrollment').open) $('worker-enrollment').close();
+}
+async function enrollmentCall(path, opts, current) {
+  await sessionAuth.ensureFresh();
+  if (!current() || !authenticated) throw new Error('Sign in again, then create a new URL.');
+  const epoch = authEpoch;
+  try {
+    const result = await call(path, { ...opts, cache: 'no-store', signal: AbortSignal.timeout(20000) });
+    if (!current() || epoch !== authEpoch || !authenticated) throw new Error('Your sign-in changed. Create a new URL to continue.');
+    return result;
+  } catch (error) {
+    // Even a confirmed fresh-auth rejection requires a deliberate new action.
+    // A network error can mean the mutation succeeded: never replay it here.
+    if (error.status === 403 && error.code === 'reauthentication_required') {
+      await sessionAuth.login();
+      throw new Error('Passkey confirmed. Choose Create new URL or Cancel and revoke to try again.');
+    }
+    throw error;
+  }
+}
+async function runEnrollment(action) {
+  if (enrollmentBusy) return;
+  const sequence = ++enrollmentSequence;
+  const current = () => sequence === enrollmentSequence && $('worker-enrollment').open;
+  enrollmentBusy = true;
+  $('enrollment-error').hidden = true;
+  $('enrollment-copy-status').textContent = '';
+  updateEnrollment();
+  try { await action(current); } catch (error) {
+    if (current()) {
+      if (error.status === 401) { sessionAuth.expire('Your session expired. Continue with your passkey.'); return; }
+      $('enrollment-error').textContent = error.status === 403 && error.code !== 'reauthentication_required'
+        ? 'Access denied. Sign in again before retrying.' : error.message || 'The request failed. Choose an action to try again.';
+      $('enrollment-error').hidden = false;
+      $('enrollment-status').textContent = workerEnrollment
+        ? 'The previous URL may still be valid until it is used or expires. Retry revocation before creating another URL.'
+        : 'No URL is available. A failed request may have completed; any URL it created expires within 10 minutes. Choose Create new URL to try again.';
+    }
+  } finally {
+    if (current()) { enrollmentBusy = false; updateEnrollment(); }
+  }
+}
+async function revokeEnrollment(current) {
+  if (!workerEnrollment) return;
+  workerEnrollment.usable = false;
+  workerEnrollment.url = '';
+  clearEnrollmentLink();
+  if (workerEnrollment.expiresAt > Date.now()) {
+    $('enrollment-status').textContent = 'Revoking the previous URL…';
+    try { await enrollmentCall('/worker-enrollments/' + workerEnrollment.id, { method: 'DELETE', body: '{}' }, current); } catch (error) {
+      // A consumed URL is no longer an unused enrollment. This confirmed
+      // absence is safe to replace; an uncertain failure still stops here.
+      if (error.status !== 404) throw error;
+    }
+  }
+  workerEnrollment = null;
+}
+async function createEnrollment(current) {
+  await revokeEnrollment(current);
+  $('enrollment-status').textContent = 'Creating your one-use URL…';
+  const access = $('enrollment-access').value;
+  const result = await enrollmentCall('/worker-enrollments', { method: 'POST', body: JSON.stringify({ service_access: access }) }, current);
+  const validID = typeof result?.enrollment_id === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(result.enrollment_id) && result.enrollment_id !== '00000000-0000-0000-0000-000000000000';
+  const expiresAt = Date.parse(result?.expires_at);
+  if (validID) workerEnrollment = { id: result.enrollment_id, expiresAt: Number.isFinite(expiresAt) ? expiresAt : Date.now() + 600000, usable: false, url: '' };
+  const enrollmentURL = result?.enrollment_url;
+  let url;
+  try { url = new URL(enrollmentURL); } catch (_) { /* Invalid responses stay out of the dialog. */ }
+  if (!validID || !Number.isFinite(expiresAt) || expiresAt <= Date.now() || result.service_access !== access || !url ||
+      typeof enrollmentURL !== 'string' || /\s/.test(enrollmentURL) ||
+      url.protocol !== 'https:' || url.origin !== location.origin || url.username || url.password || url.pathname !== '/tgw/enroll/' || url.search || !/^#[ABCDEFGHJKLMNPQRSTUVWXYZ23456789]{12}$/i.test(url.hash)) {
+    throw new Error('The gateway returned an invalid enrollment URL. Revoke it before creating another URL.');
+  }
+  // Preserve the supplied URL after validation. Hostname case or an explicit
+  // HTTPS port can be meaningful to an installer even when origins match.
+  workerEnrollment = { id: result.enrollment_id, expiresAt, usable: true, url: enrollmentURL };
+  $('enrollment-url').value = enrollmentURL;
+  $('enrollment-code').textContent = url.hash.slice(1);
+  $('enrollment-link').hidden = false;
+}
+function openWorkerEnrollment() {
+  if ($('worker-enrollment').open) return;
+  closeWorkerEnrollment();
+  $('enrollment-access').value = 'restricted';
+  $('worker-enrollment').showModal();
+  enrollmentTimer = setInterval(updateEnrollment, 1000);
+  runEnrollment(createEnrollment);
+}
+async function copyEnrollmentURL() {
+  updateEnrollment();
+  if (!workerEnrollment?.usable || enrollmentBusy) return;
+  const url = workerEnrollment.url;
+  try {
+    if (!navigator.clipboard?.writeText) throw new Error('Clipboard unavailable');
+    await navigator.clipboard.writeText(url);
+    if (workerEnrollment?.url === url && $('worker-enrollment').open) $('enrollment-copy-status').textContent = 'URL copied. Paste it into the installer.';
+  } catch (_) {
+    if (workerEnrollment?.url !== url || !$('worker-enrollment').open) return;
+    $('enrollment-url').focus();
+    $('enrollment-url').select();
+    $('enrollment-copy-status').textContent = 'URL selected. Copy it with Ctrl+C or Command+C, or use your device’s Copy action.';
+  }
 }
 $('login').addEventListener('click', () => login().catch(error => msg(error.message)));
 $('enroll').addEventListener('click', () => enroll($('bootstrap-token').value).catch(error => msg(error.message)));
 $('add-passkey').addEventListener('click', () => perform(async () => { await enroll(); await load(); }));
-$('new-worker').addEventListener('click', () => perform(async () => {
-  const name = prompt('Worker display name');
-  if (name?.trim()) {
-    const result = await sensitiveCall('/workers', { method: 'POST', body: JSON.stringify({ name: name.trim() }) });
-    showToken(result.worker_id, result.token);
-    await load(false);
-  }
-}));
+$('new-worker').addEventListener('click', openWorkerEnrollment);
+$('enrollment-access').addEventListener('change', () => runEnrollment(createEnrollment));
+$('enrollment-new').addEventListener('click', () => runEnrollment(createEnrollment));
+$('enrollment-copy').addEventListener('click', copyEnrollmentURL);
+$('enrollment-cancel').addEventListener('click', () => runEnrollment(async current => { await revokeEnrollment(current); closeWorkerEnrollment(); await load(false); }));
+$('enrollment-close').addEventListener('click', () => { closeWorkerEnrollment(); load(false); });
+$('worker-enrollment').addEventListener('cancel', event => { event.preventDefault(); if (!enrollmentBusy) { closeWorkerEnrollment(); load(false); } });
 $('logout').addEventListener('click', () => perform(async () => {
   // An installed web app can outlive a login cookie. Disable this browser's
   // existing device before signing out, including after a fresh admin login.
@@ -480,9 +616,11 @@ sessionAuth = window.CodexSessionAuth.create({
   onBeforeRotate: () => {
     authEpoch++; rotationPending = true;
     $('console').inert = true; $('logout').disabled = true;
+    $('worker-enrollment').inert = true;
   },
   onAuthenticated: async () => {
     rotationPending = false; $('console').inert = false; $('logout').disabled = false;
+    $('worker-enrollment').inert = false;
     authEpoch++; authenticated = true; await load();
   },
   onExpired: lockConsole,
@@ -496,6 +634,7 @@ sessionAuth = window.CodexSessionAuth.create({
         if (value) return load();
       }).catch(showError).finally(() => {
         rotationPending = false; $('console').inert = false; $('logout').disabled = false;
+        $('worker-enrollment').inert = false;
       });
     }
   },

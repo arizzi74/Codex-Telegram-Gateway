@@ -29,16 +29,18 @@ The browser uses these endpoints:
 | `POST /tgw/api/v1/admin/sessions/revoke-all` | Signs out every browser belonging to the account. |
 | `GET /tgw/api/v1/admin/dashboard` | Returns visible sessions and statistics, workers, runtimes, bot status, and pending counts. |
 | `GET, DELETE /tgw/api/v1/admin/passkeys[/{id}]` | Lists credentials or revokes a non-final credential. |
-| `POST /tgw/api/v1/admin/workers` | Creates a worker and returns its one-time enrollment token. |
+| `POST /tgw/api/v1/admin/worker-enrollments` | Creates a one-use enrollment URL with a 10-minute expiry and the selected service access. |
+| `DELETE /tgw/api/v1/admin/worker-enrollments/{id}` | Revokes an unused enrollment URL. |
+| `POST /tgw/api/v1/admin/workers` | Legacy direct worker creation; returns its authentication token once. |
 | `DELETE /tgw/api/v1/admin/workers/{id}` | Revokes a worker. |
-| `POST /tgw/api/v1/admin/workers/{id}/rotate-token` | Returns a replacement enrollment token. |
+| `POST /tgw/api/v1/admin/workers/{id}/rotate-token` | Returns a replacement worker authentication token. |
 
-All state-changing requests require the exact configured `Origin`, the strict
+All state-changing admin requests require the exact configured `Origin`, the strict
 same-site session, and a double-submit `X-CSRF-Token`. Ceremony cookies bind
 the browser to a five-minute, server-persisted WebAuthn session. Admin sessions
 are opaque hashed random tokens, expire after eight hours, and can be revoked.
-Worker tokens are only included in the create/rotate response and are never
-logged or returned later.
+Worker tokens are only included in the installer redemption or legacy
+create/rotate response and are never logged or returned later.
 
 The eight-hour lifetime is absolute: requests, WebSocket traffic and ongoing
 Codex turns do not extend it. Five minutes before expiry, both interfaces show
@@ -52,6 +54,66 @@ passkey verification within the previous five minutes. The console asks for a
 passkey when needed; a rejected or cancelled verification performs no mutation.
 Both stages of additional-passkey registration enforce this check. Browser
 session revocation remains available without another passkey prompt.
+
+## Worker enrollment
+
+Choose **Enroll worker** to obtain a URL such as
+`https://gateway.example.com/tgw/enroll/#ABCD2345WXYZ`. The 12-character code
+uses letters and digits without ambiguous `I`, `O`, `0`, or `1`; lowercase
+letters also work. Copy the URL or type it on the worker machine. The dialog
+includes the installer command and a countdown. Creation requires a passkey
+verification within the last five minutes.
+
+Run the worker installer as the project account, without sudo:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/arizzi74/Codex-Telegram-Gateway/main/scripts/install.sh | sh
+```
+
+A fresh setup asks for a worker display name and the enrollment URL. It
+retrieves the worker ID, authentication token, gateway connection address and
+service access automatically. New workers start in the account's home
+directory and can access its subfolders. Codex installation and account
+sign-in are handled before redemption; provider sign-in or enabling service
+startup after logout may require account approval or a system password.
+
+The dialog defaults to restricted service access. On Linux this blocks
+privilege elevation, including sudo. Select full access before copying the
+URL to use the account's normal permissions and sudo rules. Full access does
+not grant new privileges or change Codex session permissions. macOS workers
+use the account's normal permissions.
+
+Closing the dialog keeps its URL valid until it is used or expires. **Cancel
+and revoke** invalidates an unused URL. Changing service access or creating a
+replacement first revokes the previous URL. A worker appears in the inventory
+only after redemption, under the name entered on its machine. Revoking a used
+URL does not revoke that worker; use its worker revoke action instead.
+
+Enrollment uses these public endpoints:
+
+| Endpoint | Purpose |
+| --- | --- |
+| `GET /tgw/enroll/` | Shows installer instructions. Opening a link never redeems it. |
+| `POST /tgw/api/v1/worker-enrollments/redeem` | Exchanges `{code, name, os, arch}` for `{worker_id, token, gateway_url, service_access}` once. |
+
+The code is a temporary secret, valid for exactly 10 minutes from creation.
+Its URL fragment is not sent in browser HTTP requests or normal access logs.
+The registry persists only its SHA-256 hash. Redemption atomically creates the
+worker, stores its token hash and consumes the code. Concurrent attempts can
+produce only one worker. Expired, revoked, consumed and unknown codes all
+return HTTP 410; malformed requests return 400. Redemption is limited to 20
+requests per client per minute and 240 globally, with HTTP 429 and
+`Retry-After: 60` when throttled. Browser redemption requests must match the
+configured origin; command-line requests do not need an Origin header.
+
+The installer saves returned credentials in private recovery storage before
+installing the service. If installation is interrupted, rerunning the same
+command resumes with the saved identity. A lost redemption response is not
+automatically replayed: inspect the worker inventory, revoke any incomplete
+worker created by that attempt, and generate a fresh URL. Worker credentials
+remain valid after the enrollment URL expires, until rotated or revoked.
+
+## Browser sessions
 
 The **Browser sessions** panel shows active, unexpired logins and can revoke one
 or sign out everywhere. Labels such as **Safari on iOS** are approximate browser

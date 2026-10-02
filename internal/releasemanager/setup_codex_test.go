@@ -75,56 +75,53 @@ func TestSetupCodexInstallsOfficialStandaloneAndCleansStage(t *testing.T) {
 		}
 		return CommandResult{}, AtomicWrite(filepath.Join(l.Bin, "codex"), []byte("#!/bin/sh\nexit 0\n"), 0755, nil)
 	}
-	got, err := m.setupWorkerCodex(context.Background(), &scriptedWorkerSetup{t: t, answers: []string{"yes"}}, l)
+	got, err := m.setupWorkerCodex(context.Background(), &scriptedWorkerSetup{t: t}, l)
 	if err != nil || got != filepath.Join(l.Bin, "codex") || staged == "" || FileExists(staged) {
 		t.Fatalf("binary=%q stage=%q err=%v", got, staged, err)
 	}
 }
 
-func TestSetupCodexDeclinedInstallationDoesNotDownload(t *testing.T) {
-	m, l, _ := setupCodexFixture(t, false)
-	_, err := m.setupWorkerCodex(context.Background(), &scriptedWorkerSetup{t: t, answers: []string{"no"}}, l)
-	if err == nil || FileExists(l.Bin) {
-		t.Fatal("declined installation mutated the machine")
+func TestSetupCodexDeviceLoginRunsOnceAndVerifiesSavedCredentials(t *testing.T) {
+	for _, fails := range []bool{false, true} {
+		t.Run(map[bool]string{false: "success", true: "failure"}[fails], func(t *testing.T) {
+			m, l, output := setupCodexFixture(t, true)
+			loggedIn, attempts, statusCalls := false, 0, 0
+			m.Run = func(_ context.Context, _ ...string) (CommandResult, error) {
+				statusCalls++
+				if loggedIn {
+					return CommandResult{}, nil
+				}
+				return CommandResult{ExitCode: 1, Output: []byte("private diagnostic")}, nil
+			}
+			m.SetupRun = func(_ context.Context, args ...string) (CommandResult, error) {
+				attempts++
+				if !reflect.DeepEqual(args, []string{filepath.Join(l.Bin, "codex"), "login", "--device-auth"}) {
+					t.Fatalf("command=%v", args)
+				}
+				if fails {
+					return CommandResult{ExitCode: 1}, errors.New("private diagnostic")
+				}
+				loggedIn = true
+				return CommandResult{}, nil
+			}
+			_, err := m.setupWorkerCodex(t.Context(), &scriptedWorkerSetup{t: t}, l)
+			if (err != nil) != fails || attempts != 1 || strings.Contains(output.String(), "private diagnostic") || (!fails && statusCalls != 2) {
+				t.Fatal("automatic device login failed", err, attempts)
+			}
+			if fails && (!strings.Contains(output.String(), "rerun the same installer") || !strings.Contains(output.String(), "login (or login --with-api-key)")) {
+				t.Fatal("missing manual login recovery instructions")
+			}
+		})
 	}
 }
 
-func TestSetupCodexLoginRetriesAndVerifiesSavedCredentials(t *testing.T) {
-	m, l, output := setupCodexFixture(t, true)
-	loggedIn, attempts := false, 0
-	m.Run = func(_ context.Context, _ ...string) (CommandResult, error) {
-		if loggedIn {
-			return CommandResult{}, nil
-		}
-		return CommandResult{ExitCode: 1, Output: []byte("private diagnostic")}, nil
-	}
-	m.SetupRun = func(_ context.Context, args ...string) (CommandResult, error) {
-		attempts++
-		want := []string{filepath.Join(l.Bin, "codex"), "login"}
-		if attempts == 1 {
-			want = append(want, "--device-auth")
-		}
-		if !reflect.DeepEqual(args, want) {
-			t.Fatalf("command=%v", args)
-		}
-		if attempts == 1 {
-			return CommandResult{ExitCode: 1}, errors.New("private diagnostic")
-		}
-		loggedIn = true
-		return CommandResult{}, nil
-	}
-	_, err := m.setupWorkerCodex(context.Background(), &scriptedWorkerSetup{t: t, answers: []string{"invalid", "device", "browser"}}, l)
-	if err != nil || attempts != 2 || strings.Contains(output.String(), "private diagnostic") {
-		t.Fatal("login retry/verification failed", err, attempts)
-	}
-}
-
-func TestSetupCodexLaterDoesNotClaimWorkerIsReady(t *testing.T) {
-	m, l, output := setupCodexFixture(t, true)
+func TestSetupCodexRejectsLoginWithoutSavedCredentials(t *testing.T) {
+	m, l, _ := setupCodexFixture(t, true)
 	m.Run = func(context.Context, ...string) (CommandResult, error) { return CommandResult{ExitCode: 1}, nil }
-	_, err := m.setupWorkerCodex(context.Background(), &scriptedWorkerSetup{t: t, answers: []string{"later"}}, l)
-	if err == nil || !strings.Contains(err.Error(), "paused") || !strings.Contains(output.String(), "rerun the same installer") {
-		t.Fatal("missing actionable deferred-login state", err)
+	attempts := 0
+	m.SetupRun = func(context.Context, ...string) (CommandResult, error) { attempts++; return CommandResult{}, nil }
+	if _, err := m.setupWorkerCodex(t.Context(), &scriptedWorkerSetup{t: t}, l); err == nil || attempts != 1 {
+		t.Fatal("login without stored credentials was accepted or repeated", err)
 	}
 }
 

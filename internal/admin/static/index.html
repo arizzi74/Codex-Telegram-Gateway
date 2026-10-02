@@ -59,7 +59,7 @@
       </nav>
     </section>
     <section class="card" aria-labelledby="worker-heading">
-      <div class="row"><div><h2 id="worker-heading">Workers</h2><p>Create an enrollment token, then copy it into the worker configuration.</p></div><button id="new-worker">Enroll worker</button></div>
+      <div class="row"><div><h2 id="worker-heading">Workers</h2><p>Create a one-use URL and paste it into the worker installer within 10 minutes.</p></div><button id="new-worker">Enroll worker</button></div>
       <div id="worker-list"></div>
     </section>
     <section class="card" aria-labelledby="passkey-heading">
@@ -72,6 +72,31 @@
     </section>
   </section>
 </main>
+<dialog id="worker-enrollment" aria-labelledby="enrollment-heading" aria-describedby="enrollment-description">
+  <div class="row enrollment-heading"><h2 id="enrollment-heading">Enroll a worker</h2><button id="enrollment-close" class="secondary" aria-label="Close enrollment">Close</button></div>
+  <p id="enrollment-description">Run the installer on the worker machine. Enter a display name there, then paste this one-use URL. It expires in 10 minutes. Opening it in a browser does not use it.</p>
+  <details class="enrollment-install"><summary>Installer command</summary>
+    <p class="muted">Run as the developer account that owns your projects, without sudo:</p>
+    <pre class="enrollment-command"><code>curl -fsSL https://raw.githubusercontent.com/arizzi74/Codex-Telegram-Gateway/main/scripts/install.sh | sh</code></pre>
+  </details>
+  <label for="enrollment-access">Worker service access</label>
+  <select id="enrollment-access" aria-describedby="enrollment-access-description">
+    <option value="restricted">Restricted (default)</option>
+    <option value="full">Full account permissions</option>
+  </select>
+  <p id="enrollment-access-description" class="muted">Linux: restricted access blocks sudo. Full access uses the account's existing permissions and sudo rules. macOS uses normal account permissions.</p>
+  <p id="enrollment-status" role="status" aria-live="polite"></p>
+  <p id="enrollment-error" class="notice error" role="alert" hidden></p>
+  <div id="enrollment-link" hidden>
+    <label for="enrollment-url">Enrollment URL</label>
+    <input id="enrollment-url" readonly autocomplete="off" spellcheck="false" class="mono">
+    <p class="muted">Code at the end of the URL: <code id="enrollment-code"></code></p>
+    <button id="enrollment-copy">Copy URL</button>
+    <p id="enrollment-copy-status" class="muted" role="status"></p>
+  </div>
+  <div class="enrollment-actions"><button id="enrollment-new" class="secondary">Create new URL</button><button id="enrollment-cancel" class="danger">Cancel and revoke</button></div>
+  <p class="muted enrollment-note">Changing access or creating a new URL revokes the previous unused URL first. Closing this dialog keeps the URL valid until it is used or expires; choose Cancel and revoke to disable it.</p>
+</dialog>
 <script src="/tgw/admin/static/session-auth.js"></script>
 <script src="/tgw/admin/static/app.js"></script>
 </body>

@@ -56,31 +56,18 @@ func (m *Manager) finishWorkerSetup(ctx context.Context, l *Layout, prompt worke
 		return err
 	}
 	fmt.Fprintln(m.Out, "To keep the worker online after logout and start it at boot, this system requires administrator access.")
-	for {
-		answer, err := prompt.Ask(ctx, "Enable background startup using sudo? (yes/no)", "yes", false)
-		if err != nil {
-			return err
-		}
-		switch strings.ToLower(strings.TrimSpace(answer)) {
-		case "yes", "y":
-			if err := m.runSetupInteractive(ctx, "sudo", "loginctl", "enable-linger", uid); err == nil && m.workerSetupLingerEnabled(ctx, uid) {
-				fmt.Fprintln(m.Out, "The worker will keep running after logout and start automatically at boot.")
-				return nil
-			}
-			if err := ctx.Err(); err != nil {
-				return err
-			}
-			fmt.Fprintln(m.Out, "Background startup could not be enabled. The worker is installed, but may stop when you log out.")
-			fmt.Fprintf(m.Out, "An administrator can enable it with: sudo loginctl enable-linger %s\n", uid)
-			return nil
-		case "no", "n":
-			fmt.Fprintln(m.Out, "Background startup was not enabled. The worker may stop when you log out.")
-			fmt.Fprintf(m.Out, "To enable it later: sudo loginctl enable-linger %s\n", uid)
-			return nil
-		default:
-			fmt.Fprintln(m.Out, "Enter yes or no.")
-		}
+	fmt.Fprintln(m.Out, "Enabling background startup using sudo; your administrator password may be requested.")
+	if err := m.runSetupInteractive(ctx, "sudo", "loginctl", "enable-linger", uid); err == nil && m.workerSetupLingerEnabled(ctx, uid) {
+		fmt.Fprintln(m.Out, "The worker will keep running after logout and start automatically at boot.")
+		return nil
 	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	fmt.Fprintln(m.Out, "Background startup could not be enabled. The worker is installed, but may stop when you log out.")
+	fmt.Fprintf(m.Out, "An administrator can enable it with: sudo loginctl enable-linger %s\n", uid)
+	return nil
+
 }
 
 func (m *Manager) workerSetupLingerEnabled(ctx context.Context, uid string) bool {

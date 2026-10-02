@@ -9,9 +9,9 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/google/uuid"
 	"github.com/iaia/telegramgw/internal/auth"
 	"github.com/iaia/telegramgw/internal/config"
+	"github.com/iaia/telegramgw/internal/protocol"
 )
 
 type workerSetupPrompt interface {
@@ -47,6 +47,16 @@ func (m *Manager) setupWorker(ctx context.Context, l *Layout, cwd string, openPr
 			return errors.New("invalid bootstrap release version")
 		}
 	}
+	unlock, err := Lock(filepath.Join(filepath.Dir(l.Lock), "setup.lock"))
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	if recovery, err := loadWorkerSetupRecovery(l); err != nil {
+		return err
+	} else if recovery != nil {
+		return m.resumeWorkerSetup(ctx, l, recovery, execute)
+	}
 	if _, err := os.Lstat(l.Config); err == nil {
 		return execute(ctx, options{Action: "adopt", Component: "worker", AutoUpdate: true})
 	} else if !errors.Is(err, os.ErrNotExist) {
@@ -64,39 +74,31 @@ func (m *Manager) setupWorker(ctx context.Context, l *Layout, cwd string, openPr
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
+	if err := m.prepareWorkerSetupService(ctx, l); err != nil {
+		return err
+	}
+	servicePath := l.Unit
+	if l.System == "darwin" {
+		servicePath = workerPlist(l)
+	}
+	if _, err := os.Lstat(servicePath); !errors.Is(err, os.ErrNotExist) {
+		return errors.New("existing worker service has no standard configuration; inspect the installation before enrolling a new worker")
+	}
+	if FileExists(filepath.Join(l.Home, ".local/state/codex-worker/worker.db.status.json")) {
+		return errors.New("existing worker state may belong to a running worker; inspect the installation before enrolling a new worker")
+	}
 	prompt, err := openPrompt()
 	if err != nil {
 		return errors.New("worker setup needs a terminal or a private worker.json in the current directory; run this command in an interactive terminal")
 	}
 	defer prompt.Close()
-	if err := m.prepareWorkerSetupService(ctx, l); err != nil {
-		return err
-	}
-	fmt.Fprintln(m.Out, "Set up this machine as a worker. Press Enter to accept each default. Daily automatic updates will be enabled.")
-	gateway, err := askSetupValue(ctx, prompt, m.Out, "Gateway address (hostname or HTTPS URL)", "", false, setupGatewayURL)
+	fmt.Fprintln(m.Out, "Set up this machine as a worker. Enter its name and the one-use enrollment URL from your gateway admin console. Daily automatic updates will be enabled.")
+	name, err := askSetupValue(ctx, prompt, m.Out, "Worker name", "my-worker", false, normalizeWorkerSetupName)
 	if err != nil {
 		return err
 	}
-	adminURL, _ := url.Parse(gateway)
-	adminURL.Scheme, adminURL.Path, adminURL.RawPath = "https", "/tgw/admin/", ""
-	fmt.Fprintf(m.Out, "Open %s, sign in, and choose Enroll worker. Keep its Worker ID and enrollment token ready; the token is shown only once.\n", adminURL.String())
-	workerID, err := askSetupValue(ctx, prompt, m.Out, "Enrolled worker ID (UUID)", "", false, func(value string) (string, error) {
-		id, err := uuid.Parse(strings.TrimSpace(value))
-		if err != nil {
-			return "", errors.New("worker ID must be the UUID assigned by your gateway during enrollment")
-		}
-		return id.String(), nil
-	})
-	if err != nil {
-		return err
-	}
-	name, err := askSetupValue(ctx, prompt, m.Out, "Worker name", "my-worker", false, func(value string) (string, error) {
-		value = strings.TrimSpace(value)
-		if value == "" || strings.ContainsAny(value, "\r\n\x00") {
-			return "", errors.New("worker name must be a nonempty single line")
-		}
-		return value, nil
-	})
+	fmt.Fprintln(m.Out, "Enrollment URLs last 10 minutes and can be used once. The pasted URL is hidden.")
+	enrollmentValue, err := askSetupValue(ctx, prompt, m.Out, "Enrollment URL (hidden)", "", true, normalizeWorkerEnrollmentURL)
 	if err != nil {
 		return err
 	}
@@ -104,68 +106,71 @@ func (m *Manager) setupWorker(ctx context.Context, l *Layout, cwd string, openPr
 	if err != nil {
 		return errors.New("worker home must be an existing directory")
 	}
-	fmt.Fprintf(m.Out, "The worker can use your entire home directory (%s), including all subfolders. Choosing a starting directory elsewhere also allows that directory and its subfolders.\n", l.Home)
-	workspace, err := askSetupValue(ctx, prompt, m.Out, "Starting directory", l.Home, false, func(value string) (string, error) {
-		return setupWorkerDirectory(value, l.Home, cwd)
-	})
-	if err != nil {
-		return err
-	}
-	if _, err := auth.CanonicalWorkspace(workspace, roots); err != nil {
-		roots = append(roots, workspace)
-	}
-	serviceAccess, err := m.setupWorkerServiceAccess(ctx, l, prompt)
-	if err != nil {
-		return err
-	}
-	// Ask for the secret last, after validating the non-secret settings.
-	token, err := askSetupValue(ctx, prompt, m.Out, "Worker enrollment token (hidden)", "", true, func(value string) (string, error) {
-		value = strings.TrimSpace(value)
-		if value == "" || strings.ContainsAny(value, "\r\n\x00") {
-			return "", errors.New("worker enrollment token must be a nonempty single line")
-		}
-		return value, nil
-	})
-	if err != nil {
-		return err
-	}
+	fmt.Fprintf(m.Out, "The worker starts in your home directory (%s) and can use all its subfolders.\n", l.Home)
 	codex, err := m.setupWorkerCodex(ctx, prompt, l)
 	if err != nil {
 		return err
 	}
-	stage, err := os.MkdirTemp("", "codex-telegramgw-setup-")
-	if err != nil {
+	// Finish service and Codex prerequisites before consuming the one-use URL.
+	// The private journal remains outside temporary directories if installation
+	// later fails, so rerunning setup never needs to enroll this worker again.
+	if err := prepareWorkerSetupRecovery(l); err != nil {
 		return err
 	}
-	defer os.RemoveAll(stage)
-	tokenPath := filepath.Join(stage, "worker.token")
-	if err := os.WriteFile(tokenPath, []byte(token+"\n"), 0600); err != nil {
-		return err
+	var enrollmentResponse workerEnrollmentResponse
+	for {
+		enrollment, _ := parseWorkerEnrollmentURL(enrollmentValue)
+		enrollmentResponse, err = m.redeemWorkerEnrollment(ctx, enrollment, name, l)
+		if err == nil {
+			break
+		}
+		var rejected *workerEnrollmentRejected
+		if !errors.As(err, &rejected) {
+			return err
+		}
+		fmt.Fprintln(m.Out, err)
+		enrollmentValue, err = askSetupValue(ctx, prompt, m.Out, "Fresh enrollment URL (hidden)", "", true, func(value string) (string, error) {
+			fresh, err := parseWorkerEnrollmentURL(value)
+			if err != nil {
+				return "", err
+			}
+			if fresh == enrollment {
+				return "", errors.New("create a fresh enrollment URL in the gateway admin console; the previous URL cannot be reused")
+			}
+			return strings.TrimSpace(value), nil
+		})
+		if err != nil {
+			return err
+		}
 	}
-	cfg := config.WorkerConfig{
-		WorkerID: workerID, Name: name,
-		StateFile:  filepath.Join(l.Home, ".local/state/codex-worker/worker.db"),
-		GatewayURL: gateway, TokenFile: tokenPath,
-		AllowedWorkspaceRoots: roots, MaxQueuedTurns: 20,
-		Runtimes: []config.RuntimeProfile{{
-			ID: "primary", Name: "Primary Codex", CodexBinary: codex,
-			WorkingDirectory: workspace, Autostart: true, RestartPolicy: "on-failure",
-		}},
+	recovery := &workerSetupRecovery{
+		Schema: 1, Token: enrollmentResponse.Token, ServiceAccess: enrollmentResponse.ServiceAccess, Version: version,
+		Config: config.WorkerConfig{
+			WorkerID: enrollmentResponse.WorkerID, Name: name,
+			StateFile:  filepath.Join(l.Home, ".local/state/codex-worker/worker.db"),
+			GatewayURL: enrollmentResponse.GatewayURL, TokenFile: filepath.Join(workerSetupRecoveryDirectory(l), "worker.token"),
+			AllowedWorkspaceRoots: roots, MaxQueuedTurns: 20,
+			Runtimes: []config.RuntimeProfile{{
+				ID: "primary", Name: "Primary Codex", CodexBinary: codex,
+				WorkingDirectory: roots[0], Autostart: true, RestartPolicy: "on-failure",
+			}},
+		},
 	}
-	configPath := filepath.Join(stage, "worker.json")
-	if err := WriteJSON(configPath, cfg); err != nil {
-		return err
+	if err := WriteJSON(workerSetupRecoveryPath(l), recovery); err != nil {
+		return errors.New("could not save the enrolled worker credentials; check the gateway admin worker list before creating a fresh URL and rerunning setup")
 	}
-	if _, err := config.LoadWorker(configPath); err != nil {
-		return errors.New("worker setup configuration failed validation; check the workspace and enrollment settings")
-	}
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	if err := execute(ctx, options{Action: "install", Component: "worker", Config: configPath, Version: version, AutoUpdate: true, WorkerServiceAccess: serviceAccess}); err != nil {
+	if err := m.installRecoveredWorkerSetup(ctx, l, recovery, execute); err != nil {
 		return err
 	}
 	return m.finishWorkerSetup(ctx, l, prompt)
+}
+
+func normalizeWorkerSetupName(value string) (string, error) {
+	value = strings.TrimSpace(value)
+	if err := protocol.ValidateWorkerEnrollmentName(value); err != nil {
+		return "", err
+	}
+	return value, nil
 }
 
 func setupWorkerDirectory(value, home, cwd string) (string, error) {

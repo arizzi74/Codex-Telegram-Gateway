@@ -53,6 +53,7 @@ type Server struct {
 	redactor      *auth.Redactor
 	loginBegins   *httpguard.Limiter
 	loginFinishes *httpguard.Limiter
+	enrollments   *httpguard.Limiter
 	webui         *gateway.Hub
 }
 
@@ -74,6 +75,7 @@ func New(store *registry.Store, cfg Config) (*Server, error) {
 	s := &Server{store: store, origin: origin, webauthn: w, mux: http.NewServeMux()}
 	s.loginBegins = httpguard.NewLimiter(10, 120, time.Minute)
 	s.loginFinishes = httpguard.NewLimiter(20, 240, time.Minute)
+	s.enrollments = httpguard.NewLimiter(20, 240, time.Minute)
 	s.bot = newBotMonitor(cfg)
 	s.redactor = cfg.Redactor
 	s.webui = cfg.WebUI
@@ -103,6 +105,10 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/tgw/api/v1/admin/dashboard", s.dashboard)
 	s.mux.HandleFunc("/tgw/api/v1/admin/workers", s.workers)
 	s.mux.HandleFunc("/tgw/api/v1/admin/workers/", s.worker)
+	s.mux.HandleFunc("/tgw/api/v1/admin/worker-enrollments", s.workerEnrollments)
+	s.mux.HandleFunc("/tgw/api/v1/admin/worker-enrollments/", s.workerEnrollment)
+	s.mux.HandleFunc("/tgw/api/v1/worker-enrollments/redeem", s.redeemWorkerEnrollment)
+	s.mux.HandleFunc("/tgw/enroll/", s.workerEnrollmentLanding)
 }
 func (s *Server) securityHeaders(w http.ResponseWriter) {
 	w.Header().Set("Content-Security-Policy", "default-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'; object-src 'none'; connect-src 'self'; script-src 'self'; style-src 'self'")

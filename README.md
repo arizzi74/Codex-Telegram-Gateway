@@ -80,22 +80,26 @@ standalone Caddy proxy on Debian or Ubuntu, using port 443 or an alternative
 such as 8443. The prompts explain which firewall ports and certificate settings
 are needed. See [HTTPS setup](docs/installation.md#finish-gateway-setup).
 
-**Worker (Linux with systemd or macOS):** enroll a worker in the gateway console,
-then run on its machine as the account that owns your projects, without sudo:
+**Worker (Linux with systemd or macOS):** choose **Enroll worker** in the gateway
+console and copy the one-use URL, then run on its machine as the account that
+owns your projects, without sudo:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/arizzi74/Codex-Telegram-Gateway/main/scripts/install.sh | sh
 ```
 
-Follow the prompts for your gateway address, worker ID and token, and initial
-working directory. Setup offers to install Codex if missing and guides sign-in,
-including device login over SSH. New guided workers can access your home
-directory and all its subfolders by default. On Linux, choose restricted service
-access or full system access. Restricted access blocks privilege elevation such
-as `sudo apt update`; full access follows your account's normal permissions.
-Setup also enables background startup after logout, requesting sudo if required.
-On macOS, the worker runs
-while your desktop account is logged in.
+Enter only a worker display name and the enrollment URL. The URL expires after
+10 minutes and can be redeemed once; opening it in a browser does not consume
+it. Setup retrieves the gateway address, worker ID and token automatically,
+installs Codex if missing, and guides sign-in with device login over SSH. New
+guided workers start in your home directory and can access all its subfolders.
+Choose service access in the admin enrollment dialog: restricted by default on
+Linux, or full account permissions. Restricted access blocks privilege elevation
+such as `sudo apt update`; full access follows your account's normal permissions.
+Setup attempts to enable background startup after logout, requesting sudo if
+required. If this fails, it prints the command for an administrator; the worker
+is installed but may stop after logout. On macOS, it runs while your desktop
+account is logged in.
 
 Prompts work through the pipe and secret input is hidden. Rerunning the installer
 preserves existing configurations and running sessions; prepared private JSON

@@ -67,12 +67,10 @@ func TestFinishWorkerServiceVerifiesBackgroundStartup(t *testing.T) {
 	}{
 		{name: "already enabled", already: true, wantPersistent: true},
 		{name: "user authorized", self: true, verified: true, wantPersistent: true},
-		{name: "sudo authorized", sudo: true, verified: true, answers: []string{"yes"}, wantPersistent: true, wantSudo: true},
-		{name: "sudo declined", answers: []string{"no"}},
-		{name: "sudo failed", answers: []string{"yes"}, wantSudo: true},
-		{name: "cannot verify sudo", sudo: true, answers: []string{"yes"}, wantSudo: true},
-		{name: "cannot verify user", self: true, answers: []string{"no"}},
-		{name: "reprompt", answers: []string{"invalid", "n"}},
+		{name: "sudo authorized", sudo: true, verified: true, wantPersistent: true, wantSudo: true},
+		{name: "sudo failed", wantSudo: true},
+		{name: "cannot verify sudo", sudo: true, wantSudo: true},
+		{name: "cannot verify user", self: true, wantSudo: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			l := platformWorker(t, "linux")

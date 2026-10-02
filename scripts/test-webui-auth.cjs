@@ -208,9 +208,13 @@ const selected = { session_id: sessionID, codex_thread_id: 'thread', worker_name
     await page.evaluate(() => window.visibility(true));
     // OS sleep can advance wall time while performance.now is paused. The
     // foreground handler must clear content before waiting for a network check.
-    now = expiry + 1000; auth = false; await page.clock.setSystemTime(now);
-    await page.evaluate(() => window.visibility(false));
-    assert.equal(await page.locator('#messages article').count(), 0, 'Suspended mobile expiry fails closed using wall time');
+    // The fake browser clock keeps running while the mocked server time is
+    // fixed. Advance both by the same duration to cross the local deadline.
+    const suspendedMS = expiry - now + 1000;
+    const resumedWall = await page.evaluate(() => Date.now()) + suspendedMS;
+    now += suspendedMS; auth = false; await page.clock.setSystemTime(resumedWall);
+    const messagesAfterForeground = await page.evaluate(() => { window.visibility(false); return document.querySelectorAll('#messages article').length; });
+    assert.equal(messagesAfterForeground, 0, 'Suspended mobile expiry fails closed using wall time before the network check');
     await page.waitForSelector('#auth:not([hidden])');
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
     assert.deepEqual(errors, []);

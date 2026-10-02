@@ -10,6 +10,28 @@ Database integration tests now run automatically against fresh temporary SQLite
 files. Historical entries below describe the release and backend tested on their
 recorded date; PostgreSQL outage evidence applies to the retired backend.
 
+## One-use worker enrollment (2026-10-02)
+
+Isolated SQLite, HTTPS installer/gateway integration and Playwright checks verify:
+
+- Creating a link requires fresh passkey verification and CSRF protection;
+  it creates no worker until redemption. Opening its landing page leaves it usable.
+- A code expires at exactly 10 minutes, works once, and remains single-use after
+  a restart. Twenty-four concurrent attempts through two independent stores
+  produce one worker and one event watermark. Failed writes roll back together.
+- Only code and worker-token hashes are stored on the gateway. Request bounds,
+  validation, origin checks and per-client/global throttling are enforced.
+- Fresh setup asks for a name and hidden URL, uses the home directory and
+  admin-selected service access, and completes Codex prerequisites before redemption.
+- Private durable recovery preserves the enrolled identity after interruption.
+  Concurrent setup, mismatched configurations, unmanaged workers and downgrades
+  are blocked; an active matching worker is verified without restarting it.
+- Mobile and desktop dialogs support copying, countdown, revocation, replacement,
+  keyboard navigation and failed-request recovery without automatic mutation replay.
+
+Tests use temporary databases and simulated credentials; no live worker was
+enrolled to obtain this evidence.
+
 ## Telegram session focus and multisession (2026-09-19)
 
 Automated tests verify these behaviors through the actual webhook, registry,

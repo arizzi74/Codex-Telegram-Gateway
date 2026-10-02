@@ -24,13 +24,6 @@ func (m *Manager) setupWorkerCodex(ctx context.Context, prompt workerSetupPrompt
 	}
 	if err != nil {
 		fmt.Fprintln(m.Out, "Codex is not installed. Setup can install OpenAI's standalone Codex CLI without Node.js, Python, or a compiler.")
-		answer, err := askSetupValue(ctx, prompt, m.Out, "Install Codex now? (yes/no)", "yes", false, setupYesNo)
-		if err != nil {
-			return "", err
-		}
-		if answer != "yes" {
-			return "", errors.New("install Codex using https://chatgpt.com/codex/install.sh, then rerun this installer")
-		}
 		if err := m.installSetupCodex(ctx, l); err != nil {
 			return "", err
 		}
@@ -43,39 +36,29 @@ func (m *Manager) setupWorkerCodex(ctx context.Context, prompt workerSetupPrompt
 	if err != nil {
 		return "", err
 	}
-	for {
-		status, statusErr := m.Run(ctx, binary, "login", "status")
+	status, statusErr := m.Run(ctx, binary, "login", "status")
+	if statusErr == nil && status.ExitCode == 0 {
+		fmt.Fprintln(m.Out, "Codex is installed and signed in.")
+		return binary, nil
+	}
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	fmt.Fprintln(m.Out, "Sign in to Codex. Device login works over SSH: open the displayed link on your own computer and enter the code. Enable device-code login in ChatGPT security settings if requested.")
+	loginErr := m.runSetupInteractive(ctx, binary, "login", "--device-auth")
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	if loginErr == nil {
+		status, statusErr = m.Run(ctx, binary, "login", "status")
 		if statusErr == nil && status.ExitCode == 0 {
 			fmt.Fprintln(m.Out, "Codex is installed and signed in.")
 			return binary, nil
 		}
-		fmt.Fprintln(m.Out, "Sign in to Codex. Device login works over SSH: open the displayed link on your own computer and enter the code. Enable device-code login in ChatGPT security settings if requested.")
-		method, err := askSetupValue(ctx, prompt, m.Out, "Codex login method (device/browser/later)", "device", false, func(value string) (string, error) {
-			value = strings.ToLower(strings.TrimSpace(value))
-			switch value {
-			case "device", "browser", "later":
-				return value, nil
-			}
-			return "", errors.New("Choose device, browser, or later.")
-		})
-		if err != nil {
-			return "", err
-		}
-		if method == "later" {
-			fmt.Fprintf(m.Out, "Run %s login (or login --with-api-key), then rerun the same installer.\n", setupCommandQuote(binary))
-			return "", errors.New("worker setup paused until Codex login is complete")
-		}
-		args := []string{binary, "login"}
-		if method == "device" {
-			args = append(args, "--device-auth")
-		}
-		if err := m.runSetupInteractive(ctx, args...); err != nil {
-			if ctx.Err() != nil {
-				return "", ctx.Err()
-			}
-			fmt.Fprintln(m.Out, "Codex login did not complete. Try again, choose browser login, or finish login separately and rerun setup.")
-		}
 	}
+	fmt.Fprintf(m.Out, "Run %s login (or login --with-api-key), then rerun the same installer. Your enrollment URL has not been used; create a fresh URL if it expires.\n", setupCommandQuote(binary))
+	return "", errors.New("Codex login did not complete; finish login separately and rerun the installer")
+
 }
 
 func (m *Manager) installSetupCodex(ctx context.Context, l *Layout) error {

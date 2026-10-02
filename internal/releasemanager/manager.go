@@ -64,6 +64,7 @@ func (m *Manager) command(ctx context.Context, args ...string) ([]byte, error) {
 type options struct {
 	Action, Component, Setting, Config, Environment, Repo, Version string
 	WorkerServiceAccess                                            string
+	WorkerSetupRecovery                                            bool
 	AutoUpdate, Check                                              bool
 }
 
@@ -87,9 +88,10 @@ Run gateway administration with sudo and worker administration as its user.
 Setup defaults to gateway under sudo/root and worker otherwise.
 Gateway setup reuses ./gateway.json and ./secrets.env or prompts for settings.
 It guides HTTPS, Telegram activation, and administrator enrollment.
-Worker setup can install Codex and guide sign-in when needed.
-Worker setup reuses ./worker.json or prompts for enrollment and workspace details.
-Linux worker setup asks whether to restrict its service or allow full account access.
+Worker setup installs Codex and starts device sign-in when needed.
+Worker setup reuses ./worker.json or asks for a name and one-use enrollment URL.
+Fresh workers start in the user's home and can use all its subfolders.
+Linux service access comes from the enrollment profile chosen in gateway administration.
 Existing worker services keep their access settings during adoption and updates.
 Setup enables daily updates and adopts existing services without restarting them.
 Worker updates also check the stable Codex runtime once per day and apply it when idle.
@@ -466,7 +468,12 @@ func (m *Manager) execute(ctx context.Context, opts options) (retErr error) {
 				return e
 			}
 		}
-		if err = m.FreshInstall(ctx, l, source, environment, packages, release); err != nil {
+		if opts.WorkerSetupRecovery {
+			err = m.resumeEnrolledWorkerInstall(ctx, l, source, packages, release)
+		} else {
+			err = m.FreshInstall(ctx, l, source, environment, packages, release)
+		}
+		if err != nil {
 			return err
 		}
 		if opts.AutoUpdate {

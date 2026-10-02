@@ -141,12 +141,14 @@ absolute path.
 
 Fresh guided installation permits the owning user's home directory and all its
 subfolders by default, while prepared configurations keep their explicit
-`allowed_workspace_roots`. Selecting a starting project does not narrow the
-home-directory root. Files remain subject to the account's normal filesystem
+`allowed_workspace_roots`. Fresh guided setup starts the primary runtime in the
+home directory. Files remain subject to the account's normal filesystem
 permissions and Codex's configured execution policy.
 
 Linux workers need systemd lingering to remain available after logout and start
-at boot. The guided installer checks and enables it, asking for sudo if needed.
+at boot. The guided installer checks and attempts to enable it, invoking sudo
+if needed. If administrator access fails, the worker stays installed and setup
+warns that it may stop after logout until an administrator enables lingering.
 For a manual installation, an administrator can run
 `sudo loginctl enable-linger USER` for the worker's account. Verify with
 `loginctl show-user USER --property=Linger`.
@@ -316,9 +318,30 @@ codex-gateway --config /etc/codex-gateway/gateway.json admin bootstrap
 
 It expires in 15 minutes and is shown once. Open `/tgw/admin/` over HTTPS, enroll a
 resident user-verified personal passkey, and add a second passkey before
-revoking the first. The browser console can create workers, rotate their token,
-and revoke them. Copy a returned worker token directly to the worker’s private
-token file; it is deliberately unavailable after the create or rotate response.
+revoking the first. **Enroll worker** creates a one-use URL, valid for 10 minutes,
+with restricted service access by default. Choose full account permissions in
+that dialog when required. The installer asks for a worker name and this URL,
+then retrieves and stores its gateway address, ID and private token. Opening the
+URL in a browser does not redeem it. An unused URL creates no placeholder worker.
+Changing its permissions or creating a replacement revokes the previous unused
+URL first; **Cancel and revoke** disables it. Closing the dialog leaves it valid
+until redemption or expiry. URLs are not kept in browser storage.
+
+The console also rotates tokens and revokes existing workers. Copy a returned
+rotation token directly to the worker's private token file; it is deliberately
+unavailable after the rotate response. Do not retry a failed enrollment request
+automatically: the request may have completed even when its response was lost.
+
+Fresh worker setup saves redeemed credentials and configuration with owner-only
+permissions in `~/.local/state/codex-worker/setup/enrolled-worker.json` and its
+private prepared files before service installation. If installation fails or
+setup is interrupted, rerun the same installer as the same user to resume the
+saved worker identity; it does not consume another enrollment URL. Setup checks
+that partial configuration matches the recovery record and refuses unrelated
+existing configurations. A matching active worker is checked without a restart;
+a stopped partial installation resumes installation. These recovery files are
+removed after success. If the redemption response was lost before local saving,
+create a fresh URL and revoke the unused worker from the original attempt.
 
 If every admin passkey is lost, there is deliberately no self-service or
 password recovery route: a new bootstrap token cannot add a second owner once

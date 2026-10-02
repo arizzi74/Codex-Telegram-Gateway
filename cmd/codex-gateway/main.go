@@ -171,6 +171,8 @@ func run(args []string, logger *slog.Logger) error {
 		}
 		mux.Handle("/tgw/admin/", console)
 		mux.Handle("/tgw/api/v1/admin/", console)
+		mux.Handle("/tgw/api/v1/worker-enrollments/redeem", console)
+		mux.Handle("/tgw/enroll/", console)
 		mux.Handle("/tgw/webui/", console)
 		mux.Handle("/tgw/api/v1/webui/", console)
 		sender := gateway.NewSender(store, api, logger, gateway.SenderOptions{BotID: cfg.Secrets.BotName, OwnerID: cfg.Secrets.WLID, AllowedChatIDs: cfg.AllowedChatIDs, Redactor: redactor})

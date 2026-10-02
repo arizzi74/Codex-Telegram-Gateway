@@ -17,8 +17,9 @@ import (
 
 const workerTokenPrefix = "cwk_"
 
-// GenerateWorkerToken returns a one-time enrollment token made from at least
-// 32 random bytes. Store only HashWorkerToken(token).
+// GenerateWorkerToken returns a worker authentication credential made from at
+// least 32 random bytes. Return it once at enrollment or rotation; it remains
+// valid until rotated or revoked. Store only HashWorkerToken(token).
 func GenerateWorkerToken() (string, error) {
 	b := make([]byte, 32)
 	if _, err := rand.Read(b); err != nil {

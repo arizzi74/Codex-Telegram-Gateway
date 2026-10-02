@@ -38,9 +38,12 @@ For custom settings, prepare the [JSON configuration](../examples/gateway.json)
 and a private environment file instead. The managed gateway database must be
 under `/var/lib/codex-gateway`.
 
-For a worker, enroll it in the gateway admin console and copy its worker ID and
-one-time token. Setup offers to install the standalone Codex CLI if it is missing
-and guides its account sign-in. You can use device login over SSH, opening the
+For a worker, choose **Enroll worker** in the gateway admin console and copy the
+one-use enrollment URL. It expires after 10 minutes and is redeemed only when
+the installer submits it; opening the URL in a browser does not consume it. The
+admin dialog selects service access, with restricted access as the default.
+Setup automatically installs the standalone Codex CLI if it is missing and
+guides its account sign-in. You can use device login over SSH, opening the
 displayed link on another computer. The guided installer creates the worker
 configuration for you, or you
 can prepare [worker.json](../examples/worker.json) with its private token file,
@@ -180,7 +183,7 @@ to `/tgw/api/v1/telegram/webhook`.
 Once public HTTPS passes its checks, the wizard registers the Telegram webhook
 and command menu, then creates a first administrator's one-time token if needed.
 Open the printed `/tgw/admin/` address, register a passkey within 15 minutes, and
-enroll a worker to obtain its ID and token. Existing administrator passkeys are
+choose **Enroll worker** to obtain a one-use installation URL. Existing administrator passkeys are
 preserved when completion is rerun.
 If an existing gateway predates guided administrator setup, the wizard prints
 `sudo codex-telegramgw update gateway`; run that command when convenient, then
@@ -219,20 +222,21 @@ curl -fsSL https://raw.githubusercontent.com/arizzi74/Codex-Telegram-Gateway/mai
 No installer arguments are needed. The default is worker setup with daily
 automatic updates enabled:
 
-- If a worker is already installed in the standard location, setup adopts it
+- If saved setup recovery exists, setup resumes that installation with its
+  existing enrollment credentials before checking for an installed worker.
+- Otherwise, if a worker is already installed in the standard location, setup adopts it
   without changing its configuration or restarting its sessions.
 - Otherwise, it uses a private `worker.json` in the current directory if present.
-- If neither exists, it checks your user service session, offers to install Codex
-  if needed, and guides Codex sign-in. It asks for the gateway address, enrolled
-  worker ID and token, worker name, and initial working directory. Invalid
-  entries can be corrected without restarting the wizard; token entry is hidden.
-- A newly generated configuration allows the user's entire home directory and
-  its subfolders. The initial working directory selects where the primary runtime
-  starts; it does not restrict access to that one project. Explicit workspace
-  restrictions in prepared or existing configurations are preserved. Choosing an
-  initial directory outside your home adds that directory as an allowed root,
-  alongside your home. Symlinks pointing outside an allowed root do not expand
-  access; configure another root explicitly when needed.
+- If neither exists, it asks only for a worker display name and the enrollment
+  URL. It retrieves the gateway address, worker ID, token and service access
+  automatically, installs Codex if needed, and guides device sign-in. Invalid
+  names or URLs can be corrected without restarting the wizard. Enrollment URL
+  entry is hidden.
+- A newly generated configuration starts the primary runtime in the user's home
+  directory and allows that entire directory and its subfolders. Explicit
+  workspace restrictions in prepared or existing configurations are preserved.
+  Symlinks pointing outside an allowed root do not expand access; configure
+  another root explicitly when needed.
 
 The prompts use the terminal directly, so they work when the script is piped
 into `sh`. Without an interactive terminal, provide `worker.json` beforehand.
@@ -251,10 +255,11 @@ startup without changing the configured path. A private `.bbolt-backup` copy is
 retained before conversion; see [worker storage and recovery](operations.md#worker-storage-and-ambiguous-outcomes)
 before restoring a backup or rolling back to an older binary.
 
-For a new Linux service, the wizard asks whether to restrict the worker. The
-default is **yes**. Restricted mode enables `PrivateTmp`, `PrivateUsers`, and
-`NoNewPrivileges`; for example, a command such as `sudo apt update` cannot
-elevate privileges from the worker. Answer **no** for full system access, which
+For a fresh enrollment, choose service access in the admin dialog before copying
+the URL. Changing the selection revokes the previous unused URL and creates a
+new one. **Restricted** is the default. On Linux, it enables `PrivateTmp`,
+`PrivateUsers`, and `NoNewPrivileges`; for example, a command such as `sudo apt update` cannot
+elevate privileges from the worker. **Full account permissions**
 installs these settings:
 
 ```ini
@@ -266,15 +271,38 @@ NoNewPrivileges=no
 
 Full access uses the Linux account's existing permissions and sudo rules. It
 does not grant sudo privileges or change Codex session permissions or configured
-workspace roots. Updates, adoption, and repeated setup preserve the existing
-service's access settings. macOS services use the account's normal permissions;
-the Linux restriction choice does not apply to launchd.
+workspace roots. The installer applies the selection from the enrollment URL
+without another permissions question. Updates, adoption, and repeated setup
+preserve the existing service's access settings. macOS services use the account's
+normal permissions; the Linux restriction choice does not apply to launchd.
 
-On Linux, setup enables systemd lingering so the
+On Linux, setup attempts to enable systemd lingering so the
 worker can stay online after logout and start at boot. If administrator access
-is needed, it offers to run `sudo loginctl enable-linger` and verifies the result.
-Declining leaves the worker installed but it may stop after logout. On macOS,
+is needed, it runs `sudo loginctl enable-linger` and verifies the result; sudo
+may prompt for your password. If this fails, the worker remains installed and
+setup prints a command for an administrator; it may stop after logout until
+lingering is enabled. Codex sign-in can also require approval or account
+authentication in the provider's browser flow. These authentication steps add
+no installer configuration choices. On macOS,
 the worker starts when the user signs in to the desktop.
+
+Keep the enrollment URL private: possession allows one worker enrollment. The
+admin dialog shows a countdown and copy button. Use **Cancel and revoke** to
+disable an unused URL; closing the dialog keeps it valid until used or expired.
+An expired, revoked or used URL needs a fresh **Enroll worker** URL. The worker
+appears in the dashboard only after the installer redeems the URL and supplies
+its name. Failed admin requests require an explicit retry and never silently
+issue another URL.
+
+Before redeeming a URL, setup checks the service manager and completes Codex
+installation and sign-in. After redemption, it atomically saves private recovery
+credentials and configuration under `~/.local/state/codex-worker/setup/`, with
+owner-only permissions. If service installation fails or setup is interrupted,
+rerun the same installer command as the same user; it resumes that saved worker
+without asking for another URL. The recovery files are removed after successful
+installation. If the redemption response was lost before credentials could be
+saved, the URL may already be consumed: obtain a fresh URL and revoke any unused
+worker created by the first attempt in the admin console.
 
 Setup prints immediately usable `codex-worker status`, `doctor`, and
 `attach --latest` commands with full executable paths. If `~/.local/bin` is not
