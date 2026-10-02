@@ -155,7 +155,7 @@ func (c *Connection) connect(ctx context.Context) error {
 		return fmt.Errorf("load local event watermark: %w", err)
 	}
 	hostname, _ := os.Hostname()
-	hello := protocol.Hello{WorkerID: c.cfg.WorkerID, WorkerName: c.cfg.Name, Hostname: hostname, OS: runtime.GOOS, Arch: runtime.GOARCH, WorkerVersion: buildinfo.Version, ProtocolMin: protocol.Version, ProtocolMax: protocol.Version, LastAckedEventSeq: lastAcked, SupportsWebUI: true, SupportsImageInput: true, SupportsSessionWorkspaces: true, SupportsSessionDeletion: true, SupportsConversationHistory: true, SupportsWorkerUpdate: c.updateManager != "", Runtimes: c.snapshot()}
+	hello := protocol.Hello{WorkerID: c.cfg.WorkerID, WorkerName: c.cfg.Name, Hostname: hostname, OS: runtime.GOOS, Arch: runtime.GOARCH, WorkerVersion: buildinfo.Version, ProtocolMin: protocol.Version, ProtocolMax: protocol.Version, LastAckedEventSeq: lastAcked, SupportsWebUI: true, SupportsImageInput: true, SupportsSessionWorkspaces: true, SupportsWebUISessionCreation: true, SupportsSessionDeletion: true, SupportsConversationHistory: true, SupportsWorkerUpdate: c.updateManager != "", Runtimes: c.snapshot()}
 	handshakeCtx, stopHandshake := context.WithTimeout(connectionCtx, 10*time.Second)
 	if err := c.sendRedactedEnvelope(handshakeCtx, writes, "hello", hello); err != nil {
 		stopHandshake()
@@ -202,7 +202,7 @@ func (c *Connection) connect(ctx context.Context) error {
 		case err := <-readErr:
 			return err
 		case <-heartbeat.C:
-			if err := c.sendRedactedEnvelope(connectionCtx, writes, "heartbeat", protocol.Heartbeat{WorkerID: c.cfg.WorkerID, UptimeSeconds: int64(time.Since(c.startedAt).Seconds()), SupportsWebUI: true, SupportsImageInput: true, SupportsSessionWorkspaces: true, SupportsSessionDeletion: true, SupportsConversationHistory: true, SupportsWorkerUpdate: c.updateManager != "", Runtimes: c.snapshot()}); err != nil {
+			if err := c.sendRedactedEnvelope(connectionCtx, writes, "heartbeat", protocol.Heartbeat{WorkerID: c.cfg.WorkerID, UptimeSeconds: int64(time.Since(c.startedAt).Seconds()), SupportsWebUI: true, SupportsImageInput: true, SupportsSessionWorkspaces: true, SupportsWebUISessionCreation: true, SupportsSessionDeletion: true, SupportsConversationHistory: true, SupportsWorkerUpdate: c.updateManager != "", Runtimes: c.snapshot()}); err != nil {
 				return err
 			}
 		case <-poll.C:

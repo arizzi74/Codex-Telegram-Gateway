@@ -15,6 +15,21 @@ const sessions = [
   { session_id: 'c', codex_thread_id: 'thread-c', worker_id: 'w', worker_name: 'Linux worker', runtime_name: 'Primary Codex', name: 'Large conversation', cwd: '/projects/history', state: 'idle' },
   { session_id: 'd', codex_thread_id: 'thread-d', worker_id: 'w', worker_name: 'Linux worker', runtime_name: 'Primary Codex', name: 'Short visible page', cwd: '/projects/short-history', state: 'idle' },
 ];
+for (const session of sessions) session.runtime_id = 'primary';
+const workers = [
+  { ID: 'w', Name: 'Linux worker', Enabled: true, Connectivity: 'connected', SupportsSessionWorkspaces: true, SupportsWebUISessionCreation: true },
+  { ID: 'fresh', Name: 'Fresh worker ' + hostile, Enabled: true, Connectivity: 'connected', SupportsSessionWorkspaces: true, SupportsWebUISessionCreation: true },
+  { ID: 'offline', Name: 'Offline worker', Enabled: true, Connectivity: 'offline', SupportsSessionWorkspaces: true, SupportsWebUISessionCreation: true },
+  { ID: 'no-runtime', Name: 'Worker without a runtime', Enabled: true, Connectivity: 'connected', SupportsSessionWorkspaces: true, SupportsWebUISessionCreation: true },
+  { ID: 'old-worker', Name: 'Worker needs update', Enabled: true, Connectivity: 'connected', SupportsSessionWorkspaces: true, SupportsWebUISessionCreation: false },
+  { ID: 'disabled-worker', Name: 'Disabled worker', Enabled: false, Connectivity: 'connected', SupportsSessionWorkspaces: true, SupportsWebUISessionCreation: true },
+];
+const runtimes = [
+  { runtime_id: 'primary', worker_id: 'w', name: 'Primary Codex', generation: 1, state: 'running' },
+  { runtime_id: 'fresh-primary', worker_id: 'fresh', name: 'Fresh Codex', generation: 3, state: 'running' },
+  { runtime_id: 'fresh-other', worker_id: 'fresh', name: 'Other Codex', generation: 7, state: 'running' },
+  { runtime_id: 'old-primary', worker_id: 'old-worker', name: 'Old Codex', generation: 1, state: 'running' },
+];
 const now = Math.floor(Date.now() / 1000);
 const rateLimits = {
   limitId: 'codex',
@@ -67,6 +82,8 @@ turns['thread-d'] = [{ id: 'short-d', status: 'completed', startedAt: now - 500,
   const errors = [];
   page.on('pageerror', error => errors.push(error.message));
   let authStatus = 200;
+  let browserLoginID = 'browser-test-session', browserExpiry = Date.now() + 28800000;
+  let rejectNextLoginFinish = false;
   const paths = [];
   const gatewayCommands = [];
   let holdGatewayCommand = false;
@@ -84,9 +101,32 @@ turns['thread-d'] = [{ id: 'short-d', status: 'completed', startedAt: now - 500,
   const deleteStatuses = new Map();
   let rejectNextDelete = false;
   let dropNextDeleteAcknowledgement = false;
+  let listedSessions = sessions;
+  const workerSessionRequests = [], workspaceRequests = [], workerSessionStatuses = new Map();
+  let creationBehavior = 'pending';
   await page.route('https://webui.test/**', async route => {
     const url = new URL(route.request().url()); paths.push(url.pathname);
     if (url.pathname === '/tgw/api/v1/webui/push/config') return route.fulfill({ contentType: 'application/json', body: JSON.stringify({ supported: false, scope: 'all', subscribed: false }) });
+    if (url.pathname === '/tgw/api/v1/webui/workspaces') {
+      const request = route.request().method() === 'POST' ? route.request().postDataJSON() : Object.fromEntries(url.searchParams);
+      workspaceRequests.push({ method: route.request().method(), csrf: route.request().headers()['x-csrf-token'], ...request });
+      const folder = request.path || '/home/demo/CODEX';
+      if (folder === '/outside') return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ command_id: request.request_id, worker_id: request.worker_id, runtime_id: request.runtime_id, runtime_generation: Number(request.runtime_generation), status: 'failed', pending: false, error_code: 'invalid_workspace', message: 'This folder is outside the worker’s allowed workspace roots.' }) });
+      return route.fulfill({ contentType: 'application/json', body: JSON.stringify({ command_id: request.request_id, worker_id: request.worker_id, runtime_id: request.runtime_id, runtime_generation: Number(request.runtime_generation), status: 'completed', pending: false, workspace: { path: folder, parent: folder === '/home/demo/CODEX/project' ? '/home/demo/CODEX' : '', directories: folder === '/home/demo/CODEX' ? [{ name: 'project ' + hostile, path: '/home/demo/CODEX/project' }] : [], offset: Number(request.offset || 0), has_more: false } }) });
+    }
+    if (url.pathname === '/tgw/api/v1/webui/sessions/new') {
+      const request = route.request().method() === 'POST' ? route.request().postDataJSON() : Object.fromEntries(url.searchParams);
+      workerSessionRequests.push({ method: route.request().method(), csrf: route.request().headers()['x-csrf-token'], ...request });
+      if (route.request().method() === 'POST') {
+        if (creationBehavior === 'reject') return route.fulfill({ status: 409, contentType: 'application/json', body: JSON.stringify({ error_code: 'runtime_unavailable', message: 'This runtime is no longer available. Refresh workers and choose another runtime.' }) });
+        const status = { command_id: request.request_id, worker_id: request.worker_id, runtime_id: request.runtime_id, runtime_generation: request.runtime_generation, status: 'pending', pending: true, message: 'Session creation queued.' };
+        workerSessionStatuses.set(request.request_id, status);
+        if (creationBehavior === 'drop') return route.abort('failed');
+        return route.fulfill({ status: 202, contentType: 'application/json', body: JSON.stringify(status) });
+      }
+      const status = workerSessionStatuses.get(request.request_id);
+      return route.fulfill({ status: status ? 200 : 404, contentType: 'application/json', body: JSON.stringify(status || { message: 'Creation request not found. Check the sessions before retrying.' }) });
+    }
     if (url.pathname === '/tgw/api/v1/webui/sessions/delete') {
       if (route.request().method() === 'POST') {
         const request = route.request().postDataJSON();
@@ -105,9 +145,15 @@ turns['thread-d'] = [{ id: 'short-d', status: 'completed', startedAt: now - 500,
     }
     if (url.pathname === '/tgw/api/v1/webui/sessions') {
       if (holdSessionInventory) { heldSessionInventories.push(route); notifySessionInventoryHeld(); return; }
-      return route.fulfill({ status: authStatus, contentType: 'application/json', body: JSON.stringify({ sessions }) });
+      return route.fulfill({ status: authStatus, contentType: 'application/json', body: JSON.stringify({ sessions: listedSessions, workers, runtimes }) });
     }
-    if (url.pathname === '/tgw/api/v1/admin/session') return route.fulfill({ status: authStatus, contentType: 'application/json', body: JSON.stringify({ authenticated: true, session_id: 'browser-test-session', server_time: new Date().toISOString(), expires_at: new Date(Date.now() + 28800000).toISOString(), reauthenticated_at: new Date().toISOString() }) });
+    if (url.pathname === '/tgw/api/v1/admin/session') return route.fulfill({ status: authStatus, contentType: 'application/json', body: JSON.stringify({ authenticated: true, owner_id: 'browser-test-owner', session_id: browserLoginID, server_time: new Date().toISOString(), expires_at: new Date(browserExpiry).toISOString(), reauthenticated_at: new Date().toISOString() }) });
+    if (url.pathname === '/tgw/api/v1/admin/login/begin') return route.fulfill({ contentType: 'application/json', body: JSON.stringify({ ceremony_id: 'browser-test-ceremony', publicKey: { challenge: 'AQID', rpId: 'webui.test', allowCredentials: [] } }) });
+    if (url.pathname === '/tgw/api/v1/admin/login/finish') {
+      if (rejectNextLoginFinish) { rejectNextLoginFinish = false; return route.fulfill({ status: 503, contentType: 'application/json', body: '{}' }); }
+      browserLoginID = 'browser-test-renewed'; browserExpiry = Date.now() + 28800000;
+      return route.fulfill({ contentType: 'application/json', body: JSON.stringify({ ok: true }) });
+    }
     if (url.pathname === '/tgw/api/v1/webui/commands') {
       const request = route.request().method() === 'POST' ? route.request().postDataJSON() : Object.fromEntries(url.searchParams);
       gatewayCommands.push({ method: route.request().method(), csrf: route.request().headers()['x-csrf-token'], ...request });
@@ -122,6 +168,7 @@ turns['thread-d'] = [{ id: 'short-d', status: 'completed', startedAt: now - 500,
     await route.fulfill({ contentType, headers: { 'Content-Security-Policy': csp }, body: fs.readFileSync(path.join(assets, filename)) });
   });
   await page.addInitScript(({ turns, rateLimits, sessions }) => {
+    Object.defineProperty(navigator, 'credentials', { configurable: true, value: { get: async () => ({ id: 'browser-passkey', rawId: new Uint8Array([1, 2]), type: 'public-key', response: { clientDataJSON: new Uint8Array([3]), authenticatorData: new Uint8Array([4]), signature: new Uint8Array([5]), userHandle: null }, getClientExtensionResults: () => ({}) }) } });
     // Desktop automation has no native phone keyboard. Keep ordinary viewport
     // changes real, but allow keyboard resize/pan events to be delivered
     // independently, as mobile Safari does during input focus.
@@ -376,7 +423,186 @@ turns['thread-d'] = [{ id: 'short-d', status: 'completed', startedAt: now - 500,
     });
     assert.equal(fits, true, label + ' Settings fits the viewport without horizontal scrolling');
   };
+  const creationScreenshot = async name => {
+    if (!process.env.WEBUI_SCREENSHOTS) return;
+    await page.evaluate(() => {
+      window.creationScreenshotLabels = [];
+      for (const element of document.querySelectorAll('.worker-name,#new-session-worker')) if (element.textContent.includes('<img')) { window.creationScreenshotLabels.push([element, element.textContent]); element.textContent = element.id === 'new-session-worker' ? 'Fresh worker · Fresh Codex' : 'Fresh worker'; }
+    });
+    await page.screenshot({ path: path.join(process.env.WEBUI_SCREENSHOTS, name) });
+    await page.evaluate(() => { for (const [element, value] of window.creationScreenshotLabels) element.textContent = value; delete window.creationScreenshotLabels; });
+  };
   try {
+    // Every enrolled worker is visible before the first session exists.
+    listedSessions = [];
+    await page.goto('https://webui.test/tgw/webui/');
+    await page.waitForSelector('.session-create[data-create-worker-id="fresh"]');
+    assert.equal(await page.locator('.session-group').count(), workers.length, 'Zero-session workers have independent sidebar headings');
+    assert.equal(await page.locator('.session-button').count(), 0);
+    for (const id of ['offline', 'no-runtime', 'old-worker', 'disabled-worker']) assert.equal(await page.locator('.session-create[data-create-worker-id="' + id + '"]').isDisabled(), true, id + ' exposes an actionable availability reason');
+    assert.match(await page.locator('.session-group[data-worker-id="old-worker"]').textContent(), /Update this worker/);
+    assert.match(await page.locator('.session-group[data-worker-id="no-runtime"]').textContent(), /No running Codex runtime/);
+    await creationScreenshot('webui-empty-workers-desktop.png');
+    const createOn = id => page.locator('.session-create[data-create-worker-id="' + id + '"]');
+    const newDialog = page.getByRole('dialog', { name: 'New session', exact: true });
+    const creationPosts = () => workerSessionRequests.filter(request => request.method === 'POST');
+    const waitCreationCheck = () => page.waitForFunction(() => document.querySelector('#new-session-submit').textContent === 'Check status' && !document.querySelector('#new-session-submit').disabled);
+    await createOn('fresh').click();
+    assert.equal(await newDialog.isVisible(), true);
+    assert.equal(await page.locator('#new-session-close').evaluate(element => element === document.activeElement), true, 'Opening the modal keeps the keyboard closed');
+    assert.equal(await page.locator('#new-session-name').evaluate(element => element.compareDocumentPosition(document.querySelector('#new-session-cwd')) & Node.DOCUMENT_POSITION_FOLLOWING), 4, 'Session name precedes its generated path');
+    await page.keyboard.press('Tab');
+    assert.equal(await page.locator('#new-session-name').evaluate(element => element === document.activeElement), true, 'Name is the first form field in keyboard order');
+    await page.locator('#new-session-name').fill('My first session');
+    assert.equal(await page.locator('#new-session-cwd').inputValue(), '~/CODEX/My_first_session', 'The name immediately populates the full worker-home destination');
+    await creationScreenshot('webui-new-session-desktop.png');
+    await page.locator('#new-session-cwd').fill('/projects/existing');
+    await page.locator('#new-session-name').fill('Renamed session');
+    assert.equal(await page.locator('#new-session-cwd').inputValue(), '/projects/existing', 'Editing the name preserves a manually selected project path');
+    await page.locator('#new-session-runtime').selectOption('fresh-other');
+    await page.locator('#new-session-browse').click();
+    await page.locator('#new-session-browser').waitFor();
+    assert.equal(workspaceRequests.at(-1).worker_id, 'fresh');
+    assert.equal(workspaceRequests.at(-1).runtime_id, 'fresh-other');
+    assert.equal(workspaceRequests.at(-1).runtime_generation, 7);
+    assert.equal(workspaceRequests.at(-1).path, '/projects/existing');
+    assert.equal(workspaceRequests.at(-1).csrf, 'browser-test-csrf');
+    await page.locator('#new-session-default').click();
+    await page.getByRole('button', { name: 'Open folder project ' + hostile, exact: true }).waitFor();
+    await page.getByRole('button', { name: 'Open folder project ' + hostile, exact: true }).click();
+    await page.waitForFunction(() => document.querySelector('#new-session-browser-path').textContent === '/home/demo/CODEX/project');
+    assert.equal(await page.locator('#new-session-parent').isVisible(), true);
+    await page.locator('#new-session-use-folder').click();
+    assert.equal(await page.locator('#new-session-cwd').inputValue(), '/home/demo/CODEX/project', 'A browsed existing directory is an editable full destination');
+    await page.locator('#new-session-parent').click();
+    await page.waitForFunction(() => document.querySelector('#new-session-browser-path').textContent === '/home/demo/CODEX');
+    assert.equal(await page.locator('#new-session-parent').isHidden(), true, 'The browser only offers parents returned by the worker');
+    await page.locator('#new-session-cwd').fill('/outside');
+    await page.locator('#new-session-browse').click();
+    await page.waitForFunction(() => document.querySelector('#new-session-message').textContent.includes('outside'));
+    assert.equal(await page.locator('#new-session-browse').isDisabled(), false, 'A denied path remains editable and retryable');
+    assert.equal(await page.evaluate(() => Boolean(window.injected)), false, 'Worker and directory labels render as text');
+    await page.locator('#new-session-cancel').click();
+    assert.equal(creationPosts().length, 0, 'Cancel before submission never creates a session');
+    assert.equal(await createOn('fresh').evaluate(element => element === document.activeElement), true, 'Cancel restores the worker plus button');
+    await page.locator('#session-search').fill('no matching sessions');
+    assert.equal(await page.locator('.session-group').count(), workers.length, 'Session search keeps empty worker headings available');
+    await page.locator('#session-search').fill('');
+    for (const width of [390, 320]) {
+      await page.setViewportSize({ width, height: 844 });
+      await page.locator('#show-sessions').click();
+      await createOn('fresh').waitFor({ state: 'visible' });
+      await page.waitForFunction(() => !document.querySelector('#refresh-sessions').disabled);
+      assert.equal(await page.evaluate(() => document.activeElement?.matches('input,textarea') || false), false, 'Opening the mobile drawer does not autofocus text fields');
+      const plus = await createOn('fresh').evaluate(element => { const rect = element.getBoundingClientRect(); return { width: rect.width, height: rect.height }; });
+      assert.ok(plus.width >= 40 && plus.height >= 44, 'The visible mobile plus has a usable tap target');
+      await creationScreenshot('webui-empty-workers-mobile-' + width + '.png');
+      await createOn('fresh').click();
+      assert.equal(await page.locator('#new-session-close').evaluate(element => element === document.activeElement), true);
+      await page.locator('#new-session-name').fill('My first session');
+      await creationScreenshot('webui-new-session-mobile-' + width + '.png');
+      await page.locator('#new-session-name').fill('Mobile session with a long friendly name');
+      await page.locator('#new-session-cwd').fill('/projects/' + 'long-project-path-'.repeat(24));
+      assert.equal(await newDialog.evaluate(element => {
+        const rect = element.getBoundingClientRect(); return rect.left >= 0 && rect.top >= 0 && rect.right <= innerWidth && rect.bottom <= innerHeight && element.scrollWidth <= element.clientWidth;
+      }), true, width + 'px modal and editable path fit without horizontal overflow');
+      await page.keyboard.press('Escape');
+      await newDialog.waitFor({ state: 'hidden' });
+      assert.equal(await createOn('fresh').evaluate(element => element === document.activeElement), true, 'Escape restores mobile worker focus');
+      await page.locator('#close-sessions').click();
+    }
+    await page.setViewportSize({ width: 1440, height: 1000 });
+    await createOn('fresh').click();
+    assert.equal(await page.locator('#new-session-cwd').inputValue(), '~/CODEX/', 'Reopening resets automatic path generation');
+    await page.locator('#new-session-name').fill('First session');
+    await page.locator('#new-session-submit').click();
+    await waitCreationCheck();
+    const firstCreation = creationPosts().at(-1);
+    assert.deepEqual({ worker: firstCreation.worker_id, runtime: firstCreation.runtime_id, generation: firstCreation.runtime_generation, name: firstCreation.name, cwd: firstCreation.cwd, csrf: firstCreation.csrf }, { worker: 'fresh', runtime: 'fresh-primary', generation: 3, name: 'First session', cwd: '~/CODEX/First_session', csrf: 'browser-test-csrf' });
+    assert.equal('session_id' in firstCreation, false, 'A worker can create its first session without a prior session target');
+    assert.equal(await page.evaluate(() => window.testSockets.length), 0, 'Pending creation never attaches or changes a conversation');
+    const firstSession = { session_id: 'first-created', worker_id: 'fresh', worker_name: 'Fresh worker', runtime_id: 'fresh-primary', runtime_name: 'Fresh Codex', codex_thread_id: 'thread-first-created', name: 'First session', cwd: '/home/demo/CODEX/First_session', state: 'idle' };
+    listedSessions = [firstSession];
+    workerSessionStatuses.set(firstCreation.request_id, { ...workerSessionStatuses.get(firstCreation.request_id), status: 'completed', pending: false, message: 'Session created.', session: firstSession });
+    await page.locator('#new-session-submit').click();
+    await newDialog.waitFor({ state: 'hidden' });
+    await page.waitForFunction(() => document.querySelector('#session-title').textContent === 'First session');
+    assert.equal(creationPosts().length, 1, 'Confirmation uses GET and never repeats creation');
+
+    listedSessions = sessions;
+    await page.goto('https://webui.test/tgw/webui/');
+    await page.waitForSelector('[data-session-id="a"]');
+    await choose('a');
+    await page.locator('#prompt').fill('Keep this conversation draft.');
+    const selectedBeforeCreation = await page.evaluate(() => window.testSockets.at(-1).session);
+    await createOn('fresh').click();
+    await page.locator('#new-session-name').fill('Rejected runtime');
+    creationBehavior = 'reject';
+    await page.locator('#new-session-submit').click();
+    await page.waitForFunction(() => document.querySelector('#new-session-message').textContent.includes('no longer available'));
+    assert.equal(await page.locator('#new-session-name').isDisabled(), false, 'An explicit dispatch rejection leaves form corrections available');
+    assert.equal(await page.locator('#prompt').inputValue(), 'Keep this conversation draft.');
+    assert.equal(await page.evaluate(() => window.testSockets.at(-1).session), selectedBeforeCreation, 'Failed creation preserves the current conversation');
+    await page.locator('#new-session-name').fill('Lost acknowledgement');
+    creationBehavior = 'drop';
+    await page.locator('#new-session-submit').click();
+    await waitCreationCheck();
+    const lostCreation = creationPosts().at(-1), postsAfterLostCreation = creationPosts().length;
+    assert.match(await page.locator('#new-session-message').textContent(), /may have been accepted/);
+    await page.locator('#new-session-cancel').click();
+    workers.find(worker => worker.ID === 'fresh').Connectivity = 'offline';
+    await page.locator('#refresh-sessions').click();
+    await page.waitForFunction(() => document.querySelector('.session-group[data-worker-id="fresh"]').textContent.includes('offline'));
+    assert.equal(await createOn('fresh').isDisabled(), false, 'An offline worker still allows checking its existing creation request');
+    await createOn('fresh').click();
+    assert.equal(await page.locator('#new-session-name').isDisabled(), true, 'Reopening a lost result cannot start a duplicate operation');
+    workerSessionStatuses.set(lostCreation.request_id, { ...workerSessionStatuses.get(lostCreation.request_id), status: 'failed', pending: false, error_code: 'outcome_unknown', message: 'Worker stopped before the outcome was recorded.' });
+    await page.locator('#new-session-submit').click();
+    await waitCreationCheck();
+    assert.match(await page.locator('#new-session-message').textContent(), /will not be resent/);
+    assert.equal(creationPosts().length, postsAfterLostCreation, 'Lost acknowledgement, close/reopen and unknown worker status never replay POST');
+    assert.equal(workerSessionRequests.at(-1).request_id, lostCreation.request_id, 'Status reads retain the original request identity');
+    assert.equal(await page.evaluate(() => window.testSockets.at(-1).session), selectedBeforeCreation);
+    await page.locator('#new-session-cancel').click();
+    workers.find(worker => worker.ID === 'fresh').Connectivity = 'connected';
+    browserExpiry = Date.now() + 120000;
+    await page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')));
+    await page.locator('.session-auth-banner:not([hidden])').waitFor();
+    rejectNextLoginFinish = true;
+    await page.locator('.session-auth-banner button').click();
+    await page.waitForFunction(() => document.querySelector('.session-auth-status').textContent.includes('failed'));
+    await page.waitForFunction(() => document.querySelector('#connection').dataset.state === 'connected' && !document.querySelector('#composer').hidden);
+    await createOn('fresh').click();
+    await waitCreationCheck();
+    await page.locator('#new-session-submit').click();
+    await waitCreationCheck();
+    assert.equal(workerSessionRequests.at(-1).request_id, lostCreation.request_id, 'A failed sign-in renewal restores GET checks for the same creation');
+    assert.equal(creationPosts().length, postsAfterLostCreation);
+    await page.locator('#new-session-cancel').click();
+    await page.locator('.session-auth-banner button').click();
+    await page.waitForFunction(() => document.querySelector('.session-auth-banner').hidden && !document.querySelector('#composer').hidden && document.querySelector('#connection').dataset.state === 'connected');
+    await createOn('fresh').click();
+    await waitCreationCheck();
+    await page.locator('#new-session-submit').click();
+    await waitCreationCheck();
+    assert.equal(workerSessionRequests.at(-1).request_id, lostCreation.request_id, 'Successful renewal rebases status reads while preserving the durable request ID');
+    assert.equal(creationPosts().length, postsAfterLostCreation, 'Renewal never replays a pending or unknown creation POST');
+    assert.equal(await page.locator('#prompt').inputValue(), 'Keep this conversation draft.', 'Creation checks and passkey renewal preserve the selected draft');
+    await page.locator('#new-session-cancel').click();
+    // Empty-worker changes are pushed independently of session activity.
+    workers.push({ ID: 'new-empty-worker', Name: 'New enrolled worker', Enabled: true, Connectivity: 'connected', SupportsSessionWorkspaces: true, SupportsWebUISessionCreation: true });
+    await page.evaluate(() => {
+      const socket = window.testActivitySocket;
+      socket.emit({ type: 'activity_snapshot', version: 2, sequence: ++socket.sequence, revision: window.testActivityRevision++, inventory_revision: 'new-enrollment', sessions: window.testActivityRows });
+    });
+    await page.waitForSelector('.session-group[data-worker-id="new-empty-worker"]');
+    const readsAfterWorkerChange = paths.filter(value => value === '/tgw/api/v1/webui/sessions').length;
+    await page.evaluate(() => {
+      const socket = window.testActivitySocket;
+      socket.emit({ type: 'activity_snapshot', version: 2, sequence: ++socket.sequence, revision: window.testActivityRevision++, inventory_revision: 'new-enrollment', sessions: window.testActivityRows });
+    });
+    assert.equal(paths.filter(value => value === '/tgw/api/v1/webui/sessions').length, readsAfterWorkerChange, 'An unchanged worker revision does not poll inventory');
+    workers.pop(); creationBehavior = 'pending';
     await page.goto('https://webui.test/tgw/webui/');
     await page.waitForSelector('[data-session-id="a"]');
     assert.equal((await page.locator('.sidebar-footer').textContent()).trim(), 'Settings', 'Only Settings remains in the sidebar footer');
@@ -699,7 +925,7 @@ turns['thread-d'] = [{ id: 'short-d', status: 'completed', startedAt: now - 500,
     sessions[0].name = originalSessionName;
     await activityEvent('session_changed', sessionActivityRow('a'));
     await page.waitForFunction(name => document.querySelector('[data-session-id="a"] .name').textContent === name, originalSessionName);
-    const staleInventory = JSON.stringify({ sessions });
+    const staleInventory = JSON.stringify({ sessions, workers, runtimes });
     holdSessionInventory = true;
     const pendingInventory = new Promise(resolve => { notifySessionInventoryHeld = resolve; });
     await page.locator('#refresh-sessions').click(); await pendingInventory;
@@ -1276,11 +1502,11 @@ turns['thread-d'] = [{ id: 'short-d', status: 'completed', startedAt: now - 500,
     await page.locator('#prompt').fill('/new');
     await page.locator('#send').click();
     assert.equal(await page.getByLabel('Existing working directory on this worker', { exact: true }).inputValue(), longPath, 'New sessions default to the selected workspace');
-    await page.getByLabel('Session name', { exact: true }).fill('Session 12');
-    await page.getByLabel('Session name', { exact: true }).press('ArrowLeft');
-    await page.getByLabel('Session name', { exact: true }).press('3');
-    assert.equal(await page.getByLabel('Session name', { exact: true }).inputValue(), 'Session 132', 'Command form inputs retain normal arrow and digit editing');
-    await page.getByLabel('Session name', { exact: true }).fill('Do not create from a stale form');
+    await page.locator('#command-content').getByLabel('Session name', { exact: true }).fill('Session 12');
+    await page.locator('#command-content').getByLabel('Session name', { exact: true }).press('ArrowLeft');
+    await page.locator('#command-content').getByLabel('Session name', { exact: true }).press('3');
+    assert.equal(await page.locator('#command-content').getByLabel('Session name', { exact: true }).inputValue(), 'Session 132', 'Command form inputs retain normal arrow and digit editing');
+    await page.locator('#command-content').getByLabel('Session name', { exact: true }).fill('Do not create from a stale form');
     await page.locator('#command-content .command-form').evaluate(form => { window.staleCommandForm = form; window.staleCommandCancel = form.querySelector('button[type="button"]'); });
     const commandsBeforeStaleForm = await page.evaluate(() => window.testSent.filter(frame => frame.method === 'gateway/command').length);
     await page.getByRole('button', { name: 'Open command menu', exact: true }).click();
@@ -1295,7 +1521,7 @@ turns['thread-d'] = [{ id: 'short-d', status: 'completed', startedAt: now - 500,
     // the old success continuation close the new session's command menu.
     await page.locator('#prompt').fill('/new');
     await page.locator('#send').click();
-    await page.getByLabel('Session name', { exact: true }).fill('Created while inventory waits');
+    await page.locator('#command-content').getByLabel('Session name', { exact: true }).fill('Created while inventory waits');
     holdSessionInventory = true;
     const inventoryHeld = new Promise(resolve => { notifySessionInventoryHeld = resolve; });
     await page.locator('#command-content').getByRole('button', { name: 'Create session', exact: true }).click();
@@ -1304,7 +1530,7 @@ turns['thread-d'] = [{ id: 'short-d', status: 'completed', startedAt: now - 500,
     await page.getByRole('button', { name: 'Open command menu', exact: true }).click();
     await page.getByLabel('Find a command', { exact: true }).fill('tgstatus');
     holdSessionInventory = false;
-    for (const route of heldSessionInventories.splice(0)) await route.fulfill({ status: authStatus, contentType: 'application/json', body: JSON.stringify({ sessions }) });
+    for (const route of heldSessionInventories.splice(0)) await route.fulfill({ status: authStatus, contentType: 'application/json', body: JSON.stringify({ sessions, workers, runtimes }) });
     await page.waitForFunction(() => !document.querySelector('#refresh-sessions').disabled);
     await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
     assert.equal(await page.locator('#command-panel').isVisible(), true, 'A delayed new-session result cannot close another session’s menu');

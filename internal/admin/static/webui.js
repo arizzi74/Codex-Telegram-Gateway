@@ -3,7 +3,7 @@
   const { node, clean, markdown, code } = window.CodexFormat;
   const $ = id => document.getElementById(id);
   const api = '/tgw/api/v1/webui';
-  const state = { sessions: [], selected: null, socket: null, generation: 0, authGeneration: 0, sequence: 0, pending: new Map(), drafts: new Map(), positions: new Map(), items: new Map(), questions: new Map(), models: [], turn: null, connected: false, stopped: false, attempts: 0, timer: null, loading: false, cursor: null, queuedEvents: [], submitting: false, renderTimer: null, authenticated: false, refreshing: false, refreshTimer: null };
+  const state = { sessions: [], workers: [], runtimes: [], selected: null, socket: null, generation: 0, authGeneration: 0, sequence: 0, pending: new Map(), drafts: new Map(), positions: new Map(), items: new Map(), questions: new Map(), models: [], turn: null, connected: false, stopped: false, attempts: 0, timer: null, loading: false, cursor: null, queuedEvents: [], submitting: false, renderTimer: null, authenticated: false, refreshing: false, refreshTimer: null };
   let commandUI = null, notificationUI = null, sessionAuth = null, rawView = false, gatewayCommandAbort = null;
   let authRestore = null, restoringPosition = false, uncertainSend = false;
   let draftRecovery = null, recoveredDrafts = null, draftSaveTimer = null, draftDirty = false;
@@ -12,7 +12,7 @@
   const sessionUUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
   const requestedSession = new URL(location.href).searchParams.get('session_id') || '';
   let notificationSessionID = sessionUUID.test(requestedSession) ? requestedSession.toLowerCase() : '';
-  const activity = { socket: null, timer: null, generation: 0, revision: -1, sequence: -1, sessions: new Map(), attempts: 0, watchdog: null, ready: false };
+  const activity = { socket: null, timer: null, generation: 0, revision: -1, sequence: -1, inventoryRevision: '', sessions: new Map(), attempts: 0, watchdog: null, ready: false };
   const sessionSettings = new Map(), activitySettingsRevisions = new Map();
   let settingsSerial = 0;
   let permissionSettings = null, permissionRevision = 0;
@@ -23,6 +23,8 @@
   const imageDrafts = new Map();
   const sessionDeletions = new Map();
   let deleteSessionTarget = null;
+  const sessionCreations = new Map();
+  let newSessionWorkerID = '', workspaceBrowse = null, workspacePage = null, newSessionPathEdited = false;
   const maxImageBytes = 10 * 1024 * 1024, maxDraftImageBytes = 40 * 1024 * 1024;
   let imagePickerSession = null;
   let followLatest = true, bottomFrame = null;
@@ -238,6 +240,7 @@
         activity.ready = true;
         const known = new Set(state.sessions.map(row => row.session_id));
         inventoryChanged = known.size !== activity.sessions.size || [...activity.sessions.keys()].some(id => !known.has(id));
+        if (typeof message.inventory_revision === 'string' && message.inventory_revision !== activity.inventoryRevision) { activity.inventoryRevision = message.inventory_revision; inventoryChanged = true; }
       } else if (message.type === 'activity_event') {
         if (!activity.ready) { recover(0); return; }
         if (message.sequence <= activity.sequence) return;
@@ -461,15 +464,19 @@
     for (const deletion of sessionDeletions.values()) { clearTimeout(deletion.timer); deletion.controller?.abort(); }
     sessionDeletions.clear(); deleteSessionTarget = null;
     if ($('delete-session-dialog').open) $('delete-session-dialog').close();
+    for (const creation of sessionCreations.values()) { clearTimeout(creation.timer); creation.controller?.abort(); }
+    sessionCreations.clear(); newSessionWorkerID = ''; cancelWorkspaceBrowse();
+    if ($('new-session-dialog').open) $('new-session-dialog').close();
     state.stopped = true;
     closeSocket();
     state.authenticated = false;
     if ($('settings-dialog').open) $('settings-dialog').close();
     notificationUI?.setAuthenticated(false);
-    closeActivity(); activity.sessions.clear(); activity.attempts = 0; activityStatus('disconnected', 'Sign in for live updates');
+    closeActivity(); activity.sessions.clear(); activity.inventoryRevision = ''; activity.attempts = 0; activityStatus('disconnected', 'Sign in for live updates');
     sessionSettings.clear(); activitySettingsRevisions.clear();
     state.selected = null;
     state.sessions = [];
+    state.workers = []; state.runtimes = [];
     state.drafts.clear();
     for (const image of imageDrafts.values()) URL.revokeObjectURL(image.url);
     imageDrafts.clear(); renderImageDraft(); imagePickerSession = null;
@@ -507,18 +514,35 @@
     const query = $('session-search').value.toLocaleLowerCase().trim();
     const list = $('session-list'); list.replaceChildren();
     const sessions = state.sessions.filter(session => !session.archived && (!query || [title(session), session.cwd, session.worker_name, session.runtime_name].some(value => String(value || '').toLocaleLowerCase().includes(query))));
-    const groups = new Map();
-    for (const session of sessions) {
-      const name = JSON.stringify([session.worker_id, session.runtime_id, session.runtime_name]);
-      if (!groups.has(name)) groups.set(name, []);
-      groups.get(name).push(session);
-    }
-    for (const values of groups.values()) {
+    // Workers are independent of session inventory: a fresh worker remains
+    // visible and can create its first conversation.
+    const workers = new Map(state.workers.map(worker => [worker.ID, worker]));
+    for (const session of state.sessions) if (!workers.has(session.worker_id)) workers.set(session.worker_id, { ID: session.worker_id, Name: session.worker_name || session.worker_id, Connectivity: session.worker_connectivity || 'unknown' });
+    for (const worker of workers.values()) {
+      const values = sessions.filter(session => session.worker_id === worker.ID);
       const heading = node('h2', 'session-group');
-      heading.append(node('span', 'worker-name', values[0].worker_name || values[0].worker_id));
-      if (values[0].runtime_name) heading.append(node('span', 'runtime-name', values[0].runtime_name));
+      heading.dataset.workerId = worker.ID;
+      const label = node('span', 'session-group-label');
+      label.append(node('span', 'worker-name', worker.Name || worker.ID));
+      const runtimes = state.runtimes.filter(runtime => runtime.worker_id === worker.ID);
+      if (runtimes.length === 1 || (!runtimes.length && values[0]?.runtime_name)) label.append(node('span', 'runtime-name', runtimes[0]?.name || values[0].runtime_name));
+      const unavailable = workerCreationUnavailable(worker);
+      if (unavailable) label.append(node('span', 'session-group-status', unavailable));
+      const create = node('button', 'session-create'); create.type = 'button'; create.dataset.createWorkerId = worker.ID;
+      create.setAttribute('aria-label', 'New session on ' + (worker.Name || worker.ID)); create.setAttribute('aria-haspopup', 'dialog'); create.setAttribute('aria-controls', 'new-session-dialog');
+      create.title = unavailable || 'New session'; create.disabled = !!unavailable && !sessionCreations.has(worker.ID);
+      const icon = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+      icon.setAttribute('viewBox', '0 0 24 24'); icon.setAttribute('fill', 'none'); icon.setAttribute('stroke', 'currentColor'); icon.setAttribute('stroke-width', '1.6'); icon.setAttribute('aria-hidden', 'true');
+      const path = document.createElementNS('http://www.w3.org/2000/svg', 'path'); path.setAttribute('d', 'M12 4v16M4 12h16'); icon.append(path); create.append(icon);
+      create.addEventListener('click', () => openSessionCreation(worker.ID));
+      heading.append(label, create);
       list.append(heading);
+      if (!values.length) list.append(node('p', 'session-group-empty', query ? 'No matching sessions.' : 'No sessions yet.'));
+      let previousRuntime = '';
+      values.sort((a, b) => String(a.runtime_id || a.runtime_name || '').localeCompare(String(b.runtime_id || b.runtime_name || '')));
       for (const session of values) {
+        const runtimeKey = session.runtime_id || session.runtime_name || '';
+        if (runtimes.length > 1 && runtimeKey !== previousRuntime) { list.append(node('h3', 'session-runtime-heading', session.runtime_name || runtimes.find(runtime => runtime.runtime_id === session.runtime_id)?.name || 'Codex runtime')); previousRuntime = runtimeKey; }
         const row = node('div', 'session-row');
         const button = node('button', 'session-button'); button.type = 'button'; button.dataset.sessionId = session.session_id;
         button.setAttribute('aria-current', String(state.selected?.session_id === session.session_id));
@@ -538,8 +562,202 @@
         row.append(button, remove); list.append(row);
       }
     }
-    $('sessions-status').textContent = sessions.length ? sessions.length + (sessions.length === 1 ? ' session' : ' sessions') : query ? 'No matching sessions.' : 'No sessions yet. Create one from Telegram or Codex on your worker.';
+    $('sessions-status').textContent = sessions.length ? sessions.length + (sessions.length === 1 ? ' session' : ' sessions') : query ? 'No matching sessions.' : workers.size ? 'Use + beside a worker to create a session.' : 'No workers enrolled.';
     updateSessionIndicators();
+    if ($('new-session-dialog').open) renderSessionCreation();
+  }
+  function workerCreationUnavailable(worker) {
+    if (!worker || !state.authenticated) return 'Sign in to create a session.';
+    if (authRotationPending) return 'Sign-in renewal in progress';
+    if (worker.Enabled === false) return 'Worker disabled';
+    if (!['connected', 'online'].includes(worker.Connectivity)) return 'Worker ' + (worker.Connectivity || 'unavailable');
+    if (!worker.SupportsWebUISessionCreation) return 'Update this worker to create sessions.';
+    if (!state.runtimes.some(runtime => runtime.worker_id === worker.ID && runtime.state === 'running')) return 'No running Codex runtime';
+    return '';
+  }
+  function creationRuntime() {
+    return state.runtimes.find(runtime => runtime.worker_id === newSessionWorkerID && runtime.runtime_id === $('new-session-runtime').value);
+  }
+  function sessionNameError(value) {
+    const name = value.trim();
+    if (!name || name === '.' || name === '..' || new TextEncoder().encode(name).length > 120) return 'Enter a session name of 1–120 UTF-8 bytes.';
+    if (/[\/\\\p{Cc}]/u.test(name)) return 'Session name cannot contain slashes or control characters.';
+    return '';
+  }
+  function updateNewSessionPath() {
+    if (!newSessionPathEdited) $('new-session-cwd').value = '~/CODEX/' + $('new-session-name').value.trim().replace(/\p{White_Space}/gu, '_');
+    $('new-session-preview').textContent = $('new-session-cwd').value.trim() ? 'Session folder: ' + $('new-session-cwd').value.trim() : '';
+    $('new-session-name').setCustomValidity(sessionNameError($('new-session-name').value));
+  }
+  function creationMessage(message = '', error = false) {
+    $('new-session-message').textContent = message; $('new-session-message').hidden = !message; $('new-session-message').dataset.error = String(error);
+  }
+  function openSessionCreation(workerID) {
+    const worker = state.workers.find(value => value.ID === workerID);
+    if (workerCreationUnavailable(worker) && !sessionCreations.has(workerID)) return;
+    blurEditable(); commandUI?.sessionChanged();
+    newSessionWorkerID = workerID; cancelWorkspaceBrowse(); workspacePage = null;
+    const runtimes = state.runtimes.filter(runtime => runtime.worker_id === workerID);
+    $('new-session-runtime').replaceChildren(...runtimes.map(runtime => {
+      const option = node('option', '', runtime.name || runtime.runtime_id); option.value = runtime.runtime_id; option.disabled = runtime.state !== 'running'; return option;
+    }));
+    const creation = sessionCreations.get(workerID);
+    $('new-session-runtime').value = creation?.runtimeID || runtimes.find(runtime => runtime.state === 'running')?.runtime_id || '';
+    $('new-session-name').value = creation?.name || ''; $('new-session-cwd').value = creation?.cwd || '~/CODEX/';
+    newSessionPathEdited = !!creation;
+    $('new-session-runtime-field').hidden = runtimes.length < 2;
+    $('new-session-browser').hidden = true; $('new-session-directories').replaceChildren();
+    creationMessage(); updateNewSessionPath(); renderSessionCreation();
+    $('new-session-dialog').showModal();
+    // Keep phone keyboards closed until the user selects a text field.
+    $('new-session-close').focus({ preventScroll: true });
+  }
+  function renderSessionCreation() {
+    if (!newSessionWorkerID) return;
+    const worker = state.workers.find(value => value.ID === newSessionWorkerID), runtime = creationRuntime();
+    const creation = sessionCreations.get(newSessionWorkerID);
+    const unavailable = workerCreationUnavailable(worker) || (!runtime || runtime.state !== 'running' ? 'This Codex runtime is unavailable. Refresh the workers and try again.' : '');
+    const locked = creation && creation.phase !== 'failed';
+    $('new-session-worker').textContent = (worker?.Name || newSessionWorkerID) + (runtime ? ' · ' + (runtime.name || runtime.runtime_id) : '');
+    for (const id of ['new-session-name', 'new-session-cwd', 'new-session-runtime']) $(id).disabled = !!locked;
+    $('new-session-browse').disabled = !!locked || !!workspaceBrowse || !!unavailable;
+    for (const id of ['new-session-parent', 'new-session-default', 'new-session-more', 'new-session-use-folder']) $(id).disabled = !!locked || !!workspaceBrowse || !!unavailable;
+    for (const button of $('new-session-directories').querySelectorAll('button')) button.disabled = !!locked || !!workspaceBrowse || !!unavailable;
+    const checking = creation?.phase === 'submitting' || !!creation?.checking;
+    $('new-session-submit').disabled = !!checking || !!authRotationPending || (!!unavailable && !locked) || !!workspaceBrowse;
+    $('new-session-submit').textContent = creation?.phase === 'submitting' ? 'Creating…' : creation?.checking ? 'Checking…' : locked ? 'Check status' : 'Create session';
+    $('new-session-cancel').textContent = locked || creation?.phase === 'complete' ? 'Close' : 'Cancel';
+    if (creation) creationMessage(creation.message, ['failed', 'unknown'].includes(creation.phase));
+    else if (unavailable) creationMessage(unavailable, true);
+  }
+  function cancelWorkspaceBrowse() {
+    const previous = workspaceBrowse; workspaceBrowse = null;
+    previous?.controller?.abort(); clearTimeout(previous?.timer);
+  }
+  async function workerSessionRequest(operation, endpoint, method, extra = {}) {
+    const authGeneration = state.authGeneration;
+    const controller = new AbortController(); operation.controller = controller;
+    const timeout = setTimeout(() => controller.abort(), 15000);
+    const parameters = { worker_id: operation.workerID, runtime_id: operation.runtimeID, runtime_generation: operation.runtimeGeneration, request_id: operation.requestID, ...extra };
+    const csrf = document.cookie.split('; ').find(value => value.startsWith('__Host-telegramgw-csrf='))?.split('=').slice(1).join('=') || '';
+    try {
+      const response = await fetch(api + endpoint + (method === 'GET' ? '?' + new URLSearchParams(parameters) : ''), { method, credentials: 'same-origin', cache: 'no-store', signal: controller.signal,
+        ...(method === 'POST' ? { headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrf }, body: JSON.stringify(parameters) } : {}) });
+      if (authGeneration !== state.authGeneration || operation.authGeneration !== state.authGeneration || !state.authenticated) throw new Error('Sign in to continue.');
+      if (response.status === 401) { expire(); throw new Error('Sign in to continue.'); }
+      let result; try { result = await response.json(); } catch (_) { /* Gateway errors can be plain text. */ }
+      if (!response.ok) {
+        const error = new Error(result?.message || 'Worker request failed (' + response.status + '). Refresh workers and try again.'); error.status = response.status; throw error;
+      }
+      if (!result || result.command_id !== operation.requestID || result.worker_id !== operation.workerID || result.runtime_id !== operation.runtimeID || result.runtime_generation !== operation.runtimeGeneration || typeof result.pending !== 'boolean') throw new Error('The worker returned an unexpected result.');
+      return result;
+    } finally { clearTimeout(timeout); if (operation.controller === controller) operation.controller = null; }
+  }
+  function workerOperation(runtime) {
+    return { workerID: newSessionWorkerID, runtimeID: runtime.runtime_id, runtimeGeneration: runtime.generation, requestID: crypto.randomUUID(), authGeneration: state.authGeneration };
+  }
+  async function browseSessionWorkspace(path = '', offset = 0) {
+    const runtime = creationRuntime();
+    if (!runtime || runtime.state !== 'running' || workerCreationUnavailable(state.workers.find(worker => worker.ID === newSessionWorkerID)) || workspaceBrowse) return;
+    const operation = { ...workerOperation(runtime), path, offset, deadline: Date.now() + 30000 };
+    workspaceBrowse = operation; creationMessage('Loading folders…'); renderSessionCreation();
+    const current = () => workspaceBrowse === operation && operation.authGeneration === state.authGeneration && $('new-session-dialog').open;
+    async function read(method) {
+      try {
+        const result = await workerSessionRequest(operation, '/workspaces', method, method === 'POST' ? { path, offset } : {});
+        if (!current()) return;
+        if (result.pending) {
+          if (Date.now() >= operation.deadline) throw new Error('Folder listing is taking longer than expected. Use Browse to try again.');
+          operation.timer = setTimeout(() => read('GET'), 1000); return;
+        }
+        if (!result.workspace || typeof result.workspace.path !== 'string' || !Array.isArray(result.workspace.directories)) throw new Error(result.message || 'These folders are unavailable. Edit the path or choose another folder.');
+        workspacePage = result.workspace; workspaceBrowse = null;
+        $('new-session-browser').hidden = false; $('new-session-browser-path').textContent = workspacePage.path;
+        $('new-session-parent').hidden = !workspacePage.parent; $('new-session-more').hidden = !workspacePage.has_more;
+        $('new-session-folders-empty').hidden = workspacePage.directories.length > 0;
+        $('new-session-directories').replaceChildren(...workspacePage.directories.filter(entry => typeof entry.name === 'string' && typeof entry.path === 'string').map(entry => {
+          const button = node('button', 'new-session-directory', '📁 ' + entry.name); button.type = 'button'; button.setAttribute('aria-label', 'Open folder ' + entry.name); button.addEventListener('click', () => browseSessionWorkspace(entry.path)); return button;
+        }));
+        creationMessage(); renderSessionCreation();
+      } catch (error) {
+        if (!current()) return;
+        workspaceBrowse = null; creationMessage(error.message, true); renderSessionCreation();
+      }
+    }
+    await read('POST');
+  }
+  function creationIsCurrent(creation) {
+    return state.authenticated && creation.authGeneration === state.authGeneration && sessionCreations.get(creation.workerID) === creation;
+  }
+  function updateCreationView(creation) {
+    if (newSessionWorkerID === creation.workerID && $('new-session-dialog').open) renderSessionCreation();
+  }
+  function pauseSessionCreationRequests() {
+    cancelWorkspaceBrowse();
+    for (const creation of sessionCreations.values()) {
+      clearTimeout(creation.timer); creation.requestEpoch = (creation.requestEpoch || 0) + 1; creation.controller?.abort(); creation.checking = false;
+      if (creation.phase !== 'failed') { creation.phase = 'unknown'; creation.message = 'Sign-in changed while checking creation. Use Check status after sign-in to confirm the same request; it will not be resent.'; }
+    }
+    if ($('new-session-dialog').open) renderSessionCreation();
+  }
+  function resumeSessionCreationRequests() {
+    for (const creation of sessionCreations.values()) creation.authGeneration = state.authGeneration;
+    if ($('new-session-dialog').open) renderSessionCreation();
+  }
+  async function finishSessionCreation(creation, result) {
+    creation.phase = 'complete'; creation.message = result.message || 'Session created. Refresh workers to open it.'; clearTimeout(creation.timer); updateCreationView(creation);
+    // The durable inventory notification can arrive just after the command
+    // result. Keep the current conversation attached until the new ID exists.
+    for (let attempt = 0; attempt < 20 && creationIsCurrent(creation); attempt++) {
+      await refreshSessions();
+      if (!creationIsCurrent(creation)) return;
+      const created = state.sessions.find(session => session.session_id === result.session.session_id && session.worker_id === creation.workerID && session.runtime_id === creation.runtimeID);
+      if (created) {
+        sessionCreations.delete(creation.workerID);
+        if (newSessionWorkerID === creation.workerID && $('new-session-dialog').open && (state.selected?.session_id || '') === creation.selectedID) { $('new-session-dialog').close(); selectSession(created); }
+        else notice('Created “' + title(created) + '” on ' + (state.workers.find(worker => worker.ID === creation.workerID)?.Name || creation.workerID) + '. Select it in the sidebar.');
+        return;
+      }
+      await new Promise(resolve => setTimeout(resolve, 250));
+    }
+    updateCreationView(creation);
+  }
+  async function requestSessionCreation(creation, method) {
+    if (!creationIsCurrent(creation) || creation.checking) return;
+    const epoch = creation.requestEpoch = (creation.requestEpoch || 0) + 1;
+    const current = () => creationIsCurrent(creation) && creation.requestEpoch === epoch;
+    creation.checking = true; updateCreationView(creation);
+    try {
+      const result = await workerSessionRequest(creation, '/sessions/new', method, method === 'POST' ? { name: creation.name, cwd: creation.cwd } : {});
+      if (!current()) return;
+      creation.message = result.message || (result.pending ? 'Creating session on the worker…' : 'The worker did not confirm creation.');
+      if (!result.pending && result.session?.session_id) {
+        if (result.session.worker_id !== creation.workerID || result.session.runtime_id !== creation.runtimeID) throw new Error('The worker returned a session on a different runtime.');
+        await finishSessionCreation(creation, result); return;
+      }
+      creation.phase = result.pending ? 'pending' : result.status === 'outcome_unknown' || result.error_code === 'outcome_unknown' ? 'unknown' : result.error_code || ['failed', 'rejected'].includes(result.status) ? 'failed' : 'unknown';
+      if (creation.phase === 'unknown') creation.message += ' Check the session list and use Check status before trying again. This request will not be resent.';
+      if (creation.phase === 'pending' && Date.now() < creation.deadline) creation.timer = setTimeout(() => requestSessionCreation(creation, 'GET'), 1000);
+    } catch (error) {
+      if (!current()) return;
+      // Only an explicit HTTP rejection before dispatch permits another POST.
+      // A lost reply or timeout is resolved through this request's GET status.
+      creation.phase = method === 'POST' && error.status >= 400 && error.status < 500 ? 'failed' : 'unknown';
+      creation.message = creation.phase === 'failed' ? error.message : error.message + ' Creation may have been accepted. Check the session list and use Check status; this request will not be resent.';
+    } finally { if (current()) { creation.checking = false; updateCreationView(creation); } }
+  }
+  function submitSessionCreation(event) {
+    event.preventDefault();
+    if (!state.authenticated || !newSessionWorkerID) return;
+    const previous = sessionCreations.get(newSessionWorkerID);
+    if (previous && previous.phase !== 'failed') { requestSessionCreation(previous, 'GET'); return; }
+    const runtime = creationRuntime(), worker = state.workers.find(value => value.ID === newSessionWorkerID);
+    if (workerCreationUnavailable(worker) || !runtime || runtime.state !== 'running' || workspaceBrowse) { renderSessionCreation(); return; }
+    const name = $('new-session-name').value.trim(), cwd = $('new-session-cwd').value.trim();
+    const invalid = sessionNameError(name) || (cwd !== '~' && !cwd.startsWith('/') && !cwd.startsWith('~/') ? 'Enter an absolute path or a path starting with ~/ on this worker.' : '');
+    if (invalid) { creationMessage(invalid, true); return; }
+    const creation = { ...workerOperation(runtime), name, cwd, selectedID: state.selected?.session_id || '', phase: 'submitting', message: 'Creating session on the worker…', deadline: Date.now() + 30000 };
+    sessionCreations.set(newSessionWorkerID, creation); requestSessionCreation(creation, 'POST');
   }
   function openSessionDeletion(session) {
     const current = state.sessions.find(value => value.session_id === session.session_id);
@@ -688,6 +906,8 @@
       const data = await fetchJSON(api + '/sessions', controller.signal);
       if (authGeneration !== state.authGeneration || !state.authenticated) return;
       state.sessions = (data.sessions || []).filter(session => !sessionDeletions.get(session.session_id)?.deleted);
+      state.workers = Array.isArray(data.workers) ? data.workers : [];
+      state.runtimes = Array.isArray(data.runtimes) ? data.runtimes : [];
       for (const session of state.sessions) {
         const settings = sessionSettings.get(session.session_id);
         if (settings) session.stats = { ...session.stats, model: settings.model, reasoning_effort: settings.effort };
@@ -1594,6 +1814,34 @@
   });
   $('session-search').addEventListener('input', renderSessions);
   $('refresh-sessions').addEventListener('click', refreshSessions);
+  $('new-session-form').addEventListener('submit', submitSessionCreation);
+  $('new-session-name').addEventListener('input', () => {
+    if (sessionCreations.get(newSessionWorkerID)?.phase === 'failed') { sessionCreations.delete(newSessionWorkerID); creationMessage(); }
+    updateNewSessionPath(); renderSessionCreation();
+  });
+  $('new-session-cwd').addEventListener('input', () => {
+    newSessionPathEdited = true;
+    if (sessionCreations.get(newSessionWorkerID)?.phase === 'failed') { sessionCreations.delete(newSessionWorkerID); creationMessage(); }
+    updateNewSessionPath(); renderSessionCreation();
+  });
+  $('new-session-runtime').addEventListener('change', () => {
+    cancelWorkspaceBrowse(); workspacePage = null; $('new-session-browser').hidden = true;
+    if (sessionCreations.get(newSessionWorkerID)?.phase === 'failed') sessionCreations.delete(newSessionWorkerID);
+    creationMessage(); renderSessionCreation();
+  });
+  $('new-session-browse').addEventListener('click', () => browseSessionWorkspace(newSessionPathEdited ? $('new-session-cwd').value.trim() : ''));
+  $('new-session-parent').addEventListener('click', () => { if (workspacePage?.parent) browseSessionWorkspace(workspacePage.parent); });
+  $('new-session-default').addEventListener('click', () => browseSessionWorkspace());
+  $('new-session-more').addEventListener('click', () => { if (workspacePage?.has_more) browseSessionWorkspace(workspacePage.path, workspacePage.offset + workspacePage.directories.length); });
+  $('new-session-use-folder').addEventListener('click', () => { if (workspacePage) { newSessionPathEdited = true; $('new-session-cwd').value = workspacePage.path; updateNewSessionPath(); } });
+  for (const id of ['new-session-close', 'new-session-cancel']) $(id).addEventListener('click', () => $('new-session-dialog').close());
+  $('new-session-dialog').addEventListener('close', () => {
+    const workerID = newSessionWorkerID; newSessionWorkerID = ''; cancelWorkspaceBrowse(); workspacePage = null;
+    $('new-session-name').value = ''; $('new-session-cwd').value = ''; creationMessage();
+    const button = [...$('session-list').querySelectorAll('.session-create')].find(value => value.dataset.createWorkerId === workerID);
+    if (button && !button.disabled && button.getClientRects().length) button.focus({ preventScroll: true });
+    else if (matchMedia('(max-width:650px)').matches && $('show-sessions').getClientRects().length) $('show-sessions').focus({ preventScroll: true });
+  });
   $('delete-session-confirm').addEventListener('click', confirmSessionDeletion);
   $('delete-session-cancel').addEventListener('click', () => $('delete-session-dialog').close());
   $('delete-session-dialog').addEventListener('close', () => {
@@ -1744,6 +1992,7 @@
         // Let the server confirm it before restoring either transport.
         sessionAuth.verify('renewal-recovery').then(value => {
           if (!value || !state.authenticated) return;
+          resumeSessionCreationRequests();
           connectActivity();
           if (state.selected && !state.connected && !state.loading && !state.stopped) reconnect();
         }).catch(error => notice(error.message, 'connection'));
@@ -1754,6 +2003,7 @@
       captureAuthPosition(); saveDraft();
       authRotationPending = true;
       state.authGeneration++; state.generation++; resetInventory();
+      pauseSessionCreationRequests();
       closeSocket(); closeActivity(); disableQuestions();
       connection('reconnecting', 'Renewing sign-in… Your running work continues.'); updateControls();
     },
@@ -1766,9 +2016,11 @@
       draftRecovery?.identityChanged();
       captureAuthPosition();
       state.authGeneration++; state.generation++;
+      pauseSessionCreationRequests();
       resetInventory();
       closeSocket(); closeActivity();
       state.authenticated = true; state.stopped = false;
+      resumeSessionCreationRequests();
       $('auth').hidden = true;
       // selectSession performs a fresh native bootstrap with the new login.
       // Preserve a still-authorized draft during early renewal only.

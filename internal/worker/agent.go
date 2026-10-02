@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
 	"reflect"
 	"strings"
 	"sync"
@@ -363,7 +364,10 @@ func (a *Agent) createLoop(runtimeID string, queue <-chan protocol.Command) {
 			if c.Arguments.CWD != "" {
 				cwd = c.Arguments.CWD
 			}
-			cwd, err := auth.CanonicalWorkspace(cwd, a.cfg.AllowedWorkspaceRoots)
+			var err error
+			if !c.Arguments.EnsureWorkspace {
+				cwd, err = auth.CanonicalWorkspace(cwd, a.cfg.AllowedWorkspaceRoots)
+			}
 			if err != nil {
 				_, err = a.reject(c, protocol.InvalidWorkspace, "Workspace is not allowed.")
 				a.report(err)
@@ -385,21 +389,47 @@ func (a *Agent) createLoop(runtimeID string, queue <-chan protocol.Command) {
 					continue
 				}
 			}
-			thread, err := client.StartThread(a.ctx, codexadapter.ThreadOptions{CWD: cwd, ApprovalPolicy: "on-request", Sandbox: "workspace-write"})
+			if c.Arguments.EnsureWorkspace {
+				home, homeErr := os.UserHomeDir()
+				if homeErr != nil {
+					a.report(a.executionError(c, workspaceError("The worker user's home directory is unavailable.")))
+					continue
+				}
+				cwd, err = ensureSessionWorkspace(home, cwd, a.cfg.AllowedWorkspaceRoots)
+				if err != nil {
+					a.report(a.executionError(c, err))
+					continue
+				}
+			}
+			thread, err := client.StartThread(a.ctx, codexadapter.ThreadOptions{CWD: cwd, ApprovalPolicy: "on-request", Sandbox: "workspace-write", HistoryMode: c.Arguments.HistoryMode})
 			if err != nil {
 				a.report(a.executionError(c, err))
 				continue
 			}
+			if c.Arguments.EnsureWorkspace {
+				actualCWD, err := auth.CanonicalWorkspace(thread.CWD, a.cfg.AllowedWorkspaceRoots)
+				if err != nil || actualCWD != cwd || thread.ID == "" || !thread.UserSession() {
+					a.report(a.newSessionOutcomeUnknown(c))
+					continue
+				}
+			}
 			if c.Arguments.SessionName != "" {
 				name, _ := protocol.NormalizeSessionName(c.Arguments.SessionName)
 				if err := client.RenameThread(a.ctx, thread.ID, name); err != nil {
-					a.report(a.executionError(c, err))
+					if c.Arguments.EnsureWorkspace {
+						a.report(a.newSessionOutcomeUnknown(c))
+					} else {
+						a.report(a.executionError(c, err))
+					}
 					continue
 				}
 				thread.Name = name
 			}
 			s, err := a.store.UpsertRuntimeSession(runtime, protocol.Session{WorkerID: a.cfg.WorkerID, RuntimeID: runtimeID, ThreadID: thread.ID, Name: thread.Name, Preview: thread.Preview, CWD: cwd, State: "idle", Loaded: true})
 			if err != nil {
+				if c.Arguments.EnsureWorkspace {
+					a.report(a.newSessionOutcomeUnknown(c))
+				}
 				a.report(err)
 				continue
 			}
@@ -407,6 +437,9 @@ func (a *Agent) createLoop(runtimeID string, queue <-chan protocol.Command) {
 				s.Name = "New session"
 			}
 			if err = a.emit(runtime, s.ID, "session_discovered", s); err != nil {
+				if c.Arguments.EnsureWorkspace {
+					a.report(a.newSessionOutcomeUnknown(c))
+				}
 				a.report(err)
 				continue
 			}
@@ -415,6 +448,14 @@ func (a *Agent) createLoop(runtimeID string, queue <-chan protocol.Command) {
 			a.report(err)
 		}
 	}
+}
+
+func (a *Agent) newSessionOutcomeUnknown(c protocol.Command) error {
+	// thread/start has already succeeded. A later rename or persistence failure
+	// must not make the browser offer another creation as though no thread exists.
+	result := &protocol.Result{CommandID: c.ID, State: "outcome_unknown", Error: &protocol.Error{Code: protocol.OutcomeUnknown, Message: "A new Codex thread may exist, but session creation was not fully confirmed. Refresh the session list and inspect the worker before retrying."}}
+	_, err := a.record(c, CommandOutcomeUnknown, result, "command_result_unknown")
+	return err
 }
 
 func (a *Agent) executionError(c protocol.Command, err error) error {

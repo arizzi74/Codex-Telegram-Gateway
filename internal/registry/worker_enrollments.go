@@ -134,6 +134,7 @@ func (s *Store) redeemWorkerEnrollment(ctx context.Context, in RedeemWorkerEnrol
 	if err = tx.Commit(ctx); err != nil {
 		return RedeemedWorkerEnrollment{}, fmt.Errorf("registry: commit enrollment redeem: %w", err)
 	}
+	s.notifySessionActivity()
 	return RedeemedWorkerEnrollment{WorkerID: workerID, Token: token, ServiceAccess: access}, nil
 }
 

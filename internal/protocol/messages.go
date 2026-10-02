@@ -45,22 +45,23 @@ type Session struct {
 }
 
 type Hello struct {
-	SupportsWebUI               bool      `json:"supports_webui,omitempty"`
-	SupportsWorkerUpdate        bool      `json:"supports_worker_update,omitempty"`
-	WorkerID                    string    `json:"worker_id"`
-	WorkerName                  string    `json:"worker_name"`
-	Hostname                    string    `json:"hostname"`
-	OS                          string    `json:"os"`
-	Arch                        string    `json:"arch"`
-	WorkerVersion               string    `json:"worker_version"`
-	SupportsImageInput          bool      `json:"supports_image_input,omitempty"`
-	SupportsSessionWorkspaces   bool      `json:"supports_session_workspaces,omitempty"`
-	SupportsSessionDeletion     bool      `json:"supports_session_deletion,omitempty"`
-	SupportsConversationHistory bool      `json:"supports_conversation_history,omitempty"`
-	ProtocolMin                 int       `json:"protocol_min"`
-	ProtocolMax                 int       `json:"protocol_max"`
-	LastAckedEventSeq           uint64    `json:"last_acked_event_seq"`
-	Runtimes                    []Runtime `json:"runtimes"`
+	SupportsWebUI                bool      `json:"supports_webui,omitempty"`
+	SupportsWorkerUpdate         bool      `json:"supports_worker_update,omitempty"`
+	WorkerID                     string    `json:"worker_id"`
+	WorkerName                   string    `json:"worker_name"`
+	Hostname                     string    `json:"hostname"`
+	OS                           string    `json:"os"`
+	Arch                         string    `json:"arch"`
+	WorkerVersion                string    `json:"worker_version"`
+	SupportsImageInput           bool      `json:"supports_image_input,omitempty"`
+	SupportsSessionWorkspaces    bool      `json:"supports_session_workspaces,omitempty"`
+	SupportsWebUISessionCreation bool      `json:"supports_webui_session_creation,omitempty"`
+	SupportsSessionDeletion      bool      `json:"supports_session_deletion,omitempty"`
+	SupportsConversationHistory  bool      `json:"supports_conversation_history,omitempty"`
+	ProtocolMin                  int       `json:"protocol_min"`
+	ProtocolMax                  int       `json:"protocol_max"`
+	LastAckedEventSeq            uint64    `json:"last_acked_event_seq"`
+	Runtimes                     []Runtime `json:"runtimes"`
 }
 
 type HelloAck struct {
@@ -70,15 +71,16 @@ type HelloAck struct {
 }
 
 type Heartbeat struct {
-	SupportsWebUI               bool      `json:"supports_webui,omitempty"`
-	SupportsWorkerUpdate        bool      `json:"supports_worker_update,omitempty"`
-	WorkerID                    string    `json:"worker_id"`
-	SupportsImageInput          bool      `json:"supports_image_input,omitempty"`
-	SupportsSessionWorkspaces   bool      `json:"supports_session_workspaces,omitempty"`
-	SupportsSessionDeletion     bool      `json:"supports_session_deletion,omitempty"`
-	SupportsConversationHistory bool      `json:"supports_conversation_history,omitempty"`
-	UptimeSeconds               int64     `json:"uptime_seconds"`
-	Runtimes                    []Runtime `json:"runtimes"`
+	SupportsWebUI                bool      `json:"supports_webui,omitempty"`
+	SupportsWorkerUpdate         bool      `json:"supports_worker_update,omitempty"`
+	WorkerID                     string    `json:"worker_id"`
+	SupportsImageInput           bool      `json:"supports_image_input,omitempty"`
+	SupportsSessionWorkspaces    bool      `json:"supports_session_workspaces,omitempty"`
+	SupportsWebUISessionCreation bool      `json:"supports_webui_session_creation,omitempty"`
+	SupportsSessionDeletion      bool      `json:"supports_session_deletion,omitempty"`
+	SupportsConversationHistory  bool      `json:"supports_conversation_history,omitempty"`
+	UptimeSeconds                int64     `json:"uptime_seconds"`
+	Runtimes                     []Runtime `json:"runtimes"`
 }
 
 type Operation string
@@ -116,6 +118,8 @@ type Arguments struct {
 	Workspace         *WorkspaceRequest    `json:"workspace,omitempty"`
 	SessionName       string               `json:"session_name,omitempty"`
 	CreateDirectory   bool                 `json:"create_directory,omitempty"`
+	HistoryMode       string               `json:"history_mode,omitempty"`
+	EnsureWorkspace   bool                 `json:"ensure_workspace,omitempty"`
 	History           *HistoryRequest      `json:"history,omitempty"`
 	SelectionRevision *uint64              `json:"selection_revision,omitempty"`
 	Codex             *CodexCommandPayload `json:"codex,omitempty"`
@@ -205,6 +209,12 @@ func (c Command) Validate() error {
 		if c.Arguments.CreateDirectory && strings.TrimSpace(c.Arguments.CWD) == "" {
 			return errors.New("directory creation requires a selected parent folder")
 		}
+	}
+	if c.Arguments.HistoryMode != "" && (c.Operation != NewSession || c.Arguments.HistoryMode != "legacy") {
+		return errors.New("unsupported new session history mode")
+	}
+	if c.Arguments.EnsureWorkspace && (c.Operation != NewSession || c.Arguments.CreateDirectory || c.Arguments.HistoryMode != "legacy" || c.Arguments.SessionName == "" || (&WorkspaceRequest{Path: c.Arguments.CWD}).Validate() != nil || (c.Arguments.CWD != "~" && !strings.HasPrefix(c.Arguments.CWD, "~/") && !strings.HasPrefix(c.Arguments.CWD, "/"))) {
+		return errors.New("invalid exact new session workspace")
 	}
 	return nil
 }

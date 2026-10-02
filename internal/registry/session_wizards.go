@@ -425,7 +425,7 @@ func validWorkspacePage(page *protocol.WorkspacePage, request *protocol.Workspac
 	if page == nil || request == nil || page.Offset != request.Offset || len(page.Directories) > protocol.WorkspacePageSize || (page.HasMore && len(page.Directories) != protocol.WorkspacePageSize) || !validWorkspacePath(page.Path) || (page.Parent != "" && !validWorkspacePath(page.Parent)) {
 		return false
 	}
-	if request.Path != "" && filepath.Clean(request.Path) != page.Path {
+	if request.Path != "" && request.Path != "~" && !strings.HasPrefix(request.Path, "~/") && filepath.Clean(request.Path) != page.Path {
 		return false
 	}
 	if page.Parent != "" && (page.Parent == page.Path || filepath.Dir(page.Path) != page.Parent) {

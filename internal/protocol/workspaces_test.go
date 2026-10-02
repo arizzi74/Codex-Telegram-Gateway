@@ -65,3 +65,28 @@ func TestWorkspaceOperationValidation(t *testing.T) {
 		t.Error("directory creation accepted without name")
 	}
 }
+
+func TestExactWebUISessionWorkspaceValidation(t *testing.T) {
+	now := time.Now()
+	command := Command{ID: uuid.NewString(), WorkerID: uuid.NewString(), RuntimeID: uuid.NewString(), RuntimeGeneration: 1, Operation: NewSession, CreatedAt: now, ExpiresAt: now.Add(time.Minute), Arguments: Arguments{SessionName: "My project", CWD: "~/CODEX/custom", EnsureWorkspace: true, HistoryMode: "legacy"}}
+	if err := command.Validate(); err != nil {
+		t.Fatalf("valid exact-path mode rejected: %v", err)
+	}
+	for _, args := range []Arguments{
+		{SessionName: "Project", CWD: "~/CODEX/custom", EnsureWorkspace: true},
+		{SessionName: "Project", CWD: "~/CODEX/custom", EnsureWorkspace: true, HistoryMode: "paginated"},
+		{SessionName: "Project", CWD: "~/CODEX/custom", EnsureWorkspace: true, CreateDirectory: true, HistoryMode: "legacy"},
+		{SessionName: "Project", CWD: "relative", EnsureWorkspace: true, HistoryMode: "legacy"},
+		{CWD: "/work", EnsureWorkspace: true, HistoryMode: "legacy"},
+	} {
+		command.Arguments = args
+		if err := command.Validate(); err == nil {
+			t.Errorf("accepted incompatible exact-path arguments: %+v", args)
+		}
+	}
+	command.Operation, command.SessionID, command.ThreadID = CodexCommand, uuid.NewString(), "thread"
+	command.Arguments = Arguments{EnsureWorkspace: true, HistoryMode: "legacy", CWD: "/work", SessionName: "Project", Codex: &CodexCommandPayload{Name: "status"}}
+	if err := command.Validate(); err == nil {
+		t.Fatal("session command accepted workspace creation arguments")
+	}
+}

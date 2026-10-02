@@ -4,6 +4,23 @@ Open `https://gateway.example.com/tgw/webui/` and sign in with the gateway's adm
 
 The sidebar reserves its space for sessions. **Settings** at the bottom opens a dialog with draft recovery, notification controls, and **Open operations console**. Close it with its close button, Escape, or a tap outside the dialog. On phones, opening Settings closes the session drawer and keeps the keyboard closed.
 
+Workers appear in the sidebar even before they have a session. Use **＋** beside
+a worker's name to create its first session or another session on that worker.
+The dialog asks for the session name first and fills the working-directory path
+with `~/CODEX/session_name`, replacing spaces in the name with underscores.
+The path remains editable; `~` refers to the worker service user's home directory.
+An existing directory is used as the project directory, or a missing directory
+is created within the worker's allowed workspace roots. Changing the name keeps
+updating the suggested path until you edit the path yourself.
+
+Creation requires an online worker and a running, compatible Codex runtime. If
+a worker has several runtimes, choose the one to use in the dialog. Your current
+session stays connected until creation succeeds; the browser then connects to
+the new session. Canceling the dialog sends no creation request. After a lost
+acknowledgment, the browser checks the submitted operation's status rather than
+sending the creation request again. Upgrade older workers with
+**/tgupdateworkers** to enable creation from the sidebar.
+
 The existing Go gateway serves the interface and relays its authenticated connection to the selected worker. The worker attaches to the existing Codex app-server. No additional Codex CLI, pseudo-terminal, Python service, Node.js service, CDN, or public worker port is needed. Browser JavaScript and CSS are embedded in the gateway binary.
 
 ## Sign-in and recovery

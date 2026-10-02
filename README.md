@@ -144,6 +144,11 @@ colors and formatting with responsive text, completed replies and live tool acti
 model and reasoning controls, and question and approval prompts. It talks to the
 worker's existing app-server; it does not launch a terminal or another Codex CLI.
 
+Workers with no sessions still appear in the sidebar. Use **＋** beside a worker
+to create a session: enter its name and edit the suggested
+`~/CODEX/session_name` project path if needed. Spaces in the name become
+underscores in the suggested path; existing project directories can also be used.
+
 Passkey sign-in can be renewed in place before its eight-hour expiry. After
 unlocking, the interface restores the selected session and reading position;
 running work continues. Optional encrypted text-draft recovery retains a copy

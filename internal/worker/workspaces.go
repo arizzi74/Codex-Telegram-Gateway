@@ -35,8 +35,8 @@ func browseWorkspace(home string, roots []string, request *protocol.WorkspaceReq
 	var err error
 	if path == "" {
 		path, err = defaultSessionParent(home, roots)
-	} else if !filepath.IsAbs(path) {
-		return nil, workspaceError("Select an absolute folder path from the browser.")
+	} else {
+		path, err = expandWorkerWorkspace(home, path)
 	}
 	if err != nil {
 		return nil, err
@@ -85,6 +85,58 @@ func browseWorkspace(home string, roots []string, request *protocol.WorkspaceReq
 	page.Directories = append(page.Directories, directories[start:end]...)
 	page.HasMore = end < len(directories)
 	return page, nil
+}
+
+// Only the current worker's home shorthand is supported. Never expand shell
+// variables, another user's home, or relative paths on the gateway host.
+func expandWorkerWorkspace(home, path string) (string, error) {
+	if path == "~" {
+		path = home
+	} else if strings.HasPrefix(path, "~/") {
+		path = filepath.Join(home, path[2:])
+	}
+	if !filepath.IsAbs(path) {
+		return "", workspaceError("Choose an absolute folder path or a path starting with ~/ on this worker.")
+	}
+	return filepath.Clean(path), nil
+}
+
+// ensureSessionWorkspace creates missing components beneath a held allowed
+// root. os.Root prevents a concurrent symlink replacement from redirecting the
+// mkdir outside that root. Existing directories and their contents are reused.
+func ensureSessionWorkspace(home, path string, roots []string) (string, error) {
+	path, err := expandWorkerWorkspace(home, path)
+	if err != nil {
+		return "", err
+	}
+	if canonical, err := auth.CanonicalWorkspace(path, roots); err == nil {
+		return canonical, nil
+	}
+	canonicalRoots, err := auth.CanonicalWorkspaceRoots(roots)
+	if err != nil {
+		return "", workspaceError("The worker's allowed workspace roots are unavailable.")
+	}
+	for _, allowed := range canonicalRoots {
+		relative, err := filepath.Rel(allowed, path)
+		if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) || filepath.IsAbs(relative) {
+			continue
+		}
+		root, err := os.OpenRoot(allowed)
+		if err != nil {
+			return "", workspaceError("The worker cannot open this workspace root.")
+		}
+		err = root.MkdirAll(relative, 0o755)
+		root.Close()
+		if err != nil {
+			return "", workspaceError("The worker cannot create this directory. Choose a writable path under its allowed roots.")
+		}
+		canonical, err := auth.CanonicalWorkspace(path, roots)
+		if err != nil {
+			return "", workspaceError("The directory changed while creating the workspace. Inspect it before retrying.")
+		}
+		return canonical, nil
+	}
+	return "", workspaceError("This directory is outside the worker's allowed workspace roots.")
 }
 
 // createSessionWorkspace creates exactly one child and never reuses or removes

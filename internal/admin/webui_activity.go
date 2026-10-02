@@ -70,6 +70,7 @@ func (s *Server) webuiActivity(w http.ResponseWriter, r *http.Request) {
 		return true
 	}
 	sequence, revision := uint64(0), uint64(0)
+	inventoryRevision := ""
 	previous := make(map[string]registry.SessionActivity)
 	snapshot := func(activity registry.SessionActivitySnapshot) bool {
 		if !authenticated() {
@@ -88,10 +89,12 @@ func (s *Server) webuiActivity(w http.ResponseWriter, r *http.Request) {
 			previous[session.SessionID] = session
 		}
 		revision = activity.Revision
+		inventoryRevision = activity.InventoryRevision
 		if legacy {
 			return write(map[string]any{"type": "activity", "revision": revision, "sessions": json.RawMessage(raw)})
 		}
-		return write(map[string]any{"type": "activity_snapshot", "version": wireVersion, "sequence": sequence, "revision": revision, "sessions": json.RawMessage(raw)})
+		return write(map[string]any{"type": "activity_snapshot", "version": wireVersion, "sequence": sequence, "revision": revision,
+			"inventory_revision": inventoryRevision, "sessions": json.RawMessage(raw)})
 	}
 	if !authenticated() {
 		return
@@ -173,6 +176,13 @@ func (s *Server) webuiActivity(w http.ResponseWriter, r *http.Request) {
 			if !current[id] && !emit(registry.SessionActivityEvent{Revision: update.Snapshot.Revision, Event: "session_removed", SessionID: id}) {
 				return false
 			}
+		}
+		// A worker can enroll, disconnect or acquire its first runtime without
+		// having any sessions. Send an additive snapshot that old tabs already
+		// understand, with an opaque inventory revision for current browsers.
+		if wireVersion >= 2 && inventoryRevision != update.Snapshot.InventoryRevision {
+			sequence++
+			return snapshot(update.Snapshot)
 		}
 		revision = update.Snapshot.Revision
 		return true

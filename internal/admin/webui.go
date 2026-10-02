@@ -46,6 +46,8 @@ func (s *Server) webuiRoutes() {
 	}
 	s.mux.HandleFunc("/tgw/api/v1/webui/sessions", s.webuiSessions)
 	s.mux.HandleFunc("/tgw/api/v1/webui/sessions/delete", s.webuiSessionDelete)
+	s.mux.HandleFunc("/tgw/api/v1/webui/sessions/new", s.webuiSessionNew)
+	s.mux.HandleFunc("/tgw/api/v1/webui/workspaces", s.webuiWorkspaces)
 	s.mux.HandleFunc("/tgw/api/v1/webui/connect", s.webuiConnect)
 	s.mux.HandleFunc("/tgw/api/v1/webui/commands", s.webuiCommands)
 	s.mux.HandleFunc("/tgw/api/v1/webui/activity", s.webuiActivity)
@@ -110,7 +112,7 @@ func (s *Server) webuiSessions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.redactDashboard(&d)
-	writeJSON(w, http.StatusOK, map[string]any{"sessions": d.Sessions, "workers": d.Workers})
+	writeJSON(w, http.StatusOK, map[string]any{"sessions": d.Sessions, "workers": d.Workers, "runtimes": d.Runtimes})
 }
 
 func (s *Server) webuiConnect(w http.ResponseWriter, r *http.Request) {

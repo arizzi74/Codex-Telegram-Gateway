@@ -45,7 +45,7 @@ func applySessionWizardEvent(ctx context.Context, tx *dbTx, workerID uuid.UUID, 
 	if json.Unmarshal(raw, &command) != nil {
 		return true, ErrEventTarget
 	}
-	managedNew := protocol.Operation(operation) == protocol.NewSession && command.Arguments.CreateDirectory
+	managedNew := protocol.Operation(operation) == protocol.NewSession && (command.Arguments.CreateDirectory || command.Arguments.EnsureWorkspace)
 	if protocol.Operation(operation) != protocol.BrowseWorkspace && protocol.Operation(operation) != protocol.DeleteSession && !managedNew {
 		if result.Workspace != nil {
 			return true, ErrEventTarget
@@ -70,7 +70,9 @@ func applySessionWizardEvent(ctx context.Context, tx *dbTx, workerID uuid.UUID, 
 		folder, err := protocol.SessionDirectoryName(command.Arguments.SessionName)
 		// The display name can be redacted by the worker's private rules. The
 		// exact workspace still proves creation under the requested parent/name.
-		if err != nil || result.Session == nil || result.Session.CWD != filepath.Join(command.Arguments.CWD, folder) || result.Session.Archived || result.Session.ActiveTurnID != "" {
+		if err != nil || result.Session == nil || result.Session.Archived || result.Session.ActiveTurnID != "" ||
+			(command.Arguments.CreateDirectory && result.Session.CWD != filepath.Join(command.Arguments.CWD, folder)) ||
+			(command.Arguments.EnsureWorkspace && !filepath.IsAbs(result.Session.CWD)) {
 			return true, ErrEventTarget
 		}
 	}

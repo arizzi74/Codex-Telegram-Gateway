@@ -45,19 +45,20 @@ type Hub struct {
 }
 
 type peer struct {
-	workerID, connectionID      uuid.UUID
-	supportsWorkerUpdate        bool
-	supportsImageInput          bool
-	supportsSessionWorkspaces   bool
-	supportsSessionDeletion     bool
-	supportsConversationHistory bool
-	supportsWebUI               bool
-	conn                        *websocket.Conn
-	ctx                         context.Context
-	cancel                      context.CancelFunc
-	writes                      chan writeRequest
-	writeMu                     sync.Mutex // fences admission against final writer shutdown
-	writeStopped                bool
+	workerID, connectionID       uuid.UUID
+	supportsWorkerUpdate         bool
+	supportsImageInput           bool
+	supportsSessionWorkspaces    bool
+	supportsWebUISessionCreation bool
+	supportsSessionDeletion      bool
+	supportsConversationHistory  bool
+	supportsWebUI                bool
+	conn                         *websocket.Conn
+	ctx                          context.Context
+	cancel                       context.CancelFunc
+	writes                       chan writeRequest
+	writeMu                      sync.Mutex // fences admission against final writer shutdown
+	writeStopped                 bool
 }
 
 type writeRequest struct {
@@ -129,12 +130,13 @@ func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// builds advertise their actual capabilities, including development builds.
 	legacySessionSupport := strings.TrimPrefix(hello.WorkerVersion, "v") == "0.5.19"
 	p := &peer{workerID: worker.ID, connectionID: connectionID, supportsImageInput: hello.SupportsImageInput,
-		supportsWorkerUpdate:        hello.SupportsWorkerUpdate,
-		supportsSessionWorkspaces:   hello.SupportsSessionWorkspaces || legacySessionSupport,
-		supportsSessionDeletion:     hello.SupportsSessionDeletion || legacySessionSupport,
-		supportsConversationHistory: hello.SupportsConversationHistory,
-		supportsWebUI:               hello.SupportsWebUI,
-		conn:                        conn, ctx: ctx, cancel: cancel, writes: make(chan writeRequest, 128)}
+		supportsWorkerUpdate:         hello.SupportsWorkerUpdate,
+		supportsSessionWorkspaces:    hello.SupportsSessionWorkspaces || legacySessionSupport,
+		supportsWebUISessionCreation: hello.SupportsWebUISessionCreation,
+		supportsSessionDeletion:      hello.SupportsSessionDeletion || legacySessionSupport,
+		supportsConversationHistory:  hello.SupportsConversationHistory,
+		supportsWebUI:                hello.SupportsWebUI,
+		conn:                         conn, ctx: ctx, cancel: cancel, writes: make(chan writeRequest, 128)}
 	h.mu.Lock()
 	old := h.peers[hello.WorkerID]
 	h.peers[hello.WorkerID] = p
@@ -396,7 +398,7 @@ func (h *Hub) SendCommand(ctx context.Context, c protocol.Command) error {
 	}
 	needsWorkspaces := c.Operation == protocol.BrowseWorkspace || (c.Operation == protocol.NewSession && (c.Arguments.CreateDirectory || c.Arguments.SessionName != ""))
 	needsConversationHistory := c.Operation == protocol.ReadHistory && c.Arguments.History != nil && c.Arguments.History.Messages
-	if (needsWorkspaces && !p.supportsSessionWorkspaces) || (c.Operation == protocol.DeleteSession && !p.supportsSessionDeletion) || (needsConversationHistory && !p.supportsConversationHistory) {
+	if (needsWorkspaces && !p.supportsSessionWorkspaces) || (c.Arguments.EnsureWorkspace && !p.supportsWebUISessionCreation) || (c.Operation == protocol.DeleteSession && !p.supportsSessionDeletion) || (needsConversationHistory && !p.supportsConversationHistory) {
 		// Old workers disconnect before acknowledging unknown operations. A
 		// transport error here would just replay the command until expiry.
 		// Record a terminal rejection through the same durable path as a worker

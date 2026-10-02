@@ -269,6 +269,7 @@ func (s *Store) CreateWorker(ctx context.Context, in CreateWorkerInput) (Worker,
 	if err := tx.Commit(ctx); err != nil {
 		return Worker{}, fmt.Errorf("registry: commit worker create: %w", err)
 	}
+	s.notifySessionActivity()
 	return worker, nil
 }
 

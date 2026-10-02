@@ -30,8 +30,9 @@ type SessionActivity struct {
 }
 
 type SessionActivitySnapshot struct {
-	Revision uint64            `json:"revision"`
-	Sessions []SessionActivity `json:"sessions"`
+	Revision          uint64            `json:"revision"`
+	InventoryRevision string            `json:"inventory_revision"`
+	Sessions          []SessionActivity `json:"sessions"`
 }
 
 // Activity notifications carry indicator rows only. A small process-local ring
@@ -232,23 +233,38 @@ func (s *Store) heartbeatActivityChanged(ctx context.Context, tx *dbTx, heartbea
 		return false, nil
 	}
 	type status struct {
-		ID         string `json:"id"`
-		Generation int64  `json:"generation"`
-		State      string `json:"state"`
+		ID           string `json:"id"`
+		Generation   int64  `json:"generation"`
+		State        string `json:"state"`
+		Name         string `json:"name"`
+		ProfileID    string `json:"profile_id"`
+		CodexVersion string `json:"codex_version"`
+		DefaultCWD   string `json:"default_cwd"`
 	}
 	runtimes := make([]status, 0, len(heartbeat.Runtimes))
 	for _, runtime := range heartbeat.Runtimes {
-		runtimes = append(runtimes, status{runtime.ID.String(), runtime.Generation, runtime.State})
+		runtimes = append(runtimes, status{runtime.ID.String(), runtime.Generation, runtime.State,
+			runtime.Name, runtime.ProfileID, runtime.CodexVersion, runtime.DefaultCWD})
 	}
 	raw, err := json.Marshal(runtimes)
 	if err != nil {
 		return false, err
 	}
 	var changed bool
-	err = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM workers WHERE worker_id=$1 AND connectivity<>'online')
+	metadata := heartbeat.Metadata
+	if len(metadata) == 0 {
+		metadata = json.RawMessage(`{}`)
+	}
+	err = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM workers WHERE worker_id=$1 AND
+        (connectivity<>'online' OR
+         COALESCE(json_extract(heartbeat_metadata,'$.supports_session_workspaces'),0)<>COALESCE(json_extract($3,'$.supports_session_workspaces'),0) OR
+         COALESCE(json_extract(heartbeat_metadata,'$.supports_webui_session_creation'),0)<>COALESCE(json_extract($3,'$.supports_webui_session_creation'),0)))
       OR EXISTS(SELECT 1 FROM json_each($2) incoming LEFT JOIN runtimes runtime ON runtime.runtime_id=json_extract(incoming.value,'$.id')
         WHERE runtime.runtime_id IS NULL OR (json_extract(incoming.value,'$.generation')>=runtime.generation AND
-          (runtime.generation<>json_extract(incoming.value,'$.generation') OR runtime.state<>json_extract(incoming.value,'$.state'))))`, heartbeat.WorkerID, string(raw)).Scan(&changed)
+          (runtime.generation<>json_extract(incoming.value,'$.generation') OR runtime.state<>json_extract(incoming.value,'$.state') OR
+           runtime.name<>json_extract(incoming.value,'$.name') OR runtime.profile_id<>json_extract(incoming.value,'$.profile_id') OR
+           COALESCE(runtime.codex_version,'')<>json_extract(incoming.value,'$.codex_version') OR
+           COALESCE(runtime.default_cwd,'')<>json_extract(incoming.value,'$.default_cwd'))))`, heartbeat.WorkerID, string(raw), string(metadata)).Scan(&changed)
 	return changed, err
 }
 
@@ -329,11 +345,49 @@ func (s *Store) liveSessionActivity(ctx context.Context) (SessionActivitySnapsho
 	if err := rows.Err(); err != nil {
 		return SessionActivitySnapshot{}, err
 	}
+	if err := rows.Close(); err != nil {
+		return SessionActivitySnapshot{}, err
+	}
+	snapshot.InventoryRevision, err = s.sessionInventoryRevision(ctx)
+	if err != nil {
+		return SessionActivitySnapshot{}, err
+	}
 	h.mu.Lock()
 	h.cached, h.cacheValid = snapshot, true
 	h.mu.Unlock()
 	snapshot.Sessions = append([]SessionActivity{}, snapshot.Sessions...)
 	return snapshot, nil
+}
+
+// A shared, narrow fingerprint covers workers and runtimes independently of
+// sessions. It excludes timestamps, secrets and conversation data so an idle
+// heartbeat cannot cause the browser to reload inventory. The existing activity
+// cache means all viewers share this read after a committed invalidation.
+func (s *Store) sessionInventoryRevision(ctx context.Context) (string, error) {
+	rows, err := s.pool.Query(ctx, `SELECT json_object('kind','worker','id',worker_id,'name',name,
+        'hostname',COALESCE(hostname,''),'enabled',enabled,'connectivity',connectivity,'version',COALESCE(worker_version,''),
+        'workspaces',COALESCE(json_extract(heartbeat_metadata,'$.supports_session_workspaces'),0),
+        'creation',COALESCE(json_extract(heartbeat_metadata,'$.supports_webui_session_creation'),0)) AS entry FROM workers
+      UNION ALL SELECT json_object('kind','runtime','id',runtime_id,'worker_id',worker_id,'name',name,
+        'profile',profile_id,'generation',generation,'state',state,'codex',COALESCE(codex_version,''),
+        'cwd',COALESCE(default_cwd,'')) AS entry FROM runtimes ORDER BY entry`)
+	if err != nil {
+		return "", fmt.Errorf("registry: read sidebar inventory revision: %w", err)
+	}
+	defer rows.Close()
+	digest := sha256.New()
+	for rows.Next() {
+		var entry string
+		if err := rows.Scan(&entry); err != nil {
+			return "", err
+		}
+		_, _ = digest.Write([]byte(entry))
+		_, _ = digest.Write([]byte{0})
+	}
+	if err := rows.Err(); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(digest.Sum(nil)), nil
 }
 
 // SessionActivitySince pairs retained committed edges with the latest narrow

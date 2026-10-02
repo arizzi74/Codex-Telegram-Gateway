@@ -44,7 +44,7 @@
       </header>
       <div id="connection" data-state="connecting" role="status" aria-live="polite"><span id="connection-dot" aria-hidden="true"></span><span id="connection-text">Connecting to gateway…</span><button id="reconnect" class="quiet" hidden>Reconnect</button></div>
       <div id="auth" class="welcome" hidden><span class="welcome-mark" aria-hidden="true">›_</span><h2 id="auth-title">Sign in to Codex</h2><p id="auth-description">Use your gateway passkey to open your sessions.</p><button id="auth-login" type="button" class="primary">Continue with passkey</button><p id="auth-status" role="status"></p><a class="muted small" href="/tgw/admin/?next=/tgw/webui/">Manage passkeys</a></div>
-      <div id="empty" class="welcome" hidden><span class="welcome-mark" aria-hidden="true">›_</span><h2>Pick up where you left off.</h2><p>Select a session. Your conversation and running work stay on its worker when you disconnect.</p><button id="empty-sessions" class="primary mobile-only">Choose a session</button></div>
+      <div id="empty" class="welcome" hidden><span class="welcome-mark" aria-hidden="true">›_</span><h2>Pick up where you left off.</h2><p>Select a session, or use + beside a worker to create one. Your conversation and running work stay on its worker when you disconnect.</p><button id="empty-sessions" class="primary mobile-only">Choose a session</button></div>
       <div id="transcript" tabindex="0" aria-label="Conversation history" hidden>
         <button id="older" class="quiet older" hidden>Load 20 earlier messages</button>
         <div id="messages"></div>
@@ -92,6 +92,27 @@
     <p id="delete-session-cwd" class="muted small"></p>
     <p id="delete-session-message" role="status" hidden></p>
     <div class="delete-session-actions"><button id="delete-session-cancel" type="button" class="quiet" autofocus>Cancel</button><button id="delete-session-confirm" type="button" class="delete-confirm">Delete session</button></div>
+  </dialog>
+  <dialog id="new-session-dialog" aria-labelledby="new-session-title" aria-describedby="new-session-worker">
+    <div class="settings-heading"><h2 id="new-session-title">New session</h2><button id="new-session-close" type="button" class="quiet" aria-label="Close new session" autofocus>×</button></div>
+    <p id="new-session-worker" class="muted small"></p>
+    <form id="new-session-form">
+      <label for="new-session-name">Session name</label><input id="new-session-name" type="text" maxlength="120" required autocomplete="off" aria-describedby="new-session-preview">
+      <div id="new-session-runtime-field"><label for="new-session-runtime">Codex runtime</label><select id="new-session-runtime"></select></div>
+      <label for="new-session-cwd">Working-directory path on this worker</label>
+      <div class="new-session-path-row"><input id="new-session-cwd" type="text" maxlength="4096" required autocomplete="off" spellcheck="false" aria-describedby="new-session-path-help"><button id="new-session-browse" type="button" class="quiet">Browse</button></div>
+      <p id="new-session-path-help" class="muted small">Edit the full path to choose another folder on this worker. Existing folders are reused; missing folders are created.</p>
+      <section id="new-session-browser" aria-label="Folders on this worker" hidden>
+        <p id="new-session-browser-path" class="small"></p>
+        <div class="new-session-folder-actions"><button id="new-session-parent" type="button" class="quiet" hidden>↑ Parent folder</button><button id="new-session-default" type="button" class="quiet">Default folder</button><button id="new-session-use-folder" type="button" class="quiet">Use this folder</button></div>
+        <div id="new-session-directories"></div>
+        <p id="new-session-folders-empty" class="muted small" hidden>No subfolders.</p>
+        <button id="new-session-more" type="button" class="quiet" hidden>More folders</button>
+      </section>
+      <p id="new-session-preview" class="muted small"></p>
+      <p id="new-session-message" role="status" aria-live="polite" hidden></p>
+      <div class="new-session-actions"><button id="new-session-cancel" type="button" class="quiet">Cancel</button><button id="new-session-submit" type="submit" class="primary">Create session</button></div>
+    </form>
   </dialog>
 </body>
 </html>
