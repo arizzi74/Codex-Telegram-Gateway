@@ -19,6 +19,7 @@
   let loadingOlder = false, suppressHistoryScroll = false;
   let questionRevision = 0, questionSnapshotSequence = 0;
   let questionRefresh = null;
+  let selectedGoal = null, goalRevision = 0, goalSnapshotSequence = 0, goalDialogSessionID = '';
   let turnTimes = new Map(), turnCursor = null;
   const imageDrafts = new Map();
   const sessionDeletions = new Map();
@@ -119,6 +120,59 @@
     if (!dialog.open) dialog.showModal();
     $('open-settings').setAttribute('aria-expanded', 'true');
     $('close-settings').focus({ preventScroll: true });
+  }
+  function goalContextAvailable() {
+    const session = state.selected;
+    return state.authenticated && state.connected && !!session && !session.archived && !session.deleted &&
+      state.sessions.some(value => value.session_id === session.session_id && !value.archived && !value.deleted);
+  }
+  function renderGoal() {
+    const visible = goalContextAvailable() && selectedGoal?.sessionID === state.selected.session_id && selectedGoal.threadId === state.selected.codex_thread_id;
+    $('show-goal').hidden = !visible;
+    // The objective is untrusted session text, including when updated live.
+    $('goal-objective').textContent = visible ? selectedGoal.objective : '';
+    if (!visible && $('goal-dialog').open) $('goal-dialog').close();
+    if (!visible) $('show-goal').setAttribute('aria-expanded', 'false');
+  }
+  function applyGoal(goal, threadId) {
+    selectedGoal = goal?.status === 'active' && typeof goal.objective === 'string' && goal.objective.trim() ?
+      { sessionID: state.selected.session_id, threadId, objective: goal.objective } : null;
+    renderGoal();
+  }
+  function clearGoal() {
+    goalRevision++; goalSnapshotSequence++; selectedGoal = null;
+    renderGoal();
+  }
+  function refreshGoal() {
+    if (!goalContextAvailable()) return;
+    const generation = state.generation, threadId = state.selected.codex_thread_id, sessionID = state.selected.session_id;
+    const revision = goalRevision, sequence = ++goalSnapshotSequence;
+    const current = () => generation === state.generation && threadId === state.selected?.codex_thread_id && sessionID === state.selected?.session_id &&
+      goalContextAvailable() && sequence === goalSnapshotSequence && revision === goalRevision;
+    rpc('thread/goal/get', { threadId }).then(result => {
+      if (current()) applyGoal(result?.goal, threadId);
+    }).catch(() => {
+      // This optional native read is unavailable on older runtimes.
+      if (current()) applyGoal(null, threadId);
+    });
+  }
+  function handleGoalEvent(message) {
+    if (!['thread/goal/updated', 'thread/goal/cleared'].includes(message.method)) return false;
+    const params = message.params;
+    if (goalContextAvailable() && params?.threadId === state.selected.codex_thread_id) {
+      goalRevision++;
+      applyGoal(message.method === 'thread/goal/cleared' ? null : params.goal, params.threadId);
+    }
+    return true;
+  }
+  function openGoal() {
+    renderGoal();
+    if ($('show-goal').hidden) return;
+    blurEditable();
+    goalDialogSessionID = state.selected.session_id;
+    if (!$('goal-dialog').open) $('goal-dialog').showModal();
+    $('show-goal').setAttribute('aria-expanded', 'true');
+    $('close-goal').focus({ preventScroll: true });
   }
   function sessionActivity(session) {
     const current = { ...session, ...activity.sessions.get(session.session_id) };
@@ -250,6 +304,7 @@
           activity.sessions.delete(message.session_id);
           sessionSettings.delete(message.session_id); activitySettingsRevisions.delete(message.session_id);
           state.sessions = state.sessions.filter(row => row.session_id !== message.session_id);
+          if (state.selected?.session_id === message.session_id) clearGoal();
           inventoryChanged = true;
         } else {
           if (!validRow(message.session) || message.session.session_id !== message.session_id) { recover(0); return; }
@@ -454,6 +509,7 @@
   }
   function closeSocket() {
     clearSteerNotice();
+    clearGoal();
     loadingOlder = false; suppressHistoryScroll = false;
     if (bottomFrame !== null) { cancelAnimationFrame(bottomFrame); bottomFrame = null; }
     gatewayCommandAbort?.abort();
@@ -948,6 +1004,7 @@
       const data = await fetchJSON(api + '/sessions', controller.signal);
       if (authGeneration !== state.authGeneration || !state.authenticated) return;
       state.sessions = (data.sessions || []).filter(session => !sessionDeletions.get(session.session_id)?.deleted);
+      if (state.selected && !state.sessions.some(session => session.session_id === state.selected.session_id && !session.archived && !session.deleted)) clearGoal();
       state.workers = Array.isArray(data.workers) ? data.workers : [];
       state.runtimes = Array.isArray(data.runtimes) ? data.runtimes : [];
       for (const session of state.sessions) {
@@ -1061,6 +1118,9 @@
         }
         return;
       }
+      // Goals are independent of transcript loading and turn activity. Apply
+      // them immediately so a delayed snapshot cannot replace a live change.
+      if (handleGoalEvent(message)) return;
       if (state.loading) {
         // Permissions are authoritative even while history is still loading.
         // A newer notification must win over a delayed resume snapshot.
@@ -1073,6 +1133,7 @@
       clearTimeout(handshakeTimer);
       if (generation !== state.generation || state.socket !== socket) return;
       state.connected = false; state.loading = false;
+      clearGoal();
       clearPermissions();
       clearRateLimits();
       rejectPending('Connection interrupted. No input was resent. Check the conversation before retrying.');
@@ -1198,6 +1259,7 @@
       sessionConnectionReady();
     });
     refreshRateLimits();
+    refreshGoal();
     rpc('model/list', {}).then(result => {
       if (!current()) return;
       state.models = result?.data || result?.models || [];
@@ -1456,6 +1518,7 @@
     const { method, params: p = {} } = message;
     if (!method) return; // Transport heartbeats must not repaint an idle transcript.
     if (p.threadId && p.threadId !== state.selected?.codex_thread_id) return;
+    if (handleGoalEvent(message)) return;
     if (p.turnId && p.delta && ['item/agentMessage/delta', 'item/reasoning/summaryTextDelta'].includes(method)) recoverNotice('retry:' + p.turnId);
     if (method === 'thread/settings/updated') {
       // Older workers can already relay this native notification to viewers.
@@ -1779,6 +1842,7 @@
     // the runtime does not publish a quota event. Refresh once, without ever
     // retrying the account mutation or delaying its visible result.
     if (name === 'usage' && /^confirm\s/.test(args) && !result.error) refreshRateLimits();
+    if (name === 'goal' && !result.error) refreshGoal();
     if (result.turn_id) { state.turn = result.turn_id; updateControls(); }
     if (result.session && ['new', 'fork'].includes(name)) {
       const generation = state.generation;
@@ -1854,6 +1918,23 @@
   $('close-sessions').addEventListener('click', () => showSessions(false));
   $('sidebar-backdrop').addEventListener('click', () => showSessions(false));
   $('open-settings').addEventListener('click', openSettings);
+  $('show-goal').addEventListener('click', openGoal);
+  $('close-goal').addEventListener('click', () => $('goal-dialog').close());
+  $('goal-dialog').addEventListener('close', () => {
+    const dialog = $('goal-dialog');
+    if (dialog.open) return;
+    const sessionID = goalDialogSessionID; goalDialogSessionID = '';
+    $('show-goal').setAttribute('aria-expanded', 'false');
+    const target = !state.authenticated ? $('auth-login') : sessionID === state.selected?.session_id && !$('show-goal').hidden ? $('show-goal') :
+      matchMedia('(max-width:650px)').matches ? $('show-sessions') : $('transcript');
+    if (target.getClientRects().length) target.focus({ preventScroll: true });
+  });
+  $('goal-dialog').addEventListener('click', event => {
+    const dialog = $('goal-dialog');
+    if (event.target !== dialog) return;
+    const bounds = dialog.getBoundingClientRect();
+    if (event.clientX < bounds.left || event.clientX > bounds.right || event.clientY < bounds.top || event.clientY > bounds.bottom) dialog.close();
+  });
   $('close-settings').addEventListener('click', () => $('settings-dialog').close());
   $('settings-dialog').addEventListener('close', () => {
     $('open-settings').setAttribute('aria-expanded', 'false');

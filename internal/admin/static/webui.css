@@ -90,6 +90,18 @@
 .settings-console a:hover{text-decoration:underline}
 @media(max-width:650px){#settings-dialog{padding:16px 18px}.settings-section{padding:16px 0}}
 
+#show-goal{flex-shrink:0;white-space:nowrap;color:var(--success);border-color:var(--success);background:color-mix(in srgb,var(--success) 8%,var(--panel));box-shadow:0 0 10px #75cd6840;animation:goal-glow 2.2s ease-in-out infinite}
+#show-goal:hover{border-color:var(--success);background:color-mix(in srgb,var(--success) 14%,var(--panel))}
+@keyframes goal-glow{50%{box-shadow:0 0 15px #75cd6870}}
+#goal-dialog{position:fixed;inset:0;width:min(640px,calc(100% - 32px));max-height:calc(var(--viewport-height,100dvh) - 32px);overflow:hidden;margin:auto;padding:20px 24px;border:1px solid var(--border);border-radius:12px;background:var(--panel);color:var(--text);font:inherit;line-height:1.6;overscroll-behavior:contain}
+#goal-dialog[open]{display:flex;flex-direction:column}
+#goal-dialog::backdrop{background:#000a}
+.goal-heading{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-shrink:0;padding-bottom:12px;border-bottom:1px solid var(--border)}
+.goal-heading h2{margin:0;font-size:1.2rem;color:var(--success)}
+#close-goal{min-height:44px;flex-shrink:0}
+#goal-objective{min-height:0;max-height:calc(var(--viewport-height,100dvh) - 150px);overflow:auto;overscroll-behavior:contain;margin:14px 0 0;white-space:pre-wrap;overflow-wrap:anywhere}
+@media(max-width:650px){.topbar{gap:6px}.topbar>.quiet,.topbar>.icon{flex-shrink:0}.session-heading h1,.session-heading p{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}#show-goal{min-height:34px;padding:5px 7px;font-size:.7rem}#goal-dialog{padding:16px 18px}.goal-heading h2{font-size:1.1rem}}
+
 /* Keep diagram layout inside its card, including when magnified on a phone. */
 .mermaid-diagram{margin:16px 0;max-width:100%;min-width:0;border:1px solid var(--border);border-radius:8px;background:var(--panel);overflow:hidden}
 .diagram-toolbar{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:8px 10px;border-bottom:1px solid var(--border);font-size:.8em;color:var(--muted)}

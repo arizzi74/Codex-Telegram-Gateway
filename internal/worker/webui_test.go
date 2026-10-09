@@ -443,6 +443,32 @@ func TestWebUIRelayUsesGuardedConnectionAndDetachPreservesTurn(t *testing.T) {
 	if frame := nextWebUIFrame(t, observed); !strings.Contains(string(frame.Data), `"usedPercent":11`) {
 		t.Fatalf("native quota update missing: %s", frame.Data)
 	}
+	pool.receive(protocol.WebUIFrame{ID: id, Action: "input", Data: json.RawMessage(`{"id":102,"method":"thread/goal/get","params":{}}`)})
+	goal := nextNativeRequest(t, requests)
+	if !webUIEqualJSON(goal.payload, []byte(`{"id":102,"method":"thread/goal/get","params":{"threadId":"thread"}}`)) {
+		t.Fatalf("native goal read escaped selection: %s", goal.payload)
+	}
+	// Terminal and goal-tool changes are native notifications. They must stay
+	// live while the initial snapshot is pending, with the same output boundary.
+	nativeWrite(t, goal.connection, `{"method":"thread/goal/updated","params":{"threadId":"other","goal":{"threadId":"other","objective":"hidden foreign goal","status":"active"}}}`)
+	nativeWrite(t, goal.connection, `{"method":"thread/goal/updated","params":{"threadId":"thread","turnId":null,"goal":{"threadId":"thread","objective":"Live private-value","status":"active","tokensUsed":1,"futureField":"secret"}}}`)
+	if frame := nextWebUIFrame(t, observed); !webUIEqualJSON(frame.Data, []byte(`{"method":"thread/goal/updated","params":{"threadId":"thread","goal":{"objective":"Live [REDACTED]","status":"active"}}}`)) {
+		t.Fatalf("external goal update blocked, leaked or lost projection: %s", frame.Data)
+	}
+	nativeWrite(t, goal.connection, `{"id":102,"result":{"goal":{"threadId":"thread","objective":"Snapshot private-value","status":"active","tokenBudget":500,"futureField":"secret"}}}`)
+	if frame := nextWebUIFrame(t, observed); !webUIEqualJSON(frame.Data, []byte(`{"id":102,"result":{"goal":{"objective":"Snapshot [REDACTED]","status":"active"}}}`)) {
+		t.Fatalf("native goal snapshot leaked or lost projection: %s", frame.Data)
+	}
+	nativeWrite(t, goal.connection, `{"method":"thread/goal/cleared","params":{"threadId":"thread","futureField":"secret"}}`)
+	if frame := nextWebUIFrame(t, observed); !webUIEqualJSON(frame.Data, []byte(`{"method":"thread/goal/cleared","params":{"threadId":"thread"}}`)) {
+		t.Fatalf("external goal clear missing or unprojected: %s", frame.Data)
+	}
+	pool.receive(protocol.WebUIFrame{ID: id, Action: "input", Data: json.RawMessage(`{"id":103,"method":"thread/goal/get","params":{}}`)})
+	goal = nextNativeRequest(t, requests)
+	nativeWrite(t, goal.connection, `{"id":103,"error":{"code":-32601,"message":"private-value unsupported goal","data":{"path":"secret"}}}`)
+	if frame := nextWebUIFrame(t, observed); !webUIEqualJSON(frame.Data, []byte(`{"id":103,"error":{"code":-32601,"message":"Codex goal is unavailable."}}`)) {
+		t.Fatalf("unsupported goal read exposed native details: %s", frame.Data)
+	}
 	// Prompts accepted on the Telegram observer's separate native connection
 	// arrive as ordinary lifecycle notifications, without a browser request ID.
 	nativeWrite(t, resume.connection, `{"method":"item/completed","params":{"threadId":"other","turnId":"other-turn","item":{"id":"hidden-prompt","type":"userMessage","content":[{"type":"text","text":"do not forward"}]}}}`)

@@ -224,6 +224,7 @@ itemTimes['timestamp-older-completed'] = { startedAtMs: null, completedAtMs: tim
     window.requestAnimationFrame = callback => { window.testAnimationFrames++; return nativeAnimationFrame(callback); };
     window.testSockets = []; window.testSent = []; window.testHoldResume = false; window.testFailResume = false; window.testDropSubmit = false; window.testRejectAnswers = false;
     window.testHoldLimits = false; window.testFailLimits = false; window.testMissingLimits = false;
+    window.testGoals = {}; window.testHoldGoal = false; window.testFailGoal = false;
     window.testDropCommand = false; window.testRejectCommand = false; window.testHoldCommand = false; window.testHoldOlderItems = false; window.testFailOlderItems = false;
     window.testHoldInitialItems = false; window.testFailInitialItems = false;
     window.testHoldMetadata = false; window.testHoldQuestions = false; window.testFailQuestions = false;
@@ -287,6 +288,14 @@ itemTimes['timestamp-older-completed'] = { startedAtMs: null, completedAtMs: tim
           if (window.testHoldResume) { this.held = frame; return; }
           if (window.testFailResume) { this.emit({ id: frame.id, error: { message: 'Thread unavailable' } }); return; }
           result = { thread: { id: frame.params.threadId }, model: 'codex-model', reasoningEffort: 'high', ...window.testPermissions[this.session] };
+        } else if (frame.method === 'thread/goal/get') {
+          this.goalReadCompleted = false;
+          if (window.testFailGoal) {
+            setTimeout(() => { this.goalReadCompleted = true; this.emit({ id: frame.id, error: { code: -32601, message: 'Unknown method thread/goal/get' } }); }, 1);
+            return;
+          }
+          result = { goal: window.testGoals[frame.params.threadId] || null };
+          if (window.testHoldGoal) { this.heldGoal = { frame, result }; return; }
         } else if (frame.method === 'thread/turns/list') {
           result = frame.params.itemsView === 'notLoaded' ? { data: (turns[frame.params.threadId] || []).slice(0, frame.params.limit || 1).map(({ items, ...turn }) => ({ ...turn, items: [] })), nextCursor: null }
             : frame.params.cursor ? { data: [{ id: 'earliest', status: 'completed', startedAt: 1600000000, items: [{ id: 'earliest-message', type: 'agentMessage', text: 'The first conversation.' }] }], nextCursor: null } : { data: turns[frame.params.threadId], nextCursor: frame.params.threadId === 'thread-a' ? 'older' : null };
@@ -374,6 +383,7 @@ itemTimes['timestamp-older-completed'] = { startedAtMs: null, completedAtMs: tim
               window.testPublishPermissions(this.session, { sandbox: { type: 'dangerFullAccess' }, approvalPolicy: 'never', approvalsReviewer: 'user', activePermissionProfile: { id: ':danger-full-access' } });
             }
           }
+          if (frame.method === 'thread/goal/get') this.goalReadCompleted = true;
           this.emit({ id: frame.id, result });
         }, 1);
       }
@@ -639,6 +649,190 @@ itemTimes['timestamp-older-completed'] = { startedAtMs: null, completedAtMs: tim
     workers.pop(); creationBehavior = 'pending';
     await page.goto('https://webui.test/tgw/webui/');
     await page.waitForSelector('[data-session-id="a"]');
+    // Goal state belongs to the selected native thread. Keep these scenarios
+    // isolated so the remaining checks still start without a selected session.
+    {
+      const goalButton = page.getByRole('button', { name: 'Goal', exact: true });
+      const goalDialog = page.getByRole('dialog', { name: 'Goal', exact: true });
+      const objective = page.locator('#goal-objective');
+      const goalReads = () => page.evaluate(() => window.testSent.filter(frame => frame.method === 'thread/goal/get').length);
+      const goalUpdated = (threadId, goal) => current({ method: 'thread/goal/updated', params: { threadId, goal } });
+      const goalCleared = threadId => current({ method: 'thread/goal/cleared', params: { threadId } });
+      const goalHidden = async label => {
+        await page.locator('#show-goal').waitFor({ state: 'hidden' });
+        await page.locator('#goal-dialog').waitFor({ state: 'hidden' });
+        assert.equal(await goalButton.isVisible(), false, label + ': no active goal is exposed');
+        assert.equal(await goalDialog.isVisible(), false, label + ': its objective popup is closed');
+      };
+      const goalFits = async label => {
+        const geometry = await page.evaluate(() => {
+          const fits = element => {
+            const rect = element.getBoundingClientRect();
+            return rect.left >= 0 && rect.top >= 0 && rect.right <= innerWidth && rect.bottom <= innerHeight && element.scrollWidth <= element.clientWidth;
+          };
+          return { button: fits(document.querySelector('#show-goal')), topbar: fits(document.querySelector('.topbar')), dialog: fits(document.querySelector('#goal-dialog')), objective: fits(document.querySelector('#goal-objective')), page: document.documentElement.scrollWidth <= innerWidth };
+        });
+        assert.deepEqual(geometry, { button: true, topbar: true, dialog: true, objective: true, page: true }, label + ': the goal control and long objective fit without horizontal overflow');
+      };
+      await goalHidden('No selected session');
+      await choose('a');
+      await page.waitForFunction(() => window.testSockets.at(-1).goalReadCompleted);
+      await goalHidden('Initial native null goal');
+      const initialGoalRequests = await page.evaluate(() => window.testSent.filter(frame => frame.session === 'a' && ['thread/resume', 'thread/goal/get'].includes(frame.method)));
+      assert.deepEqual(initialGoalRequests.map(frame => frame.method), ['thread/resume', 'thread/goal/get'], 'The selected thread is resumed before its native goal is read');
+      assert.deepEqual(initialGoalRequests[1].params, { threadId: 'thread-a' }, 'The goal read targets only the selected native thread');
+      const initialObjective = 'Ship the selected session goal with keyboard and mobile support.';
+      await page.evaluate(objective => { window.testGoals['thread-b'] = { objective, status: 'active' }; }, initialObjective);
+      const goalActivityRows = await page.evaluate(() => window.testActivityRows);
+      await activity(goalActivityRows.filter(row => row.session_id !== 'b'));
+      await choose('b');
+      await goalButton.waitFor({ state: 'visible' });
+      assert.equal(await goalButton.isVisible(), true, 'A session in inventory can display its native goal while the independent activity snapshot catches up');
+      assert.equal(await goalButton.getAttribute('aria-haspopup'), 'dialog');
+      assert.equal(await goalButton.getAttribute('aria-controls'), 'goal-dialog');
+      assert.equal(await page.locator('.topbar #show-goal').isVisible(), true, 'An active goal is available in the top bar');
+      const goalStyle = await goalButton.evaluate(element => {
+        const style = getComputedStyle(element);
+        return { color: style.color.match(/\d+/g).map(Number), box: style.boxShadow, text: style.textShadow };
+      });
+      assert.ok(goalStyle.color[1] > goalStyle.color[0] && goalStyle.color[1] > goalStyle.color[2], 'The active Goal button uses green text');
+      assert.ok(goalStyle.box !== 'none' || goalStyle.text !== 'none', 'The active Goal button has a visible glow');
+      const readsBeforePopup = await goalReads();
+      await goalButton.click();
+      assert.equal(await goalDialog.isVisible(), true);
+      assert.equal(await objective.textContent(), initialObjective, 'Opening Goal shows the initial native objective');
+      assert.equal(await page.locator('#close-goal').evaluate(element => element === document.activeElement), true, 'The objective popup initially focuses Close');
+      await goalUpdated('thread-b', { objective: 'A live goal while the activity snapshot catches up.', status: 'active' });
+      assert.equal(await objective.textContent(), 'A live goal while the activity snapshot catches up.', 'Native goal events also work before the session appears in the activity snapshot');
+      await activity(goalActivityRows);
+      await goalUpdated('thread-b', { objective: initialObjective, status: 'active' });
+      if (process.env.WEBUI_GOAL_SCREENSHOTS) await page.screenshot({ path: process.env.WEBUI_GOAL_SCREENSHOTS + '-desktop.png' });
+      await page.keyboard.press('Escape');
+      await goalDialog.waitFor({ state: 'hidden' });
+      assert.equal(await goalButton.evaluate(element => element === document.activeElement), true, 'Escape restores focus to Goal');
+      await goalButton.click();
+      await goalUpdated('thread-a', { objective: 'Unselected thread must stay private.', status: 'active' });
+      await goalCleared('thread-a');
+      assert.equal(await objective.textContent(), initialObjective, 'Foreign goal updates and clears cannot alter the selected objective');
+      assert.equal(await goalDialog.isVisible(), true, 'Foreign goal events leave the current popup open');
+      await page.locator('#close-goal').click();
+      assert.equal(await goalButton.evaluate(element => element === document.activeElement), true, 'Close restores focus to Goal');
+      assert.equal(await goalReads(), readsBeforePopup, 'Viewing and closing an objective does not poll or mutate goal state');
+
+      for (const status of ['paused', 'complete', 'blocked', 'usageLimited', 'budgetLimited']) {
+        await goalUpdated('thread-b', { objective: 'Goal before becoming ' + status, status: 'active' });
+        await goalButton.click();
+        await goalUpdated('thread-b', { objective: 'Goal became ' + status, status });
+        await goalHidden('Native status ' + status);
+      }
+      await goalUpdated('thread-b', { objective: 'Goal before clearing.', status: 'active' });
+      await goalButton.click();
+      await goalCleared('thread-b');
+      await goalHidden('Native goal cleared');
+
+      const hostileObjective = hostile + '\n<script>window.goalInjected=true</script>\n**Literal objective text**';
+      await goalUpdated('thread-b', { objective: hostileObjective, status: 'active' });
+      await goalButton.click();
+      assert.equal(await objective.textContent(), hostileObjective, 'The objective is displayed as literal text');
+      assert.equal(await objective.locator('img,script,strong').count(), 0, 'Goal objectives cannot create HTML or Markdown elements');
+      assert.equal(await page.evaluate(() => Boolean(window.injected || window.goalInjected)), false, 'Hostile goal text cannot execute');
+      await page.locator('#close-goal').click();
+      const longObjective = 'Keep this long goal readable on a narrow mobile screen.\n'.repeat(70) + 'UnbrokenObjective'.repeat(60);
+      await goalUpdated('thread-b', { objective: longObjective, status: 'active' });
+      for (const width of [390, 320]) {
+        await page.setViewportSize({ width, height: 844 });
+        assert.equal(await page.locator('.topbar #show-goal').isVisible(), true, width + 'px mobile top bar retains Goal');
+        await goalButton.click();
+        assert.equal(await objective.textContent(), longObjective, 'A long objective remains complete on mobile');
+        await goalFits(width + 'px mobile');
+        assert.equal(await page.evaluate(() => document.activeElement?.matches('input,textarea,[contenteditable=true]') || false), false, 'Opening the objective does not open a mobile text keyboard');
+        if (width === 390 && process.env.WEBUI_GOAL_SCREENSHOTS) await page.screenshot({ path: process.env.WEBUI_GOAL_SCREENSHOTS + '-mobile.png' });
+        await page.keyboard.press('Escape');
+        await goalDialog.waitFor({ state: 'hidden' });
+        assert.equal(await goalButton.evaluate(element => element === document.activeElement), true, 'Escape restores mobile Goal focus');
+      }
+      await page.emulateMedia({ reducedMotion: 'reduce' });
+      assert.deepEqual(await goalButton.evaluate(element => [getComputedStyle(element), getComputedStyle(element, '::before'), getComputedStyle(element, '::after')].map(style => style.animationName)), ['none', 'none', 'none'], 'Reduced motion disables Goal animation, including decorative layers');
+      await page.emulateMedia({ reducedMotion: 'no-preference' });
+      await page.setViewportSize({ width: 1440, height: 1000 });
+      await goalButton.click();
+      // Programmatic navigation also occurs from notification deep links while
+      // the native dialog prevents background pointer interaction.
+      await page.evaluate(() => document.querySelector('[data-session-id="a"]').click());
+      await connected();
+      await page.waitForFunction(() => window.testSockets.at(-1).goalReadCompleted);
+      await goalHidden('Selected session changed');
+      await goalUpdated('thread-b', { objective: 'Foreign update after navigation.', status: 'active' });
+      await goalHidden('Foreign native goal on the current socket');
+
+      // A newer event wins over both kinds of stale initial snapshot: a null
+      // reply cannot hide a new active goal, and an active reply cannot revive
+      // a goal that was cleared while the request was in flight.
+      await page.evaluate(() => { window.testHoldGoal = true; window.testGoals['thread-b'] = null; });
+      await choose('b');
+      await page.waitForFunction(() => Boolean(window.testSockets.at(-1).heldGoal));
+      await goalUpdated('thread-b', { objective: 'Newer live goal wins over the null snapshot.', status: 'active' });
+      await goalButton.click();
+      await page.evaluate(() => { const socket = window.testSockets.at(-1); socket.emit({ id: socket.heldGoal.frame.id, result: socket.heldGoal.result }); });
+      assert.equal(await goalButton.isVisible(), true, 'A stale null snapshot cannot hide a newer active event');
+      assert.equal(await objective.textContent(), 'Newer live goal wins over the null snapshot.');
+      await page.evaluate(() => { window.testGoals['thread-a'] = { objective: 'Stale active snapshot.', status: 'active' }; document.querySelector('[data-session-id="a"]').click(); });
+      await connected();
+      await page.waitForFunction(() => Boolean(window.testSockets.at(-1).heldGoal));
+      await goalCleared('thread-a');
+      await page.evaluate(() => { const socket = window.testSockets.at(-1); socket.emit({ id: socket.heldGoal.frame.id, result: socket.heldGoal.result }); });
+      await goalHidden('A clear event wins over the stale active snapshot');
+
+      await choose('b');
+      await page.waitForFunction(() => Boolean(window.testSockets.at(-1).heldGoal));
+      await page.evaluate(() => {
+        const socket = window.testSockets.at(-1); window.staleGoalConnection = { socket, handler: socket.onmessage };
+        window.testHoldGoal = false; window.testGoals['thread-a'] = null;
+      });
+      await choose('a');
+      await page.waitForFunction(() => window.testSockets.at(-1).goalReadCompleted);
+      await page.evaluate(() => {
+        const { socket, handler } = window.staleGoalConnection;
+        handler({ data: JSON.stringify({ id: socket.heldGoal.frame.id, result: { goal: { objective: 'Late old-session snapshot.', status: 'active' } } }) });
+        handler({ data: JSON.stringify({ method: 'thread/goal/updated', params: { threadId: 'thread-b', goal: { objective: 'Late old-session event.', status: 'active' } } }) });
+      });
+      await goalHidden('Replies and events from the previous connection');
+
+      await page.evaluate(() => { window.testHoldGoal = true; window.testGoals['thread-b'] = { objective: 'Held goal before disconnect.', status: 'active' }; });
+      await choose('b');
+      await page.waitForFunction(() => Boolean(window.testSockets.at(-1).heldGoal));
+      await goalUpdated('thread-b', { objective: 'Live goal before disconnect.', status: 'active' });
+      await goalButton.click();
+      await page.evaluate(() => {
+        const socket = window.testSockets.at(-1); window.disconnectedGoalConnection = { socket, handler: socket.onmessage };
+        document.querySelector('#disconnect').click();
+      });
+      await goalHidden('Disconnect while the objective is open');
+      await page.evaluate(() => {
+        const { socket, handler } = window.disconnectedGoalConnection;
+        handler({ data: JSON.stringify({ id: socket.heldGoal.frame.id, result: socket.heldGoal.result }) });
+        handler({ data: JSON.stringify({ method: 'thread/goal/updated', params: { threadId: 'thread-b', goal: { objective: 'Late disconnected event.', status: 'active' } } }) });
+        window.testHoldGoal = false; window.testFailGoal = true;
+      });
+      await goalHidden('Late reply and event after disconnect');
+      await page.locator('#reconnect').click(); await connected();
+      await page.waitForFunction(() => window.testSockets.at(-1).goalReadCompleted);
+      await goalHidden('A runtime without goal support');
+      await page.locator('#prompt').fill('Goal lookup failure leaves the connected session usable.');
+      assert.equal(await page.locator('#send').isDisabled(), false, 'An unsupported optional goal read does not block the composer');
+      await page.locator('#prompt').fill('');
+      await page.evaluate(() => { window.testFailGoal = false; });
+      await goalUpdated('thread-b', { objective: 'Private objective before authentication expires.', status: 'active' });
+      await goalButton.click();
+      authStatus = 401;
+      await page.evaluate(() => window.testActivitySocket.drop(1006));
+      await page.waitForSelector('#auth:not([hidden])');
+      await goalHidden('Authentication expired while the objective is open');
+      assert.equal(await objective.textContent(), '', 'Authentication expiry removes the private objective text');
+      authStatus = 200;
+      await page.goto('https://webui.test/tgw/webui/');
+      await page.waitForSelector('[data-session-id="a"]');
+    }
     assert.equal((await page.locator('.sidebar-footer').textContent()).trim(), 'Settings', 'Only Settings remains in the sidebar footer');
     assert.equal(await page.locator('#open-settings').getAttribute('aria-haspopup'), 'dialog');
     assert.equal(await page.locator('#settings-dialog').isHidden(), true);
@@ -2749,7 +2943,7 @@ itemTimes['timestamp-older-completed'] = { startedAtMs: null, completedAtMs: tim
     assert.equal(await page.evaluate(() => Object.keys(sessionStorage).length), 0);
     assert.ok(paths.every(value => value.startsWith('/tgw/')), 'All gateway routes use /tgw');
     assert.deepEqual(errors, []);
-    console.log('Web UI browser checks passed: banked-reset usage views/keyboard/mobile/default-cancel/account confirmation/stale-button isolation/status refresh/lost-ack no-replay, Mermaid live-update state/session/auth cleanup, slash autocomplete and CLI choices with keyboard/touch/current markers, successful setting auto-close without mobile autofocus, errors/read-only results remain visible, typed worker and gateway commands without a session, permission confirmation/stale-button isolation, unavailable commands never become prompts, native and global v2 model/effort changes with inventory/resume/command-ack isolation, read-only model status, clipboard images/text+image/image-only/image steering/idle and rejection preservation/per-session drafts/navigation races/no replay, tool colors in both themes, safe formatting/nonempty reasoning/native sub-agent activity, chronology/pagination, independent global activity events/sequence gaps/resync/heartbeat and handshake recovery/inventory races, static Working label plus matching green activity pulse/reduced motion, worker heading background/compact Settings footer/dialog/desktop/mobile/keyboard/focus, desktop font controls/persistence/mobile isolation, full-width responsive status, live quotas/reset tooltips/no polling/session isolation/unavailable fallback, responsive layout and bottom following through late layout changes, keyboard resize/pan/page scroll/delayed focus/dismissal/mobile menu without autofocus, native inner scrolling, blocking/async questions, rejected-answer recovery, approvals, live external prompts, session isolation, disconnect/reconnect, prompt and command drafts/no replay, scoped connection/history/retry error recovery without hiding uncertain-send or runtime warnings, ACK-only ephemeral queued-steer feedback/timer/switch/end/rejection/isolation, mobile status grid alignment/empty rows/compact horizontal Stop and Steer/multiline input, failed resume, sidebar deletion confirmation/desktop/mobile/cancel/CSRF/scope/delayed result/failure/lost acknowledgement/unknown outcome/no POST replay, idle heartbeat, auth expiry.');
+    console.log('Web UI browser checks passed: native active-goal indicator/snapshot/event races/session isolation/terminal states/unsupported runtime/desktop/mobile/escaped objective/keyboard focus/reduced motion/disconnect/auth cleanup, banked-reset usage views/keyboard/mobile/default-cancel/account confirmation/stale-button isolation/status refresh/lost-ack no-replay, Mermaid live-update state/session/auth cleanup, slash autocomplete and CLI choices with keyboard/touch/current markers, successful setting auto-close without mobile autofocus, errors/read-only results remain visible, typed worker and gateway commands without a session, permission confirmation/stale-button isolation, unavailable commands never become prompts, native and global v2 model/effort changes with inventory/resume/command-ack isolation, read-only model status, clipboard images/text+image/image-only/image steering/idle and rejection preservation/per-session drafts/navigation races/no replay, tool colors in both themes, safe formatting/nonempty reasoning/native sub-agent activity, chronology/pagination, independent global activity events/sequence gaps/resync/heartbeat and handshake recovery/inventory races, static Working label plus matching green activity pulse/reduced motion, worker heading background/compact Settings footer/dialog/desktop/mobile/keyboard/focus, desktop font controls/persistence/mobile isolation, full-width responsive status, live quotas/reset tooltips/no polling/session isolation/unavailable fallback, responsive layout and bottom following through late layout changes, keyboard resize/pan/page scroll/delayed focus/dismissal/mobile menu without autofocus, native inner scrolling, blocking/async questions, rejected-answer recovery, approvals, live external prompts, session isolation, disconnect/reconnect, prompt and command drafts/no replay, scoped connection/history/retry error recovery without hiding uncertain-send or runtime warnings, ACK-only ephemeral queued-steer feedback/timer/switch/end/rejection/isolation, mobile status grid alignment/empty rows/compact horizontal Stop and Steer/multiline input, failed resume, sidebar deletion confirmation/desktop/mobile/cancel/CSRF/scope/delayed result/failure/lost acknowledgement/unknown outcome/no POST replay, idle heartbeat, auth expiry.');
   } catch (error) {
     if (process.env.WEBUI_SCREENSHOTS) {
       fs.mkdirSync(process.env.WEBUI_SCREENSHOTS, { recursive: true });

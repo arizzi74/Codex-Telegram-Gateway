@@ -430,12 +430,12 @@ func (r *webUIRelay) clientMessage(data []byte) ([]byte, error) {
 		return nil, err
 	}
 	switch rpc.Method {
-	case "gateway/command", "gateway/questions", "gateway/answer", "turn/start", "turn/steer", "turn/interrupt", "thread/turns/list", "thread/items/list", "account/rateLimits/read":
+	case "gateway/command", "gateway/questions", "gateway/answer", "turn/start", "turn/steer", "turn/interrupt", "thread/turns/list", "thread/items/list", "thread/goal/get", "account/rateLimits/read":
 		// Stored inventory is a discovery snapshot. An existing terminal can
 		// have moved the thread since then, so never admit browser mutations
 		// until this connection has checked the actual resume response.
 		if !r.resumed {
-			return nil, errors.New("Resume the session before reading history or usage limits, or controlling a turn.")
+			return nil, errors.New("Resume the session before reading history, goals or usage limits, or controlling a turn.")
 		}
 		if rpc.Method == "gateway/command" || rpc.Method == "gateway/answer" {
 			if _, used := r.commands[id]; used || len(r.commands) >= 1024 {
@@ -479,7 +479,7 @@ func webUIParams(method string, params map[string]json.RawMessage, thread string
 	}
 	allowed := map[string]bool{"threadId": true}
 	switch method {
-	case "thread/resume":
+	case "thread/resume", "thread/goal/get":
 	case "thread/read":
 		allowed["includeTurns"] = true
 	case "thread/turns/list":
@@ -519,8 +519,8 @@ func webUIParams(method string, params map[string]json.RawMessage, thread string
 				return nil, errors.New("Reset credit details are not available in the web UI.")
 			}
 		case "threadId":
-			var value string
-			if json.Unmarshal(raw, &value) != nil || (value != "" && value != thread) {
+			var value *string
+			if json.Unmarshal(raw, &value) != nil || value == nil || (*value != "" && *value != thread) {
 				return nil, errors.New("Request targets another session.")
 			}
 		case "limit":
@@ -671,6 +671,20 @@ func (r *webUIRelay) serverMessage(data []byte) ([]byte, error) {
 			delete(r.itemRequests, id)
 		}
 		delete(r.pending, id)
+		if method == "thread/goal/get" {
+			result, err := webUIGoalPayload(rpc.Result, r.session.ThreadID)
+			if !r.resumed || err != nil || (len(rpc.Error) > 0 && string(rpc.Error) != "null") {
+				var nativeError struct {
+					Code int `json:"code"`
+				}
+				if json.Unmarshal(rpc.Error, &nativeError) != nil || nativeError.Code == 0 {
+					nativeError.Code = -32000
+				}
+				failure, _ := json.Marshal(map[string]any{"code": nativeError.Code, "message": "Codex goal is unavailable."})
+				return json.Marshal(webUIRPC{JSONRPC: rpc.JSONRPC, ID: rpc.ID, Error: failure})
+			}
+			return json.Marshal(webUIRPC{JSONRPC: rpc.JSONRPC, ID: rpc.ID, Result: result})
+		}
 		if method == "thread/items/list" && len(rpc.Result) > 0 && (len(rpc.Error) == 0 || string(rpc.Error) == "null") {
 			var redactor *auth.Redactor
 			if r.pool != nil {
@@ -741,6 +755,12 @@ func (r *webUIRelay) serverMessage(data []byte) ([]byte, error) {
 		return data, nil
 	}
 	thread := webUIThread(rpc.Params)
+	if rpc.Method == "thread/goal/updated" || rpc.Method == "thread/goal/cleared" {
+		if !r.resumed || len(rpc.ID) > 0 {
+			return nil, nil
+		}
+		return webUIGoalNotification(rpc, r.session.ThreadID)
+	}
 	if rpc.Method == "account/rateLimits/updated" {
 		// This is the sole permitted account-wide notification. Accept it
 		// only for a validated session and keep it a notification, never an

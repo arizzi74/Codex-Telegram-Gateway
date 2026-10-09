@@ -12,6 +12,7 @@ import (
 func TestNativeActivityCurrentProtocolInformationalNotifications(t *testing.T) {
 	for _, method := range []string{
 		"thread/attachment/updated", "rawResponseItem/completed", "rawResponse/completed",
+		"thread/goal/updated", "thread/goal/cleared",
 		"fuzzyFileSearch/sessionUpdated", "fuzzyFileSearch/sessionCompleted",
 		"mcpServer/oauthLogin/completed", "mcpServer/event/stream/notification",
 		"account/login/completed", "externalAgentConfig/import/progress",
@@ -35,6 +36,7 @@ func TestNativeActivityCurrentProtocolInformationalNotifications(t *testing.T) {
 func TestNativeActivityCurrentProtocolReadOnlyRequests(t *testing.T) {
 	for _, method := range []string{
 		"thread/attachment/list", "memory/status", "plugin/share/list", "remoteControl/pairing/status",
+		"thread/goal/get",
 		"remoteControl/client/list", "userVerification/status", "externalAgentConfig/detect",
 		"externalAgentConfig/import/readHistories", "getConversationSummary", "gitDiffToRemote",
 		"getAuthStatus", "thread/realtime/listVoices", "windowsSandbox/readiness",
@@ -123,7 +125,7 @@ func TestNativeActivityHardUncertaintyRetainsFirstSafeDiagnostic(t *testing.T) {
 }
 
 func TestNativeActivityDisconnectedReadOnlyRequestCanBeReverified(t *testing.T) {
-	for _, method := range []string{"config/read", "thread/read", "thread/list", "thread/queue/list", "model/list"} {
+	for _, method := range []string{"config/read", "thread/read", "thread/list", "thread/goal/get", "thread/queue/list", "model/list"} {
 		t.Run(method, func(t *testing.T) {
 			var activity nativeActivity
 			message, _ := json.Marshal(map[string]any{"id": 1, "method": method, "params": map[string]any{"threadId": "thread"}})

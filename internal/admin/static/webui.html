@@ -38,6 +38,7 @@
       <header class="topbar">
         <button id="show-sessions" class="icon mobile-only" aria-label="Choose a session" aria-expanded="false" aria-controls="sidebar">☰</button>
         <div class="session-heading"><h1 id="session-title">Codex</h1><p id="session-location">Choose a session to continue</p></div>
+        <button id="show-goal" type="button" aria-haspopup="dialog" aria-controls="goal-dialog" aria-expanded="false" title="View active goal" hidden>Goal</button>
         <button id="show-commands" class="quiet" type="button" aria-label="Open command menu" aria-controls="command-panel" aria-expanded="false">/ Commands</button>
         <div class="font-controls" role="group" aria-label="Conversation font size"><button id="font-decrease" class="quiet" type="button" aria-label="Decrease font size" title="Decrease conversation font size">−</button><output id="font-size" aria-live="polite">14px</output><button id="font-increase" class="quiet" type="button" aria-label="Increase font size" title="Increase conversation font size">+</button></div>
         <button id="disconnect" class="quiet" hidden>Disconnect</button>
@@ -73,6 +74,10 @@
       </form>
     </section>
   </main>
+  <dialog id="goal-dialog" aria-labelledby="goal-title" aria-describedby="goal-objective">
+    <div class="goal-heading"><h2 id="goal-title">Goal</h2><button id="close-goal" type="button" class="quiet" autofocus>Close</button></div>
+    <p id="goal-objective" tabindex="0"></p>
+  </dialog>
   <dialog id="settings-dialog" aria-labelledby="settings-title">
     <div class="settings-heading"><h2 id="settings-title">Settings</h2><button id="close-settings" type="button" class="quiet" aria-label="Close settings" autofocus>×</button></div>
     <section class="settings-section" aria-labelledby="draft-settings-title">
