@@ -23,7 +23,7 @@ const (
 	// Advance when the parser gains coverage so durable EOF checkpoints do not
 	// skip records that an older parser ignored. Existing generations are
 	// retired in bounded batches while the new version reindexes incrementally.
-	rolloutTimestampIndexVersion    = 2
+	rolloutTimestampIndexVersion    = 3
 	rolloutTimestampScanBytes       = 16 << 20
 	rolloutTimestampTailBytes       = 4 << 20
 	rolloutTimestampRecords         = 4096
@@ -106,6 +106,14 @@ type rolloutTimestampCoverage struct {
 	SequenceDigest               string
 }
 
+// A saved snapshot can remain an exact prefix of a growing turn. Retain only
+// its canonical sequence hash, message count, and inclusive final byte offset,
+// so later records cannot change its occurrence counts or supply its dates.
+type rolloutTimestampPrefixProof struct {
+	Messages int
+	Through  int64
+}
+
 type rolloutTimestampBatch struct {
 	values         map[string][]byte
 	coverage       map[string]rolloutTimestampCoverage
@@ -127,9 +135,9 @@ func validRolloutTimestampCheckpoint(cp rolloutTimestampCheckpoint) bool {
 	if _, err := uuid.Parse(cp.Generation); err != nil {
 		return false
 	}
-	// Version 1 is loadable only to retire its generation. update never resumes
-	// its scan, even when that checkpoint already reached an unchanged EOF.
-	if (cp.Version != 1 && cp.Version != rolloutTimestampIndexVersion) || cp.Offset < 0 || cp.Size < 0 || cp.Offset > cp.Size || cp.RollbackBefore < 0 || cp.RollbackBefore > cp.Size || len(cp.Generation) != 36 || cp.AnchorLength < 0 || cp.AnchorLength > rolloutTimestampAnchorBytes || cp.AnchorStart < 0 || cp.AnchorStart > cp.Size || cp.AnchorLength > cp.Size-cp.AnchorStart || cp.Scan.Start < 0 || cp.Scan.Start > cp.Size || cp.Scan.Messages < 0 || len(cp.Scan.Turn) > 256 || len(cp.StaleGenerations) > 1024 {
+	// Older versions are loadable only to retire their generations. update
+	// never resumes their scans, including checkpoints at an unchanged EOF.
+	if (cp.Version < 1 || cp.Version > rolloutTimestampIndexVersion) || cp.Offset < 0 || cp.Size < 0 || cp.Offset > cp.Size || cp.RollbackBefore < 0 || cp.RollbackBefore > cp.Size || len(cp.Generation) != 36 || cp.AnchorLength < 0 || cp.AnchorLength > rolloutTimestampAnchorBytes || cp.AnchorStart < 0 || cp.AnchorStart > cp.Size || cp.AnchorLength > cp.Size-cp.AnchorStart || cp.Scan.Start < 0 || cp.Scan.Start > cp.Size || cp.Scan.Messages < 0 || len(cp.Scan.Turn) > 256 || len(cp.StaleGenerations) > 1024 {
 		return false
 	}
 	if cp.Scan.Pending != nil && (cp.Scan.Pending.Start < 0 || cp.Scan.Pending.Start > cp.Size || len(cp.Scan.Pending.ItemID) > 256) {
@@ -304,7 +312,7 @@ func (c *rolloutStatsCache) rolloutTimestampCandidates(home, path, thread string
 	if cp == nil {
 		return results
 	}
-	read := func(get func(string) []byte, candidates func(string, int) []time.Time) {
+	read := func(get func(string) []byte, candidates func(string, int, int64) []time.Time) {
 		for i, q := range queries {
 			if q.TurnID == "" || (q.Role != "user" && q.Role != "assistant" && q.Role != "tool" && q.Role != "activity" && q.Role != "compaction") {
 				continue
@@ -315,11 +323,24 @@ func (c *rolloutStatsCache) rolloutTimestampCandidates(home, path, thread string
 			}
 			var times []time.Time
 			if q.Synthetic {
-				if q.Role == "tool" || q.Role == "activity" || q.Digest == "" || q.ExpectedSequenceDigest == "" || q.ExpectedSequenceDigest != coverage.SequenceDigest || coverage.DigestGap || q.ExpectedMessages != coverage.Messages || q.ExpectedOccurrences <= 0 || q.ExpectedOccurrences > rolloutTimestampCandidatesLimit || q.Occurrence < 0 || q.Occurrence >= q.ExpectedOccurrences {
+				if q.Role == "tool" || q.Role == "activity" || q.Digest == "" || q.ExpectedSequenceDigest == "" || coverage.DigestGap || q.ExpectedOccurrences <= 0 || q.ExpectedOccurrences > rolloutTimestampCandidatesLimit || q.Occurrence < 0 || q.Occurrence >= q.ExpectedOccurrences {
 					continue
 				}
+				through := int64(-1)
+				if q.ExpectedSequenceDigest == coverage.SequenceDigest {
+					if q.ExpectedMessages != coverage.Messages {
+						continue
+					}
+				} else {
+					var proof rolloutTimestampPrefixProof
+					key := prefix + "/sequence/" + rolloutTimestampHash(q.TurnID, q.ExpectedSequenceDigest)
+					if json.Unmarshal(get(key), &proof) != nil || proof.Messages != q.ExpectedMessages || proof.Messages < 0 || proof.Messages > coverage.Messages || proof.Through < coverage.Start || proof.Through >= coverage.Through {
+						continue
+					}
+					through = proof.Through
+				}
 				key := prefix + "/digest/" + rolloutTimestampHash(q.TurnID, q.Role, q.Phase, q.Digest) + "/"
-				times = candidates(key, q.ExpectedOccurrences+1)
+				times = candidates(key, q.ExpectedOccurrences+1, through)
 				if len(times) == q.ExpectedOccurrences {
 					results[i] = rolloutTimestampResult{times[q.Occurrence], true}
 				}
@@ -333,7 +354,7 @@ func (c *rolloutStatsCache) rolloutTimestampCandidates(home, path, thread string
 				kinds = []string{"tool-begin", "tool-end", "exact-start", "exact-end", "exact"}
 			}
 			for _, kind := range kinds {
-				times = candidates(prefix+"/"+kind+"/"+rolloutTimestampHash(q.TurnID, q.Role, q.ItemID)+"/", 2)
+				times = candidates(prefix+"/"+kind+"/"+rolloutTimestampHash(q.TurnID, q.Role, q.ItemID)+"/", 2, -1)
 				if len(times) != 0 {
 					if len(times) == 1 {
 						results[i] = rolloutTimestampResult{times[0], true}
@@ -346,10 +367,17 @@ func (c *rolloutStatsCache) rolloutTimestampCandidates(home, path, thread string
 	if c.store != nil {
 		if c.store.db.View(func(tx *bolt.Tx) error {
 			bucket := tx.Bucket(bucketMeta)
-			read(func(key string) []byte { return bucket.Get([]byte(key)) }, func(key string, limit int) []time.Time {
+			read(func(key string) []byte { return bucket.Get([]byte(key)) }, func(key string, limit int, through int64) []time.Time {
 				var result []time.Time
+				var last []byte
+				if through >= 0 {
+					last = fmt.Appendf(nil, "%s%016x", key, through)
+				}
 				cursor := bucket.Cursor()
 				for k, value := cursor.Seek([]byte(key)); k != nil && bytes.HasPrefix(k, []byte(key)) && len(result) < limit; k, value = cursor.Next() {
+					if last != nil && bytes.Compare(k, last) > 0 {
+						break
+					}
 					var stamp time.Time
 					if json.Unmarshal(value, &stamp) != nil {
 						return nil
@@ -363,10 +391,10 @@ func (c *rolloutStatsCache) rolloutTimestampCandidates(home, path, thread string
 			return make([]rolloutTimestampResult, len(queries))
 		}
 	} else {
-		read(func(key string) []byte { return idx.memory[key] }, func(key string, limit int) []time.Time {
+		read(func(key string) []byte { return idx.memory[key] }, func(key string, limit int, through int64) []time.Time {
 			// Store-less tests have a capped metadata map. Sort only this small
 			// matching set; production uses the SQLite primary-key index.
-			return memoryRolloutTimestampCandidates(idx.memory, key, limit)
+			return memoryRolloutTimestampCandidates(idx.memory, key, limit, through)
 		})
 	}
 	return results
@@ -697,6 +725,15 @@ func (s *rolloutTimestampScan) save(prefix, kind, role, phase, identity string, 
 	s.saveTurn(s.Turn, prefix, kind, role, phase, identity, offset, stamp, batch)
 }
 
+func (s *rolloutTimestampScan) savePrefixProof(prefix string, through int64, batch *rolloutTimestampBatch) {
+	if !s.Known || s.Turn == "" || s.DigestGap || s.SequenceDigest == "" {
+		return
+	}
+	key := prefix + "/sequence/" + rolloutTimestampHash(s.Turn, s.SequenceDigest)
+	value, _ := json.Marshal(rolloutTimestampPrefixProof{Messages: s.Messages, Through: through})
+	batch.values[key] = value
+}
+
 func (s *rolloutTimestampScan) saveTurn(turn, prefix, kind, role, phase, identity string, offset int64, stamp time.Time, batch *rolloutTimestampBatch) {
 	if turn == "" || len(turn) > 256 || len(identity) > 256 || stamp.Unix() <= 0 || stamp.Year() > 9999 {
 		return
@@ -807,6 +844,7 @@ func (s *rolloutTimestampScan) record(line []byte, offset int64, prefix string, 
 		}
 		if p.Type == "context_compacted" {
 			s.SequenceDigest = rolloutTimestampSequenceDigest(s.SequenceDigest, "compaction", "", rolloutMessageDigest("compaction", ""))
+			s.savePrefixProof(prefix, offset+int64(len(line))-1, batch)
 			if stamp != nil {
 				s.save(prefix, "digest", "compaction", "", rolloutMessageDigest("compaction", ""), offset, *stamp, batch)
 			}
@@ -835,6 +873,7 @@ func (s *rolloutTimestampScan) record(line []byte, offset int64, prefix string, 
 			}
 			digest := rolloutMessageDigest(role, text)
 			s.SequenceDigest = rolloutTimestampSequenceDigest(s.SequenceDigest, role, p.Phase, digest)
+			s.savePrefixProof(prefix, offset+int64(len(line))-1, batch)
 			if stamp != nil {
 				s.save(prefix, "digest", role, p.Phase, digest, offset, *stamp, batch)
 			}
@@ -892,10 +931,14 @@ func rolloutTimestampLifecycleRole(kind string) string {
 	}
 }
 
-func memoryRolloutTimestampCandidates(memory map[string][]byte, prefix string, limit int) []time.Time {
+func memoryRolloutTimestampCandidates(memory map[string][]byte, prefix string, limit int, through int64) []time.Time {
 	var keys []string
+	last := ""
+	if through >= 0 {
+		last = fmt.Sprintf("%s%016x", prefix, through)
+	}
 	for key := range memory {
-		if strings.HasPrefix(key, prefix) {
+		if strings.HasPrefix(key, prefix) && (last == "" || key <= last) {
 			keys = append(keys, key)
 		}
 	}

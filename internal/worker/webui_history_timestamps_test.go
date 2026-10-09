@@ -51,6 +51,119 @@ func webUITimestampAgent(t *testing.T, home, path string, items []map[string]any
 	return a, runtime, session, server
 }
 
+func TestWebUIHistoryUserTimestampTextKnownProjection(t *testing.T) {
+	for _, tt := range []struct {
+		name, raw, want string
+		ok              bool
+	}{
+		{"empty content", `[]`, "", true},
+		{"exact text", `[{"type":"text","text":"  identify this\n"}]`, "  identify this\n", true},
+		{"whitespace normalization", `[{"type":"text","text":" \t\n"}]`, "", true},
+		{"inline image", `[{"type":"text","text":"identify"},{"type":"image","url":"data:image/png;base64,AA==","detail":"original"}]`, "identify", true},
+		{"file image only", `[{"type":"image","fileId":"file-reference","detail":null}]`, "", true},
+		{"local image", `[{"type":"text","text":"identify"},{"type":"localImage","path":"/tmp/image.png","detail":"high"}]`, "identify", true},
+		{"audio", `[{"type":"text","text":"transcribe"},{"type":"audio","url":"data:audio/wav;base64,AA=="}]`, "transcribe", true},
+		{"local audio", `[{"type":"localAudio","path":"/tmp/audio.wav"}]`, "", true},
+		{"null content", `null`, "", false},
+		{"whitespace around null content", " \nnull\t", "", false},
+		{"malformed content", `[{`, "", false},
+		{"unknown input", `[{"type":"skill","name":"example","path":"/tmp/example"}]`, "", false},
+		{"missing text", `[{"type":"text"}]`, "", false},
+		{"null text", `[{"type":"text","text":null}]`, "", false},
+		{"multiple text parts", `[{"type":"text","text":"first"},{"type":"text","text":"second"}]`, "", false},
+		{"text after attachment", `[{"type":"image","url":"image"},{"type":"text","text":"identify"}]`, "", false},
+		{"missing image reference", `[{"type":"image"}]`, "", false},
+		{"empty image reference", `[{"type":"image","url":""}]`, "", false},
+		{"malformed image reference", `[{"type":"image","url":7}]`, "", false},
+		{"null image reference", `[{"type":"image","url":null}]`, "", false},
+		{"conflicting image references", `[{"type":"image","url":"image","fileId":"file-reference"}]`, "", false},
+		{"nested image reference", `[{"type":"image","image":{"url":"image"}}]`, "", false},
+		{"image with text", `[{"type":"image","url":"image","text":"identify"}]`, "", false},
+		{"invalid image detail", `[{"type":"image","url":"image","detail":{}}]`, "", false},
+		{"unknown image detail", `[{"type":"image","url":"image","detail":"future"}]`, "", false},
+		{"missing local image path", `[{"type":"localImage"}]`, "", false},
+		{"malformed local image path", `[{"type":"localImage","path":[]}]`, "", false},
+		{"missing audio URL", `[{"type":"audio"}]`, "", false},
+		{"malformed audio URL", `[{"type":"audio","url":{}}]`, "", false},
+		{"missing local audio path", `[{"type":"localAudio"}]`, "", false},
+		{"audio with image detail", `[{"type":"audio","url":"audio","detail":"high"}]`, "", false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			text, ok := webUIHistoryUserTimestampText(json.RawMessage(tt.raw))
+			if text != tt.want || ok != tt.ok {
+				t.Fatalf("projection = (%q, %v), want (%q, %v)", text, ok, tt.want, tt.ok)
+			}
+		})
+	}
+}
+
+func TestWebUIHistoryRecordedTimesAfterKnownAttachmentsAndCompaction(t *testing.T) {
+	for _, reordered := range []bool{false, true} {
+		name := "canonical order"
+		if reordered {
+			name = "changed order"
+		}
+		t.Run(name, func(t *testing.T) {
+			home := t.TempDir()
+			base := time.Date(2026, 10, 9, 8, 1, 15, 31_000_000, time.UTC)
+			items := []map[string]any{
+				{"id": "item-1", "type": "userMessage", "content": []map[string]any{
+					{"type": "text", "text": "private-secret identify"},
+					{"type": "image", "url": "data:image/png;base64,AA==", "detail": "original"},
+					{"type": "image", "fileId": "file-reference"},
+					{"type": "localImage", "path": "/tmp/image.png"},
+					{"type": "audio", "url": "data:audio/wav;base64,AA=="},
+					{"type": "localAudio", "path": "/tmp/audio.wav"},
+				}},
+				webUITimestampItem("item-2", "assistant", "commentary", "private-secret progress"),
+				{"id": "item-3", "type": "contextCompaction"},
+				webUITimestampItem("item-4", "user", "", "continue"),
+				webUITimestampItem("item-5", "assistant", "commentary", "private-secret progress"),
+				webUITimestampItem("item-6", "assistant", "final_answer", "done"),
+			}
+			user, _ := json.Marshal(map[string]any{"type": "event_msg", "timestamp": base.Format(time.RFC3339Nano), "payload": map[string]any{
+				"type": "user_message", "message": "private-secret identify", "images": []string{"data:image/png;base64,AA=="},
+				"file_ids": []string{"file-reference"}, "local_images": []string{"/tmp/image.png"},
+				"audio": []string{"data:audio/wav;base64,AA=="}, "local_audio": []string{"/tmp/audio.wav"},
+			}})
+			compaction, _ := json.Marshal(map[string]any{"type": "event_msg", "timestamp": base.Add(2 * time.Minute).Format(time.RFC3339Nano), "payload": map[string]string{"type": "context_compacted"}})
+			records := []string{
+				string(user),
+				webUITimestampEvent("assistant", "commentary", base.Add(time.Minute).Format(time.RFC3339Nano), "private-secret progress"),
+				string(compaction),
+				webUITimestampEvent("user", "", base.Add(3*time.Minute).Format(time.RFC3339Nano), "continue"),
+				webUITimestampEvent("assistant", "commentary", base.Add(4*time.Minute).Format(time.RFC3339Nano), "private-secret progress"),
+				webUITimestampEvent("assistant", "final_answer", base.Add(5*time.Minute).Format(time.RFC3339Nano), "done"),
+			}
+			if reordered {
+				records[1], records[2] = records[2], records[1]
+			}
+			path := historyTimestampFixture(t, home, "thread", records...)
+			a, runtime, session, server := webUITimestampAgent(t, home, path, items)
+			raw, err := a.webUIHistory(t.Context(), runtime, session, webUIHistoryRequest{Limit: 20, Direction: "asc"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			page := webUITestPage(t, raw)
+			if len(page.Data) != len(items) || fullWebUIHistoryReads(server) != 1 {
+				t.Fatal("attachment timestamps changed bounded history loading")
+			}
+			for i, entry := range page.Data {
+				if reordered {
+					if entry.RecordedAtMS != nil || entry.TurnStartedAt == nil {
+						t.Fatal("changed attachment turn order acquired a timestamp")
+					}
+				} else if entry.RecordedAtMS == nil || *entry.RecordedAtMS != base.Add(time.Duration(i)*time.Minute).UnixMilli() {
+					t.Fatalf("item %d lost its canonical saved event time", i)
+				}
+				if strings.Contains(string(entry.Item), "private-secret") || entry.StartedAtMS != nil || entry.CompletedAtMS != nil {
+					t.Fatal("attachment timestamp lookup lost redaction or invented lifecycle times")
+				}
+			}
+		})
+	}
+}
+
 func TestWebUIHistoryRecordedTimesSurviveRedactionPaginationAndRepeatedMessages(t *testing.T) {
 	home := t.TempDir()
 	base := time.Date(2026, 10, 9, 7, 52, 0, 0, time.UTC)
@@ -261,12 +374,13 @@ func TestWebUIHistoryRecordedMatchingDeclinesUnrelatedOrAmbiguousEvents(t *testi
 	}{
 		{"arbitrary ID", "thread", []map[string]any{webUITimestampItem("unsaved", "assistant", "commentary", "same")}, []string{webUITimestampEvent("assistant", "commentary", stamp, "same")}},
 		{"wrong phase", "thread", []map[string]any{webUITimestampItem("item-1", "assistant", "commentary", "same")}, []string{webUITimestampEvent("assistant", "final_answer", stamp, "same")}},
-		{"repeated cardinality", "thread", []map[string]any{webUITimestampItem("item-1", "assistant", "commentary", "same")}, []string{webUITimestampEvent("assistant", "commentary", stamp, "same"), webUITimestampEvent("assistant", "commentary", stamp, "same")}},
+		{"missing repeated occurrence", "thread", []map[string]any{webUITimestampItem("item-1", "assistant", "commentary", "same"), webUITimestampItem("item-2", "assistant", "commentary", "same")}, []string{webUITimestampEvent("assistant", "commentary", stamp, "same")}},
 		{"wrong turn", "thread", []map[string]any{webUITimestampItem("item-1", "assistant", "commentary", "same")}, []string{timestampTurn("other"), webUITimestampEvent("assistant", "commentary", stamp, "same")}},
 		{"wrong thread", "other", []map[string]any{webUITimestampItem("item-1", "assistant", "commentary", "same")}, []string{webUITimestampEvent("assistant", "commentary", stamp, "same")}},
 		{"response mirror only", "thread", []map[string]any{webUITimestampItem("item-1", "assistant", "commentary", "same")}, []string{timestampRecord("mirror", "assistant", stamp, "same")}},
 		{"changed message order", "thread", []map[string]any{webUITimestampItem("item-1", "assistant", "commentary", "first"), webUITimestampItem("item-2", "assistant", "commentary", "second")}, []string{webUITimestampEvent("assistant", "commentary", stamp, "second"), webUITimestampEvent("assistant", "commentary", stamp, "first")}},
-		{"unsupported attachment projection", "thread", []map[string]any{{"id": "item-1", "type": "userMessage", "content": []map[string]string{{"type": "text", "text": "same"}, {"type": "image", "url": "attachment"}}}}, []string{webUITimestampEvent("user", "", stamp, "same"), timestampRecord("item-1", "user", stamp, "same")}},
+		{"malformed attachment projection", "thread", []map[string]any{{"id": "item-1", "type": "userMessage", "content": []map[string]string{{"type": "text", "text": "same"}, {"type": "image"}}}, webUITimestampItem("item-2", "assistant", "commentary", "following")}, []string{webUITimestampEvent("user", "", stamp, "same"), webUITimestampEvent("assistant", "commentary", stamp, "following"), timestampRecord("item-1", "user", stamp, "same")}},
+		{"unsupported attachment projection", "thread", []map[string]any{{"id": "item-1", "type": "userMessage", "content": []map[string]string{{"type": "text", "text": "same"}, {"type": "unknownAttachment", "url": "attachment"}}}, webUITimestampItem("item-2", "assistant", "commentary", "following")}, []string{webUITimestampEvent("user", "", stamp, "same"), webUITimestampEvent("assistant", "commentary", stamp, "following")}},
 		{"reversed reconstruction", "thread", []map[string]any{webUITimestampItem("item-2", "assistant", "commentary", "same"), webUITimestampItem("item-1", "assistant", "commentary", "same")}, []string{webUITimestampEvent("assistant", "commentary", stamp, "same"), webUITimestampEvent("assistant", "commentary", stamp, "same"), timestampRecord("item-1", "assistant", stamp, "same"), timestampRecord("item-2", "assistant", stamp, "same")}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {

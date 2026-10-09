@@ -106,24 +106,62 @@ func webUIHistorySyntheticOrdinal(id string) (uint64, bool) {
 	return ordinal, err == nil && ordinal > 0 && strconv.FormatUint(ordinal, 10) == value
 }
 
-// Text-only projections are exact. Attachment labels, truncation, and unknown
-// content cannot provide a verified fingerprint and keep the turn fallback.
+// The saved-thread builder emits at most one text part, followed by known
+// attachment parts. Attachments do not change the canonical event's message;
+// an absent or whitespace-only message is projected without a text part.
+// Unknown or malformed projections keep the turn fallback.
 func webUIHistoryUserTimestampText(raw json.RawMessage) (string, bool) {
 	var parts []struct {
-		Type string  `json:"type"`
-		Text *string `json:"text"`
+		Type   string          `json:"type"`
+		Text   *string         `json:"text"`
+		URL    *string         `json:"url"`
+		FileID *string         `json:"fileId"`
+		Path   *string         `json:"path"`
+		Detail json.RawMessage `json:"detail"`
 	}
-	if len(raw) == 0 || string(raw) == "null" || json.Unmarshal(raw, &parts) != nil {
+	if len(raw) == 0 || json.Unmarshal(raw, &parts) != nil || parts == nil {
 		return "", false
 	}
-	var text strings.Builder
-	for _, part := range parts {
-		if part.Type != "text" || part.Text == nil {
+	nonempty := func(value *string) bool { return value != nil && *value != "" }
+	text := ""
+	for i, part := range parts {
+		if len(part.Detail) != 0 && string(part.Detail) != "null" {
+			switch string(part.Detail) {
+			case `"auto"`, `"low"`, `"high"`, `"original"`:
+			default:
+				return "", false
+			}
+		}
+		switch part.Type {
+		case "text":
+			if i != 0 || part.Text == nil || part.URL != nil || part.FileID != nil || part.Path != nil || len(part.Detail) != 0 {
+				return "", false
+			}
+			text = *part.Text
+		case "image":
+			if part.Text != nil || part.Path != nil || (nonempty(part.URL) == nonempty(part.FileID)) || (part.URL != nil && part.FileID != nil) {
+				return "", false
+			}
+		case "localImage":
+			if part.Text != nil || part.URL != nil || part.FileID != nil || !nonempty(part.Path) {
+				return "", false
+			}
+		case "audio":
+			if part.Text != nil || !nonempty(part.URL) || part.FileID != nil || part.Path != nil || len(part.Detail) != 0 {
+				return "", false
+			}
+		case "localAudio":
+			if part.Text != nil || part.URL != nil || part.FileID != nil || !nonempty(part.Path) || len(part.Detail) != 0 {
+				return "", false
+			}
+		default:
 			return "", false
 		}
-		text.WriteString(*part.Text)
 	}
-	return text.String(), true
+	if strings.TrimSpace(text) == "" {
+		text = ""
+	}
+	return text, true
 }
 
 func (s *sessionActor) enrichWebUIHistoryTimestamps(client *codexadapter.Client, thread codexadapter.Thread, entries []webUIHistoryEntry, queries []rolloutTimestampQuery) {

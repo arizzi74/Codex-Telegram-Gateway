@@ -113,6 +113,185 @@ func TestRolloutTimestampIndexCanonicalEventsPhaseOccurrencesAndCompaction(t *te
 	}
 }
 
+func TestRolloutTimestampIndexSnapshotPrefixAfterRepeatedAppendAndCompaction(t *testing.T) {
+	for _, durable := range []bool{false, true} {
+		t.Run(fmt.Sprintf("durable=%t", durable), func(t *testing.T) {
+			home := t.TempDir()
+			path := historyTimestampFixture(t, home, "thread",
+				timestampEvent("user_message", "2026-10-09T08:00:00Z", "request", ""),
+				timestampEvent("agent_message", "2026-10-09T08:01:00Z", "same", "commentary"),
+				timestampEvent("agent_message", "2026-10-09T08:02:00Z", "same", "commentary"),
+				timestampEvent("context_compacted", "2026-10-09T08:03:00Z", "", ""),
+				`{"type":"response_item","timestamp":"2026-10-09T08:04:00Z","payload":{"type":"function_call","call_id":"tool"}}`)
+			cache := &rolloutStatsCache{}
+			if durable {
+				cache.store = timestampStore(t)
+			}
+			tool := rolloutTimestampQuery{TurnID: "turn", ItemID: "tool", Role: "tool"}
+			if !cache.rolloutTimestampCandidates(home, path, "thread", []rolloutTimestampQuery{tool})[0].Found {
+				t.Fatal("initial exact tool was not indexed")
+			}
+			sequence := timestampSequence([3]string{"user", "", "request"}, [3]string{"assistant", "commentary", "same"}, [3]string{"assistant", "commentary", "same"}, [3]string{"compaction", "", ""})
+			queries := []rolloutTimestampQuery{
+				timestampSynthetic("turn", "assistant", "commentary", "same", sequence, 3, 2, 0),
+				timestampSynthetic("turn", "assistant", "commentary", "same", sequence, 3, 2, 1),
+				timestampSynthetic("turn", "compaction", "", "", sequence, 3, 1, 0),
+			}
+			// None of these snapshot items was queried before the source grew.
+			// Later identical messages and compactions must stay outside its proof.
+			timestampAppend(t, path, strings.Join([]string{
+				timestampEvent("agent_message", "2026-10-09T08:05:00Z", "same", "commentary"),
+				timestampEvent("context_compacted", "2026-10-09T08:06:00Z", "", ""),
+				timestampEvent("agent_message", "2026-10-09T08:07:00Z", "same", "commentary"),
+			}, "\n")+"\n")
+			for i, result := range cache.rolloutTimestampCandidates(home, path, "thread", queries) {
+				if !result.Found || result.Timestamp.Format("15:04") != fmt.Sprintf("08:%02d", i+1) {
+					t.Fatalf("unvisited snapshot prefix %d: %+v", i, result)
+				}
+			}
+			latestSequence := timestampSequence([3]string{"user", "", "request"}, [3]string{"assistant", "commentary", "same"}, [3]string{"assistant", "commentary", "same"}, [3]string{"compaction", "", ""}, [3]string{"assistant", "commentary", "same"}, [3]string{"compaction", "", ""}, [3]string{"assistant", "commentary", "same"})
+			latest := timestampSynthetic("turn", "assistant", "commentary", "same", latestSequence, 5, 4, 3)
+			if result := cache.rolloutTimestampCandidates(home, path, "thread", []rolloutTimestampQuery{latest})[0]; !result.Found || result.Timestamp.Format("15:04") != "08:07" {
+				t.Fatalf("latest whole-turn proof: %+v", result)
+			}
+		})
+	}
+}
+
+func TestRolloutTimestampIndexSnapshotPrefixCutoffAndStrictProof(t *testing.T) {
+	home := t.TempDir()
+	path := historyTimestampFixture(t, home, "thread",
+		timestampEvent("agent_message", "2026-10-09T08:00:00Z", "first", "commentary"),
+		timestampEvent("agent_message", "2026-10-09T08:01:00Z", "same", "commentary"))
+	cache := &rolloutStatsCache{store: timestampStore(t)}
+	sequence := timestampSequence([3]string{"assistant", "commentary", "first"}, [3]string{"assistant", "commentary", "same"})
+	query := timestampSynthetic("turn", "assistant", "commentary", "same", sequence, 2, 1, 0)
+	if !cache.rolloutTimestampCandidates(home, path, "thread", []rolloutTimestampQuery{query})[0].Found {
+		t.Fatal("initial snapshot unavailable")
+	}
+	// The appended candidate begins exactly at the previous EOF. An inclusive
+	// cutoff based on the old record's exclusive end would count it incorrectly.
+	timestampAppend(t, path, timestampEvent("agent_message", "2026-10-09T08:02:00Z", "same", "commentary")+"\n")
+	wrongCount, wrongOrder, wrongOccurrences, wrongPhase, changedText := query, query, query, query, query
+	wrongCount.ExpectedMessages++
+	wrongOrder.ExpectedSequenceDigest = timestampSequence([3]string{"assistant", "commentary", "same"}, [3]string{"assistant", "commentary", "first"})
+	wrongOccurrences.ExpectedOccurrences++
+	wrongPhase.Phase = "final_answer"
+	changedText.Digest = rolloutMessageDigest("assistant", "changed")
+	queries := []rolloutTimestampQuery{query, wrongCount, wrongOrder, wrongOccurrences, wrongPhase, changedText}
+	for i, result := range cache.rolloutTimestampCandidates(home, path, "thread", queries) {
+		if result.Found != (i == 0) {
+			t.Fatalf("strict snapshot proof %d: %+v", i, result)
+		}
+		if i == 0 && result.Timestamp.Format("15:04") != "08:01" {
+			t.Fatalf("snapshot acquired appended occurrence: %+v", result)
+		}
+	}
+}
+
+func TestRolloutTimestampIndexSnapshotPrefixRetainsCoverageGuards(t *testing.T) {
+	for _, scenario := range []struct{ name, suffix string }{
+		{"digest gap", `{"type":"event_msg","payload":{"type":"sub_agent_activity","event_id":7}}`},
+		{"rollback", `{"type":"event_msg","payload":{"type":"thread_rolled_back","num_turns":1}}` + "\n" + timestampTurn("other")},
+		{"reused turn", timestampComplete("turn") + "\n" + timestampTurn("turn")},
+	} {
+		t.Run(scenario.name, func(t *testing.T) {
+			home := t.TempDir()
+			path := historyTimestampFixture(t, home, "thread", timestampEvent("agent_message", "2026-10-09T08:00:00Z", "old", "commentary"))
+			cache := &rolloutStatsCache{store: timestampStore(t)}
+			query := timestampSynthetic("turn", "assistant", "commentary", "old", timestampSequence([3]string{"assistant", "commentary", "old"}), 1, 1, 0)
+			if !cache.rolloutTimestampCandidates(home, path, "thread", []rolloutTimestampQuery{query})[0].Found {
+				t.Fatal("initial snapshot unavailable")
+			}
+			timestampAppend(t, path, scenario.suffix+"\n"+timestampEvent("agent_message", "2026-10-09T08:01:00Z", "later", "commentary")+"\n")
+			if cache.rolloutTimestampCandidates(home, path, "thread", []rolloutTimestampQuery{query})[0].Found {
+				t.Fatal("saved prefix bypassed invalidated turn coverage")
+			}
+		})
+	}
+}
+
+func TestRolloutTimestampIndexVersionTwoEOFPrefixUpgradeAndRestart(t *testing.T) {
+	home := t.TempDir()
+	path := historyTimestampFixture(t, home, "thread",
+		timestampEvent("user_message", "2026-10-09T08:00:00Z", "request", ""),
+		timestampEvent("agent_message", "2026-10-09T08:01:00Z", "same", "commentary"))
+	state, worker := filepath.Join(t.TempDir(), "state.db"), uuid.NewString()
+	store, err := OpenStore(state, worker)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	query := timestampSynthetic("turn", "assistant", "commentary", "same", timestampSequence([3]string{"user", "", "request"}, [3]string{"assistant", "commentary", "same"}), 2, 1, 0)
+	seed := &rolloutStatsCache{store: store}
+	if !seed.rolloutTimestampCandidates(home, path, "thread", []rolloutTimestampQuery{query})[0].Found {
+		t.Fatal("initial snapshot unavailable")
+	}
+	var scope string
+	var legacy rolloutTimestampCheckpoint
+	for key, cp := range seed.timestamps.entries {
+		scope, legacy = key, *cp
+	}
+	if scope == "" || legacy.Offset != legacy.Size {
+		t.Fatal("fixture did not reach durable EOF")
+	}
+	legacy.Version = 2
+	if err := store.db.Update(func(tx *bolt.Tx) error {
+		bucket := tx.Bucket(bucketMeta)
+		prefix := []byte(scope + "/" + legacy.Generation + "/sequence/")
+		cursor := bucket.Cursor()
+		for key, _ := cursor.Seek(prefix); key != nil && bytes.HasPrefix(key, prefix); key, _ = cursor.Next() {
+			if err := cursor.Delete(); err != nil {
+				return err
+			}
+		}
+		value, err := json.Marshal(legacy)
+		if err != nil {
+			return err
+		}
+		return bucket.Put([]byte(scope+"/checkpoint"), value)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	store, err = OpenStore(state, worker)
+	if err != nil {
+		t.Fatal(err)
+	}
+	upgraded := &rolloutStatsCache{store: store}
+	if !upgraded.rolloutTimestampCandidates(home, path, "thread", []rolloutTimestampQuery{query})[0].Found {
+		t.Fatal("v2 EOF upgrade lost current snapshot")
+	}
+	current := upgraded.timestamps.entries[scope]
+	if current.Version != rolloutTimestampIndexVersion || current.Generation == legacy.Generation || current.Offset != current.Size {
+		t.Fatalf("v2 EOF was resumed rather than reindexed: %+v", current)
+	}
+	if upgraded.timestamps.bytesRead == 0 || upgraded.timestamps.bytesRead > rolloutTimestampScanBytes+rolloutTimestampTailBytes+2*statsLineBytes {
+		t.Fatalf("v2 EOF upgrade exceeded bounded work: %d", upgraded.timestamps.bytesRead)
+	}
+	timestampAppend(t, path, timestampEvent("agent_message", "2026-10-09T08:02:00Z", "same", "commentary")+"\n")
+	if result := upgraded.rolloutTimestampCandidates(home, path, "thread", []rolloutTimestampQuery{query})[0]; !result.Found || result.Timestamp.Format("15:04") != "08:01" {
+		t.Fatalf("upgrade did not backfill immutable prefix proofs: %+v", result)
+	}
+	generation := current.Generation
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	store, err = OpenStore(state, worker)
+	if err != nil {
+		t.Fatal(err)
+	}
+	restarted := &rolloutStatsCache{store: store}
+	if result := restarted.rolloutTimestampCandidates(home, path, "thread", []rolloutTimestampQuery{query})[0]; !result.Found || result.Timestamp.Format("15:04") != "08:01" {
+		t.Fatalf("restart lost immutable snapshot proof: %+v", result)
+	}
+	if restarted.timestamps.bytesRead != 0 || restarted.timestamps.entries[scope].Generation != generation {
+		t.Fatal("restart replayed an unchanged v3 index")
+	}
+}
+
 func TestRolloutTimestampIndexExactIdentityLifecycleAndLateTools(t *testing.T) {
 	home := t.TempDir()
 	path := historyTimestampFixture(t, home, "thread",
