@@ -334,7 +334,7 @@ func (s *sessionActor) codexStatus(ctx context.Context, client *codexadapter.Cli
 	if current := currentSessionSettings(s.session.Settings, nil, s.runtime.Generation); current != nil {
 		model, effort = current.Model, current.ReasoningEffort
 	}
-	lines := []string{"Codex session", "Model: " + valueOr(model, "default"), "Reasoning: " + valueOr(effort, "default"), "Workspace: " + s.session.CWD}
+	lines := []string{"Codex session", "Codex runtime: " + statusCodexVersion(client), "Model: " + valueOr(model, "default"), "Reasoning: " + valueOr(effort, "default"), "Workspace: " + s.session.CWD}
 	lines = append(lines, s.rolloutStatus(client, thread)...)
 	if cfg.ApprovalPolicy != "" {
 		lines = append(lines, "Configured approval policy: "+cfg.ApprovalPolicy)
@@ -358,7 +358,9 @@ func (s *sessionActor) codexStatus(ctx context.Context, client *codexadapter.Cli
 		lines = append(lines, "Token usage: unavailable ("+shortError(usageErr)+")")
 	}
 	if limits, limitsErr := client.ReadRateLimits(ctx); limitsErr == nil {
-		lines = append(lines, rateLimitLines(limits)...)
+		lines = append(lines, statusRateLimitLines(limits)...)
+	} else {
+		lines = append(lines, "Rate limits: unavailable ("+shortError(limitsErr)+")")
 	}
 	return strings.Join(lines, "\n"), nil
 }

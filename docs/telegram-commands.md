@@ -106,7 +106,7 @@ becoming model prompts.
 
 | Command | Telegram behavior |
 | --- | --- |
-| `/status` | Session model, reasoning, workspace, recorded context and token counts, configuration defaults and account limits. Historical counters and policies are labeled as recorded values. |
+| `/status` | Running Codex version, session model, reasoning, workspace, recorded context and token counts, configuration defaults, remaining account allowances and reset times in UTC. Window labels follow the reported duration, including the weekly limit. Historical counters and policies are labeled as recorded values. |
 | `/usage [daily\|weekly\|cumulative\|resets\|redeem]` | Account limits, token activity and banked reset details, with buttons to redeem an available reset after confirmation. |
 | `/model [MODEL [EFFORT]]` | Open model buttons followed by reasoning-effort buttons, or update the session model directly. |
 | `/reasoning [EFFORT]` | Inspect or change reasoning effort. |

@@ -220,8 +220,9 @@ Gateway commands begin with `/tg`: `/tgstatus`, `/tgdeletesession`,
 `/tginterrupt`, `/tgquestions`, and `/tginput`. Telegram's initial
 `/start` button remains an alias for `/tgstart`.
 
-Unprefixed commands control Codex: `/status` shows the selected session's model,
-reasoning, recorded context/token usage and limits; `/model`, `/compact`,
+Unprefixed commands control Codex: `/status` shows the selected session's running
+Codex version, model, reasoning, recorded context/token usage, remaining account
+allowances and reset times; `/model`, `/compact`,
 `/review`, `/fork`, `/rename`, and the other commands appear in the bot menu.
 Use `/model` to choose a model with buttons, then choose its reasoning effort.
 Use `/help` for Codex commands and `/tghelp` for gateway controls. Terminal-only

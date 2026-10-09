@@ -126,7 +126,7 @@ The catalog recognizes the user-facing slash-command names and aliases in offici
 | `/model`, `/reasoning` | Model and reasoning buttons, with changes applied through the worker to the selected session. |
 | `/permissions`, `/approvals` | Permission presets and approval-policy choices. Full Access retains the explicit second confirmation. |
 | `/usage [daily\|weekly\|cumulative\|resets\|redeem]` | View token activity, account limits and banked resets; choose an available reset and confirm redemption. |
-| `/status`, `/pwd` (`/cwd`), `/debug-config` | Read session configuration, context, account limits, working directory or effective settings. |
+| `/status`, `/pwd` (`/cwd`), `/debug-config` | Read the running Codex version, session configuration, context, remaining account allowances and reset times in UTC, working directory or effective settings. |
 | `/new`, `/clear`, `/resume`, `/rename`, `/fork`, `/archive`, `/delete` | Create, browse, rename, fork, archive or delete sessions. New sessions use a named, existing allowed directory. Archive and delete ask for confirmation; deletion preserves working-directory files. |
 | `/review`, `/compact`, `/init` | Start a review, compact history or generate project instructions. |
 | `/plan`, `/fast`, `/personality`, `/memories`, `/goal` | Configure planning, service tier, communication style, session memory and goals using forms/buttons or inline arguments. |
