@@ -45,8 +45,12 @@ func webUIHistoryTimestampQueries(turn codexadapter.TranscriptTurn) []rolloutTim
 				messages++
 				query.Digest = rolloutMessageDigest(query.Role, *item.Text)
 			}
-		case "commandExecution", "fileChange", "mcpToolCall", "dynamicToolCall":
+		case "commandExecution", "fileChange", "mcpToolCall", "dynamicToolCall", "collabAgentToolCall":
 			query.Role = "tool"
+		case "subAgentActivity":
+			// Activity event_id can equal its underlying function call_id.
+			// Keep these exact identities in separate timestamp domains.
+			query.Role = "activity"
 		case "contextCompaction":
 			query.Role = "compaction"
 			query.Digest = rolloutMessageDigest(query.Role, "")

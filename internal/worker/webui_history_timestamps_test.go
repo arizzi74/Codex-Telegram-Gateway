@@ -313,6 +313,182 @@ func TestWebUIHistoryRecordedToolTimesUseExactCallID(t *testing.T) {
 	}
 }
 
+func TestWebUIHistoryRecordedSubAgentActivityTimesAcrossOvernightTurn(t *testing.T) {
+	home := t.TempDir()
+	path := historyTimestampFixture(t, home, "thread",
+		webUITimestampEvent("assistant", "commentary", "2026-10-08T20:50:00.123Z", "private-secret progress"),
+		`{"type":"response_item","timestamp":"2026-10-08T20:51:00.231Z","payload":{"type":"function_call","call_id":"interaction-event","name":"send_input","arguments":"{\"id\":\"child\",\"message\":\"private-secret task\"}"}}`,
+		`{"type":"event_msg","timestamp":"2026-10-08T20:51:00.234Z","payload":{"type":"sub_agent_activity","event_id":"interaction-event","kind":"interacted","occurred_at_ms":1791492660200,"model":null,"reasoning_effort":null,"agent_thread_id":"child","agent_path":"/root/agents"}}`,
+		`{"type":"response_item","timestamp":"2026-10-08T21:00:00.345Z","payload":{"type":"function_call","call_id":"interaction-call","name":"send_input","arguments":"{\"id\":\"child\",\"message\":\"private-secret task\"}"}}`,
+		`{"type":"event_msg","timestamp":"2026-10-09T04:10:00.567Z","payload":{"type":"patch_apply_end","call_id":"patch-call"}}`,
+		`{"type":"event_msg","timestamp":"2026-10-09T05:20:00.678Z","payload":{"type":"item_completed","thread_id":"thread","turn_id":"turn","started_at_ms":null,"completed_at_ms":1791523200600,"item":{"type":"SubAgentActivity","id":"completion-event","kind":"completed","model":null,"reasoning_effort":null,"agent_thread_id":"child","agent_path":"/root/agents"}}}`,
+		webUITimestampEvent("assistant", "final_answer", "2026-10-09T05:21:00.789Z", "private-secret done"),
+		timestampComplete("turn"))
+	items := []map[string]any{
+		webUITimestampItem("item-401", "assistant", "commentary", "private-secret progress"),
+		{"id": "interaction-event", "type": "subAgentActivity", "kind": "interacted", "agentThreadId": "child", "agentPath": "/root/agents", "model": nil, "reasoningEffort": nil},
+		{"id": "interaction-call", "type": "collabAgentToolCall", "tool": "sendInput", "status": "completed", "senderThreadId": "thread", "receiverThreadIds": []string{"child"}, "prompt": "private-secret task", "agentsStates": map[string]any{}},
+		{"id": "patch-call", "type": "fileChange"},
+		{"id": "completion-event", "type": "subAgentActivity", "kind": "completed", "agentThreadId": "child", "agentPath": "/root/agents", "model": nil, "reasoningEffort": nil},
+		webUITimestampItem("item-402", "assistant", "final_answer", "private-secret done"),
+	}
+	want := map[string]string{
+		"item-401":          "2026-10-08T20:50:00.123Z",
+		"interaction-event": "2026-10-08T20:51:00.234Z",
+		"interaction-call":  "2026-10-08T21:00:00.345Z",
+		"patch-call":        "2026-10-09T04:10:00.567Z",
+		"completion-event":  "2026-10-09T05:20:00.678Z",
+		"item-402":          "2026-10-09T05:21:00.789Z",
+	}
+	started, _ := time.Parse(time.RFC3339, "2026-10-08T20:00:00Z")
+	completed, _ := time.Parse(time.RFC3339, "2026-10-09T05:22:00Z")
+	a, runtime, session, server := webUITimestampAgent(t, home, path, items)
+	server.SetThreads([]map[string]any{{"id": session.ThreadID, "cwd": session.CWD, "path": path, "source": "cli", "turns": []map[string]any{{"id": "turn", "status": "completed", "startedAt": started.Unix(), "completedAt": completed.Unix(), "items": items}}}}, nil)
+	request := webUIHistoryRequest{Limit: 2, Direction: "asc"}
+	seen := make(map[string]bool)
+	assertPage := func(page webUIHistoryPage) {
+		t.Helper()
+		if len(page.Data) != 2 {
+			t.Fatalf("page has %d entries, want 2", len(page.Data))
+		}
+		for _, entry := range page.Data {
+			id := webUIItemID(entry.Item)
+			stamp, err := time.Parse(time.RFC3339Nano, want[id])
+			if err != nil || entry.RecordedAtMS == nil || *entry.RecordedAtMS != stamp.UnixMilli() {
+				t.Fatalf("%s lost its saved-record timestamp", id)
+			}
+			if entry.StartedAtMS != nil || entry.CompletedAtMS != nil || entry.TurnStartedAt == nil || *entry.TurnStartedAt != started.Unix() || entry.TurnCompletedAt == nil || *entry.TurnCompletedAt != completed.Unix() {
+				t.Fatalf("%s changed recorded provenance or turn fallback", id)
+			}
+			if strings.Contains(string(entry.Item), "private-secret") {
+				t.Fatal("private fixture content survived sanitization")
+			}
+			seen[id] = true
+		}
+	}
+	for {
+		raw, err := a.webUIHistory(t.Context(), runtime, session, request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		page := webUITestPage(t, raw)
+		assertPage(page)
+		if page.NextCursor == "" {
+			break
+		}
+		request.Cursor = page.NextCursor
+	}
+	if len(seen) != len(want) {
+		t.Fatal("paginated history omitted an overnight activity")
+	}
+	request.Cursor = ""
+	raw, err := a.webUIHistory(t.Context(), runtime, session, request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertPage(webUITestPage(t, raw))
+	if fullWebUIHistoryReads(server) != 1 {
+		t.Fatal("cached reopen reread the completed turn")
+	}
+}
+
+func TestWebUIHistoryRecordedNativeSubAgentActivityAfterParentCompletion(t *testing.T) {
+	home := t.TempDir()
+	path := historyTimestampFixture(t, home, "thread",
+		`{"type":"event_msg","timestamp":"2026-10-08T20:51:01.234Z","payload":{"type":"item_completed","thread_id":"thread","turn_id":"turn","started_at_ms":1791492660000,"completed_at_ms":1791492661000,"item":{"type":"SubAgentActivity","id":"native-interaction","kind":"interacted","model":null,"reasoning_effort":null,"agent_thread_id":"child","agent_path":"/root/agents"}}}`,
+		`{"type":"event_msg","timestamp":"2026-10-08T21:00:00.345Z","payload":{"type":"item_completed","thread_id":"thread","turn_id":"turn","started_at_ms":null,"completed_at_ms":1791493200000,"item":{"type":"CollabAgentToolCall","id":"native-collab","tool":"send_input","status":"completed","sender_thread_id":"thread","receiver_thread_ids":["child"],"prompt":"private-secret task","agents_states":{}}}}`,
+		timestampComplete("turn"),
+		`{"type":"event_msg","timestamp":"2026-10-08T23:00:00.456Z","payload":{"type":"item_completed","thread_id":"thread","turn_id":"turn","started_at_ms":null,"completed_at_ms":1791500400000,"item":{"type":"SubAgentActivity","id":"after-parent-completion","kind":"completed","model":null,"reasoning_effort":null,"agent_thread_id":"child","agent_path":"/root/agents"}}}`,
+		timestampTurn("other"),
+		`{"type":"event_msg","timestamp":"2026-10-09T05:20:00.567Z","payload":{"type":"item_completed","thread_id":"thread","turn_id":"turn","started_at_ms":null,"completed_at_ms":1791523200000,"item":{"type":"SubAgentActivity","id":"after-next-turn-start","kind":"completed","model":null,"reasoning_effort":null,"agent_thread_id":"child","agent_path":"/root/agents"}}}`,
+		`{"type":"event_msg","timestamp":"2026-10-09T05:21:00.678Z","payload":{"type":"item_completed","thread_id":"thread","turn_id":"other","started_at_ms":null,"completed_at_ms":1791523260000,"item":{"type":"SubAgentActivity","id":"native-interaction","kind":"interacted","model":null,"reasoning_effort":null,"agent_thread_id":"child","agent_path":"/root/agents"}}}`,
+		timestampComplete("other"))
+	items := []map[string]any{
+		{"id": "native-interaction", "type": "subAgentActivity", "kind": "interacted", "agentThreadId": "child", "agentPath": "/root/agents"},
+		{"id": "native-collab", "type": "collabAgentToolCall", "tool": "sendInput", "status": "completed", "senderThreadId": "thread", "receiverThreadIds": []string{"child"}, "prompt": "private-secret task", "agentsStates": map[string]any{}},
+		{"id": "after-parent-completion", "type": "subAgentActivity", "kind": "completed", "agentThreadId": "child", "agentPath": "/root/agents"},
+		{"id": "after-next-turn-start", "type": "subAgentActivity", "kind": "completed", "agentThreadId": "child", "agentPath": "/root/agents"},
+	}
+	a, runtime, session, _ := webUITimestampAgent(t, home, path, items)
+	raw, err := a.webUIHistory(t.Context(), runtime, session, webUIHistoryRequest{Limit: 20, Direction: "asc"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	page := webUITestPage(t, raw)
+	want := []string{"2026-10-08T20:51:01.234Z", "2026-10-08T21:00:00.345Z", "2026-10-08T23:00:00.456Z", "2026-10-09T05:20:00.567Z"}
+	if len(page.Data) != len(want) {
+		t.Fatalf("history has %d entries, want %d", len(page.Data), len(want))
+	}
+	for i, expected := range want {
+		stamp, _ := time.Parse(time.RFC3339Nano, expected)
+		entry := page.Data[i]
+		if entry.RecordedAtMS == nil || *entry.RecordedAtMS != stamp.UnixMilli() || entry.StartedAtMS != nil || entry.CompletedAtMS != nil || entry.TurnID != "turn" {
+			t.Fatalf("native activity %d lost its parent turn or recorded provenance", i)
+		}
+	}
+}
+
+func TestWebUIHistoryRecordedActivityAndUnderlyingToolKeepSeparateTimes(t *testing.T) {
+	for _, tt := range []struct {
+		name, itemType, expected string
+	}{
+		{"activity", "subAgentActivity", "2026-10-09T05:20:00.234Z"},
+		{"collaboration call", "collabAgentToolCall", "2026-10-09T05:20:00.231Z"},
+		{"ordinary tool", "commandExecution", "2026-10-09T05:20:00.231Z"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			home := t.TempDir()
+			path := historyTimestampFixture(t, home, "thread",
+				`{"type":"response_item","timestamp":"2026-10-09T05:20:00.231Z","payload":{"type":"function_call","call_id":"shared-call","name":"send_input","arguments":"{\"id\":\"child\",\"message\":\"private-secret task\"}"}}`,
+				`{"type":"event_msg","timestamp":"2026-10-09T05:20:00.234Z","payload":{"type":"sub_agent_activity","event_id":"shared-call","kind":"interacted","occurred_at_ms":1791523200232,"model":null,"reasoning_effort":null,"agent_thread_id":"child","agent_path":"/root/agents"}}`,
+				timestampComplete("turn"))
+			items := []map[string]any{{"id": "shared-call", "type": tt.itemType, "kind": "interacted", "agentThreadId": "child", "agentPath": "/root/agents"}}
+			a, runtime, session, _ := webUITimestampAgent(t, home, path, items)
+			raw, err := a.webUIHistory(t.Context(), runtime, session, webUIHistoryRequest{Limit: 20, Direction: "asc"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			page := webUITestPage(t, raw)
+			stamp, _ := time.Parse(time.RFC3339Nano, tt.expected)
+			if len(page.Data) != 1 || page.Data[0].RecordedAtMS == nil || *page.Data[0].RecordedAtMS != stamp.UnixMilli() {
+				t.Fatal("activity and underlying tool timestamps collided")
+			}
+		})
+	}
+}
+
+func TestWebUIHistoryRecordedSubAgentActivityDeclinesUnverifiedIdentity(t *testing.T) {
+	for _, tt := range []struct {
+		name    string
+		records []string
+	}{
+		{"underlying function call only", []string{`{"type":"response_item","timestamp":"2026-10-09T05:20:00Z","payload":{"type":"function_call","call_id":"activity","name":"send_input","arguments":"{}"}}`}},
+		{"payload ID is not event ID", []string{`{"type":"event_msg","timestamp":"2026-10-09T05:20:00Z","payload":{"type":"sub_agent_activity","id":"activity","event_id":"different","kind":"completed","agent_thread_id":"child","agent_path":"/root/agents"}}`}},
+		{"call ID is not event ID", []string{`{"type":"event_msg","timestamp":"2026-10-09T05:20:00Z","payload":{"type":"sub_agent_activity","call_id":"activity","kind":"completed","agent_thread_id":"child","agent_path":"/root/agents"}}`}},
+		{"another current turn", []string{timestampTurn("other"), `{"type":"event_msg","timestamp":"2026-10-09T05:20:00Z","payload":{"type":"sub_agent_activity","event_id":"activity","kind":"completed","agent_thread_id":"child","agent_path":"/root/agents"}}`}},
+		{"another explicit turn", []string{`{"type":"event_msg","timestamp":"2026-10-09T05:20:00Z","payload":{"type":"item_completed","turn_id":"other","item":{"type":"SubAgentActivity","id":"activity","kind":"completed","agent_thread_id":"child","agent_path":"/root/agents"}}}`}},
+		{"duplicate event ID", []string{
+			`{"type":"event_msg","timestamp":"2026-10-09T05:20:00Z","payload":{"type":"sub_agent_activity","event_id":"activity","kind":"interacted","agent_thread_id":"child","agent_path":"/root/agents"}}`,
+			`{"type":"event_msg","timestamp":"2026-10-09T05:21:00Z","payload":{"type":"sub_agent_activity","event_id":"activity","kind":"completed","agent_thread_id":"child","agent_path":"/root/agents"}}`,
+		}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			home := t.TempDir()
+			path := historyTimestampFixture(t, home, "thread", tt.records...)
+			items := []map[string]any{{"id": "activity", "type": "subAgentActivity", "kind": "completed", "agentThreadId": "child", "agentPath": "/root/agents"}}
+			a, runtime, session, _ := webUITimestampAgent(t, home, path, items)
+			raw, err := a.webUIHistory(t.Context(), runtime, session, webUIHistoryRequest{Limit: 20, Direction: "asc"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			page := webUITestPage(t, raw)
+			if len(page.Data) != 1 || page.Data[0].RecordedAtMS != nil || page.Data[0].TurnStartedAt == nil {
+				t.Fatal("unverified activity replaced the turn fallback")
+			}
+		})
+	}
+}
+
 func TestWebUIHistoryRecordedCompactionMatchesTurnOccurrence(t *testing.T) {
 	home := t.TempDir()
 	path := historyTimestampFixture(t, home, "thread",

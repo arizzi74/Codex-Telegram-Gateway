@@ -23,6 +23,22 @@ func timestampComplete(turn string) string {
 	return fmt.Sprintf(`{"type":"event_msg","payload":{"type":"task_complete","turn_id":%q}}`, turn)
 }
 
+func timestampActivity(id, kind, timestamp, turn string) string {
+	raw, _ := json.Marshal(map[string]any{"type": "event_msg", "timestamp": timestamp, "payload": map[string]any{
+		"type": "sub_agent_activity", "event_id": id, "kind": kind, "turn_id": turn,
+		"agent_thread_id": "private-agent-thread", "agent_path": "private-agent-path", "model": "private-agent-model",
+		"occurred_at_ms": 1, // The recovered date must come from the rollout record.
+	}})
+	return string(raw)
+}
+
+func timestampLifecycle(kind, itemType, id, turn, timestamp string) string {
+	raw, _ := json.Marshal(map[string]any{"type": "event_msg", "timestamp": timestamp, "payload": map[string]any{
+		"type": kind, "turn_id": turn, "item": map[string]string{"type": itemType, "id": id},
+	}})
+	return string(raw)
+}
+
 func timestampSequence(parts ...[3]string) string {
 	var sequence string
 	for _, part := range parts {
@@ -121,6 +137,332 @@ func TestRolloutTimestampIndexExactIdentityLifecycleAndLateTools(t *testing.T) {
 	}
 	if results[2].Timestamp.Format("15:04") != "08:02" {
 		t.Fatal("native completion replaced its start")
+	}
+}
+
+func TestRolloutTimestampIndexActivityExactIDsAndTurnIsolation(t *testing.T) {
+	home := t.TempDir()
+	path := historyTimestampFixture(t, home, "thread",
+		timestampEvent("user_message", "2026-10-08T23:59:50+02:00", "request", ""),
+		timestampActivity("subagent-interaction-agent-uuid-9", "interacted", "2026-10-08T23:59:58+02:00", ""),
+		timestampActivity("shared-event", "interacted", "2026-10-08T23:59:59+02:00", ""),
+		timestampComplete("turn"), timestampTurn("other"),
+		timestampActivity("subagent-completed-agent-uuid", "completed", "2026-10-09T00:00:02+02:00", ""),
+		timestampActivity("shared-event", "interacted", "2026-10-09T00:00:03+02:00", ""),
+		timestampActivity("late-explicit", "completed", "2026-10-09T00:00:04+02:00", "turn"),
+		timestampComplete("other"),
+		timestampActivity("unknown-current-turn", "completed", "2026-10-09T00:00:05+02:00", ""))
+	queries := []rolloutTimestampQuery{
+		{TurnID: "turn", ItemID: "subagent-interaction-agent-uuid-9", Role: "activity"},
+		{TurnID: "other", ItemID: "subagent-completed-agent-uuid", Role: "activity"},
+		{TurnID: "turn", ItemID: "shared-event", Role: "activity"},
+		{TurnID: "other", ItemID: "shared-event", Role: "activity"},
+		{TurnID: "turn", ItemID: "late-explicit", Role: "activity"},
+		{TurnID: "other", ItemID: "late-explicit", Role: "activity"},
+		{TurnID: "other", ItemID: "subagent-interaction-agent-uuid-9", Role: "activity"},
+		{TurnID: "turn", ItemID: "subagent-interaction-agent-uuid-9", Role: "assistant"},
+		{TurnID: "turn", ItemID: "private-agent-thread", Role: "activity"},
+		{TurnID: "turn", ItemID: "subagent-interaction-agent-uuid", Role: "activity"},
+		{TurnID: "other", ItemID: "unknown-current-turn", Role: "activity"},
+		timestampSynthetic("turn", "user", "", "request", timestampSequence([3]string{"user", "", "request"}), 1, 1, 0),
+	}
+	cache := &rolloutStatsCache{store: timestampStore(t)}
+	results := cache.rolloutTimestampCandidates(home, path, "thread", queries)
+	expected := []string{"2026-10-08T21:59:58Z", "2026-10-08T22:00:02Z", "2026-10-08T21:59:59Z", "2026-10-08T22:00:03Z", "2026-10-08T22:00:04Z"}
+	for i, result := range results {
+		if i < len(expected) {
+			if !result.Found || result.Timestamp.Format(time.RFC3339) != expected[i] {
+				t.Fatalf("activity %d: %+v", i, result)
+			}
+		} else if i == len(results)-1 {
+			if !result.Found {
+				t.Fatal("activity changed canonical message sequence or count")
+			}
+		} else if result.Found {
+			t.Fatalf("unverified activity %d acquired a timestamp: %+v", i, result)
+		}
+	}
+	if err := cache.store.db.View(func(tx *bolt.Tx) error {
+		return tx.Bucket(bucketMeta).ForEach(func(key, value []byte) error {
+			if bytes.HasPrefix(key, []byte("rollout_time")) && (bytes.Contains(value, []byte("private-agent")) || bytes.Contains(key, []byte("private-agent"))) {
+				t.Fatal("activity index persisted agent payload metadata")
+			}
+			return nil
+		})
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestRolloutTimestampIndexLifecycleCoreAndNativeSpellings(t *testing.T) {
+	variants := []struct{ core, native, role string }{
+		{"UserMessage", "userMessage", "user"}, {"AgentMessage", "agentMessage", "assistant"},
+		{"CommandExecution", "commandExecution", "tool"}, {"McpToolCall", "mcpToolCall", "tool"},
+		{"DynamicToolCall", "dynamicToolCall", "tool"}, {"FileChange", "fileChange", "tool"},
+		{"WebSearch", "webSearch", "tool"}, {"ImageGeneration", "imageGeneration", "tool"},
+		{"CollabAgentToolCall", "collabAgentToolCall", "tool"}, {"SubAgentActivity", "subAgentActivity", "activity"},
+	}
+	var records []string
+	var queries []rolloutTimestampQuery
+	for _, variant := range variants {
+		for _, spelling := range []string{variant.core, variant.native} {
+			records = append(records,
+				timestampLifecycle("item_started", spelling, spelling, "turn", "2026-10-08T23:59:58Z"),
+				timestampLifecycle("item_completed", spelling, spelling, "turn", "2026-10-09T00:00:02Z"))
+			queries = append(queries, rolloutTimestampQuery{TurnID: "turn", ItemID: spelling, Role: variant.role})
+		}
+	}
+	for _, unsupported := range []string{"subagentactivity", "SUBAGENTACTIVITY", "SubagentActivity", "sub_agent_activity", "Unknown", "Reasoning", "Plan"} {
+		records = append(records, timestampLifecycle("item_completed", unsupported, unsupported, "turn", "2026-10-09T00:00:03Z"))
+		queries = append(queries, rolloutTimestampQuery{TurnID: "turn", ItemID: unsupported, Role: "activity"})
+	}
+	records = append(records, timestampComplete("turn"), timestampTurn("other"),
+		timestampLifecycle("item_completed", "SubAgentActivity", "late-native", "turn", "2026-10-09T00:00:04Z"),
+		timestampLifecycle("item_completed", "SubAgentActivity", "unseen-turn", "missing", "2026-10-09T00:00:05Z"),
+		timestampComplete("other"))
+	queries = append(queries,
+		rolloutTimestampQuery{TurnID: "turn", ItemID: "late-native", Role: "activity"},
+		rolloutTimestampQuery{TurnID: "other", ItemID: "late-native", Role: "activity"},
+		rolloutTimestampQuery{TurnID: "missing", ItemID: "unseen-turn", Role: "activity"},
+		rolloutTimestampQuery{TurnID: "other", ItemID: "unseen-turn", Role: "activity"})
+	home := t.TempDir()
+	path := historyTimestampFixture(t, home, "thread", records...)
+	cache := &rolloutStatsCache{store: timestampStore(t)}
+	for i, result := range cache.rolloutTimestampCandidates(home, path, "thread", queries) {
+		switch {
+		case i < 2*len(variants):
+			if !result.Found || result.Timestamp.Format(time.RFC3339) != "2026-10-08T23:59:58Z" {
+				t.Fatalf("lifecycle spelling %q lost start: %+v", queries[i].ItemID, result)
+			}
+		case i == len(queries)-4:
+			if !result.Found || result.Timestamp.Format(time.RFC3339) != "2026-10-09T00:00:04Z" {
+				t.Fatalf("late native completion lost explicit parent turn: %+v", result)
+			}
+		default:
+			if result.Found {
+				t.Fatalf("unsupported or wrong-turn lifecycle %d acquired a timestamp: %+v", i, result)
+			}
+		}
+	}
+}
+
+func TestRolloutTimestampIndexMalformedActivitiesRemainUnmatched(t *testing.T) {
+	home := t.TempDir()
+	path := historyTimestampFixture(t, home, "thread",
+		`{"timestamp":"2026-10-09T08:00:00Z","type":"event_msg","payload":{"type":"sub_agent_activity","id":"wrong-id-field","call_id":"wrong-call"}}`,
+		`{"timestamp":"2026-10-09T08:00:00Z","type":"event_msg","payload":{"type":"sub_agent_activity","event_id":7}}`,
+		`{"timestamp":"2026-10-09T08:00:00Z","type":"event_msg","payload":{"type":"sub_agent_activity","event_id":null}}`,
+		`{"timestamp":"2026-10-09T08:00:00Z","type":"event_msg","payload":{"type":"Sub_Agent_Activity","event_id":"wrong-event-case"}}`,
+		timestampActivity("invalid-date", "interacted", "invalid", ""),
+		timestampActivity("before-epoch", "interacted", "1969-12-31T23:59:59Z", ""),
+		timestampActivity("long-turn", "interacted", "2026-10-09T08:00:00Z", strings.Repeat("t", 257)),
+		timestampActivity(strings.Repeat("i", 257), "interacted", "2026-10-09T08:00:00Z", ""),
+		timestampActivity("duplicate-activity", "interacted", "2026-10-09T08:00:00Z", ""),
+		timestampActivity("duplicate-activity", "completed", "2026-10-09T08:01:00Z", ""),
+		timestampActivity("valid-after-malformed", "interacted", "2026-10-09T08:02:00Z", ""), timestampComplete("turn"))
+	ids := []string{"wrong-id-field", "wrong-call", "wrong-event-case", "invalid-date", "before-epoch", "long-turn", strings.Repeat("i", 257), "duplicate-activity", "valid-after-malformed"}
+	queries := make([]rolloutTimestampQuery, len(ids))
+	for i, id := range ids {
+		queries[i] = rolloutTimestampQuery{TurnID: "turn", ItemID: id, Role: "activity"}
+	}
+	cache := &rolloutStatsCache{store: timestampStore(t)}
+	for i, result := range cache.rolloutTimestampCandidates(home, path, "thread", queries) {
+		if result.Found != (i == len(ids)-1) {
+			t.Fatalf("malformed activity %q: %+v", ids[i], result)
+		}
+	}
+}
+
+func TestRolloutTimestampIndexActivityLifecyclePrecedence(t *testing.T) {
+	home := t.TempDir()
+	path := historyTimestampFixture(t, home, "thread",
+		timestampActivity("canonical", "completed", "2026-10-09T08:00:00Z", ""),
+		timestampLifecycle("item_completed", "SubAgentActivity", "canonical", "turn", "2026-10-09T08:01:00Z"),
+		timestampLifecycle("item_started", "SubAgentActivity", "started", "turn", "2026-10-09T08:02:00Z"),
+		timestampLifecycle("item_completed", "SubAgentActivity", "started", "turn", "2026-10-09T08:03:00Z"),
+		timestampLifecycle("item_completed", "SubAgentActivity", "ambiguous", "turn", "2026-10-09T08:04:00Z"),
+		timestampLifecycle("item_completed", "SubAgentActivity", "ambiguous", "turn", "2026-10-09T08:05:00Z"), timestampComplete("turn"))
+	queries := []rolloutTimestampQuery{
+		{TurnID: "turn", ItemID: "canonical", Role: "activity"},
+		{TurnID: "turn", ItemID: "started", Role: "activity"},
+		{TurnID: "turn", ItemID: "ambiguous", Role: "activity"},
+	}
+	cache := &rolloutStatsCache{store: timestampStore(t)}
+	results := cache.rolloutTimestampCandidates(home, path, "thread", queries)
+	if !results[0].Found || results[0].Timestamp.Format("15:04") != "08:01" {
+		t.Fatalf("canonical lifecycle lost precedence over legacy mirror: %+v", results[0])
+	}
+	if !results[1].Found || results[1].Timestamp.Format("15:04") != "08:02" {
+		t.Fatalf("native completion replaced start: %+v", results[1])
+	}
+	if results[2].Found {
+		t.Fatalf("duplicate canonical activity identity acquired a timestamp: %+v", results[2])
+	}
+}
+
+func TestRolloutTimestampIndexActivityAndToolCallIDsRemainDistinct(t *testing.T) {
+	home := t.TempDir()
+	path := historyTimestampFixture(t, home, "thread",
+		`{"timestamp":"2026-10-08T23:50:26.277Z","type":"response_item","payload":{"type":"function_call","call_id":"call_shared"}}`,
+		timestampActivity("call_shared", "interacted", "2026-10-08T23:50:26.280Z", ""),
+		`{"timestamp":"2026-10-08T23:51:00Z","type":"response_item","payload":{"type":"function_call","call_id":"call_only"}}`,
+		timestampActivity("activity_only", "interacted", "2026-10-08T23:51:01Z", ""),
+		`{"timestamp":"2026-10-08T23:51:02Z","type":"response_item","payload":{"type":"function_call","call_id":"duplicate_tool"}}`,
+		`{"timestamp":"2026-10-08T23:51:03Z","type":"response_item","payload":{"type":"function_call","call_id":"duplicate_tool"}}`,
+		timestampActivity("duplicate_tool", "interacted", "2026-10-08T23:51:04Z", ""), timestampComplete("turn"))
+	queries := []rolloutTimestampQuery{
+		{TurnID: "turn", ItemID: "call_shared", Role: "tool"},
+		{TurnID: "turn", ItemID: "call_shared", Role: "activity"},
+		{TurnID: "turn", ItemID: "duplicate_tool", Role: "activity"},
+		{TurnID: "turn", ItemID: "call_only", Role: "activity"},
+		{TurnID: "turn", ItemID: "activity_only", Role: "tool"},
+		{TurnID: "turn", ItemID: "duplicate_tool", Role: "tool"},
+	}
+	cache := &rolloutStatsCache{store: timestampStore(t)}
+	results := cache.rolloutTimestampCandidates(home, path, "thread", queries)
+	expected := []string{"2026-10-08T23:50:26.277Z", "2026-10-08T23:50:26.280Z", "2026-10-08T23:51:04Z"}
+	for i, result := range results {
+		if i < len(expected) {
+			stamp, err := time.Parse(time.RFC3339Nano, expected[i])
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !result.Found || !result.Timestamp.Equal(stamp) {
+				t.Fatalf("shared identifier domain %d: %+v", i, result)
+			}
+		} else if result.Found {
+			t.Fatalf("identity leaked across activity and tool domains %d: %+v", i, result)
+		}
+	}
+}
+
+func TestRolloutTimestampIndexVersionOneEOFUpgradeAndRestart(t *testing.T) {
+	home := t.TempDir()
+	var records []string
+	for i := range 300 {
+		records = append(records, timestampRecord(fmt.Sprintf("message-%d", i), "user", "2026-10-09T08:00:00Z", "value"))
+	}
+	records = append(records,
+		timestampActivity("legacy-activity", "interacted", "2026-10-09T08:01:00Z", ""),
+		timestampLifecycle("item_completed", "SubAgentActivity", "native-activity", "turn", "2026-10-09T08:02:00Z"), timestampComplete("turn"))
+	path := historyTimestampFixture(t, home, "thread", records...)
+	state, worker := filepath.Join(t.TempDir(), "state.db"), uuid.NewString()
+	store, err := OpenStore(state, worker)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	queries := []rolloutTimestampQuery{
+		{TurnID: "turn", ItemID: "message-0", Role: "user"},
+		{TurnID: "turn", ItemID: "legacy-activity", Role: "activity"},
+		{TurnID: "turn", ItemID: "native-activity", Role: "activity"},
+	}
+	seed := &rolloutStatsCache{store: store}
+	seed.rolloutTimestampCandidates(home, path, "thread", queries)
+	var scope string
+	var legacy rolloutTimestampCheckpoint
+	for key, cp := range seed.timestamps.entries {
+		scope, legacy = key, *cp
+	}
+	if scope == "" || legacy.Offset != legacy.Size {
+		t.Fatal("fixture did not produce a fully indexed durable EOF checkpoint")
+	}
+	legacy.Version = 1
+	oldPrefix := scope + "/" + legacy.Generation + "/"
+	// Model an installed v1 parser that reached EOF but never indexed either
+	// legacy sub_agent_activity or the PascalCase native lifecycle record.
+	if err := store.db.Update(func(tx *bolt.Tx) error {
+		bucket := tx.Bucket(bucketMeta)
+		for _, query := range queries[1:] {
+			for _, kind := range []string{"exact", "exact-end"} {
+				prefix := []byte(oldPrefix + kind + "/" + rolloutTimestampHash(query.TurnID, query.Role, query.ItemID) + "/")
+				cursor := bucket.Cursor()
+				for key, _ := cursor.Seek(prefix); key != nil && bytes.HasPrefix(key, prefix); key, _ = cursor.Next() {
+					if err := cursor.Delete(); err != nil {
+						return err
+					}
+				}
+			}
+		}
+		value, err := json.Marshal(legacy)
+		if err != nil {
+			return err
+		}
+		return bucket.Put([]byte(scope+"/checkpoint"), value)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	store, err = OpenStore(state, worker)
+	if err != nil {
+		t.Fatal(err)
+	}
+	upgraded := &rolloutStatsCache{store: store}
+	for i, result := range upgraded.rolloutTimestampCandidates(home, path, "thread", queries) {
+		if !result.Found || result.Timestamp.Format("15:04") != fmt.Sprintf("08:%02d", i) {
+			t.Fatalf("v1 EOF upgrade query %d: %+v", i, result)
+		}
+	}
+	current := upgraded.timestamps.entries[scope]
+	if current.Version != rolloutTimestampIndexVersion || current.Generation == legacy.Generation || current.Offset != current.Size {
+		t.Fatalf("v1 EOF scan was resumed instead of replaced: %+v", current)
+	}
+	if upgraded.timestamps.bytesRead == 0 || upgraded.timestamps.bytesRead > rolloutTimestampScanBytes+rolloutTimestampTailBytes+2*statsLineBytes {
+		t.Fatalf("upgrade read outside bounded work: %d", upgraded.timestamps.bytesRead)
+	}
+	countOld := func() int {
+		t.Helper()
+		count := 0
+		if err := store.db.View(func(tx *bolt.Tx) error {
+			cursor := tx.Bucket(bucketMeta).Cursor()
+			for key, _ := cursor.Seek([]byte(oldPrefix)); key != nil && bytes.HasPrefix(key, []byte(oldPrefix)); key, _ = cursor.Next() {
+				count++
+			}
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+		return count
+	}
+	if remaining := countOld(); remaining != 301-256 {
+		t.Fatalf("legacy generation cleanup exceeded its bounded batch: %d remain", remaining)
+	}
+	generation := current.Generation
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	store, err = OpenStore(state, worker)
+	if err != nil {
+		t.Fatal(err)
+	}
+	restarted := &rolloutStatsCache{store: store}
+	for range 3 {
+		for i, result := range restarted.rolloutTimestampCandidates(home, path, "thread", queries) {
+			if !result.Found {
+				t.Fatalf("upgrade restart lost query %d", i)
+			}
+		}
+		restarted.timestamps.entries = nil // Exercise durable reload after eviction.
+	}
+	if restarted.timestamps.bytesRead != 0 {
+		t.Fatalf("v2 restart repeated upgrade replay: %d bytes", restarted.timestamps.bytesRead)
+	}
+	if remaining := countOld(); remaining != 0 {
+		t.Fatalf("unchanged lookup did not finish bounded cleanup: %d remain", remaining)
+	}
+	if err := store.db.View(func(tx *bolt.Tx) error {
+		var saved rolloutTimestampCheckpoint
+		if err := json.Unmarshal(tx.Bucket(bucketMeta).Get([]byte(scope+"/checkpoint")), &saved); err != nil {
+			return err
+		}
+		if saved.Version != rolloutTimestampIndexVersion || saved.Generation != generation || len(saved.StaleGenerations) != 0 {
+			t.Fatalf("upgrade did not retain durable v2 generation: %+v", saved)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
 	}
 }
 

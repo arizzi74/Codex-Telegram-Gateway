@@ -20,6 +20,10 @@ import (
 )
 
 const (
+	// Advance when the parser gains coverage so durable EOF checkpoints do not
+	// skip records that an older parser ignored. Existing generations are
+	// retired in bounded batches while the new version reindexes incrementally.
+	rolloutTimestampIndexVersion    = 2
 	rolloutTimestampScanBytes       = 16 << 20
 	rolloutTimestampTailBytes       = 4 << 20
 	rolloutTimestampRecords         = 4096
@@ -123,7 +127,9 @@ func validRolloutTimestampCheckpoint(cp rolloutTimestampCheckpoint) bool {
 	if _, err := uuid.Parse(cp.Generation); err != nil {
 		return false
 	}
-	if cp.Version != 1 || cp.Offset < 0 || cp.Size < 0 || cp.Offset > cp.Size || cp.RollbackBefore < 0 || cp.RollbackBefore > cp.Size || len(cp.Generation) != 36 || cp.AnchorLength < 0 || cp.AnchorLength > rolloutTimestampAnchorBytes || cp.AnchorStart < 0 || cp.AnchorStart > cp.Size || cp.AnchorLength > cp.Size-cp.AnchorStart || cp.Scan.Start < 0 || cp.Scan.Start > cp.Size || cp.Scan.Messages < 0 || len(cp.Scan.Turn) > 256 || len(cp.StaleGenerations) > 1024 {
+	// Version 1 is loadable only to retire its generation. update never resumes
+	// its scan, even when that checkpoint already reached an unchanged EOF.
+	if (cp.Version != 1 && cp.Version != rolloutTimestampIndexVersion) || cp.Offset < 0 || cp.Size < 0 || cp.Offset > cp.Size || cp.RollbackBefore < 0 || cp.RollbackBefore > cp.Size || len(cp.Generation) != 36 || cp.AnchorLength < 0 || cp.AnchorLength > rolloutTimestampAnchorBytes || cp.AnchorStart < 0 || cp.AnchorStart > cp.Size || cp.AnchorLength > cp.Size-cp.AnchorStart || cp.Scan.Start < 0 || cp.Scan.Start > cp.Size || cp.Scan.Messages < 0 || len(cp.Scan.Turn) > 256 || len(cp.StaleGenerations) > 1024 {
 		return false
 	}
 	if cp.Scan.Pending != nil && (cp.Scan.Pending.Start < 0 || cp.Scan.Pending.Start > cp.Size || len(cp.Scan.Pending.ItemID) > 256) {
@@ -300,7 +306,7 @@ func (c *rolloutStatsCache) rolloutTimestampCandidates(home, path, thread string
 	}
 	read := func(get func(string) []byte, candidates func(string, int) []time.Time) {
 		for i, q := range queries {
-			if q.TurnID == "" || (q.Role != "user" && q.Role != "assistant" && q.Role != "tool" && q.Role != "compaction") {
+			if q.TurnID == "" || (q.Role != "user" && q.Role != "assistant" && q.Role != "tool" && q.Role != "activity" && q.Role != "compaction") {
 				continue
 			}
 			var coverage rolloutTimestampCoverage
@@ -309,7 +315,7 @@ func (c *rolloutStatsCache) rolloutTimestampCandidates(home, path, thread string
 			}
 			var times []time.Time
 			if q.Synthetic {
-				if q.Role == "tool" || q.Digest == "" || q.ExpectedSequenceDigest == "" || q.ExpectedSequenceDigest != coverage.SequenceDigest || coverage.DigestGap || q.ExpectedMessages != coverage.Messages || q.ExpectedOccurrences <= 0 || q.ExpectedOccurrences > rolloutTimestampCandidatesLimit || q.Occurrence < 0 || q.Occurrence >= q.ExpectedOccurrences {
+				if q.Role == "tool" || q.Role == "activity" || q.Digest == "" || q.ExpectedSequenceDigest == "" || q.ExpectedSequenceDigest != coverage.SequenceDigest || coverage.DigestGap || q.ExpectedMessages != coverage.Messages || q.ExpectedOccurrences <= 0 || q.ExpectedOccurrences > rolloutTimestampCandidatesLimit || q.Occurrence < 0 || q.Occurrence >= q.ExpectedOccurrences {
 					continue
 				}
 				key := prefix + "/digest/" + rolloutTimestampHash(q.TurnID, q.Role, q.Phase, q.Digest) + "/"
@@ -398,7 +404,7 @@ func (idx *rolloutTimestampIndex) update(store *Store, namespace, home, path, th
 			return nil
 		})
 	}
-	valid := cp != nil && cp.Device == device && cp.Inode == inode && info.Size() >= cp.Size && !info.ModTime().Before(cp.Modified) && (info.Size() != cp.Size || info.ModTime().Equal(cp.Modified))
+	valid := cp != nil && cp.Version == rolloutTimestampIndexVersion && cp.Device == device && cp.Inode == inode && info.Size() >= cp.Size && !info.ModTime().Before(cp.Modified) && (info.Size() != cp.Size || info.ModTime().Equal(cp.Modified))
 	unchanged := valid && cp.Size == info.Size() && cp.Modified.Equal(info.ModTime())
 	if unchanged && (cp.Offset == cp.Size || cp.WaitingSize == cp.Size) && (!tail || (cp.TailSize == info.Size() && cp.TailModified.Equal(info.ModTime()) && (cp.TailOffset == cp.TailSize || cp.TailWaiting)) || cp.Offset == cp.Size) {
 		if len(cp.StaleGenerations) > 0 && store != nil {
@@ -448,7 +454,7 @@ func (idx *rolloutTimestampIndex) update(store *Store, namespace, home, path, th
 		if cp != nil {
 			stale = append(append([]string(nil), cp.StaleGenerations...), cp.Generation)
 		}
-		cp = &rolloutTimestampCheckpoint{Version: 1, Device: device, Inode: inode, Generation: uuid.NewString(), HeaderDigest: header, WaitingSize: -1, TailSize: -1, StaleGenerations: stale}
+		cp = &rolloutTimestampCheckpoint{Version: rolloutTimestampIndexVersion, Device: device, Inode: inode, Generation: uuid.NewString(), HeaderDigest: header, WaitingSize: -1, TailSize: -1, StaleGenerations: stale}
 	} else {
 		copy := *cp
 		copy.StaleGenerations = append([]string(nil), cp.StaleGenerations...)
@@ -712,6 +718,7 @@ func (s *rolloutTimestampScan) record(line []byte, offset int64, prefix string, 
 			TurnID      string `json:"turn_id"`
 			ID          string `json:"id"`
 			CallID      string `json:"call_id"`
+			EventID     string `json:"event_id"`
 			Role, Phase string
 			Message     *string
 			Item        struct{ Type, ID string } `json:"item"`
@@ -771,15 +778,7 @@ func (s *rolloutTimestampScan) record(line []byte, offset int64, prefix string, 
 	stamp := statsTime(record.Timestamp)
 	if record.Type == "event_msg" {
 		if (p.Type == "item_started" || p.Type == "item_completed") && p.Item.ID != "" && stamp != nil {
-			role := ""
-			switch p.Item.Type {
-			case "userMessage":
-				role = "user"
-			case "agentMessage":
-				role = "assistant"
-			case "commandExecution", "mcpToolCall", "dynamicToolCall", "fileChange", "webSearch", "imageGeneration", "collabAgentToolCall":
-				role = "tool"
-			}
+			role := rolloutTimestampLifecycleRole(p.Item.Type)
 			if role != "" {
 				kind := "exact-start"
 				if p.Type == "item_completed" {
@@ -790,6 +789,19 @@ func (s *rolloutTimestampScan) record(line []byte, offset int64, prefix string, 
 					turn = s.Turn
 				}
 				s.saveTurn(turn, prefix, kind, role, "", p.Item.ID, offset, *stamp, batch)
+			}
+			return
+		}
+		if p.Type == "sub_agent_activity" {
+			// The visible activity item uses event_id, not the child thread,
+			// agent path, or a call identifier. An event_id can equal the
+			// underlying function call ID, so keep its activity domain distinct.
+			if p.EventID != "" && stamp != nil {
+				turn := p.TurnID
+				if turn == "" && s.Known {
+					turn = s.Turn
+				}
+				s.saveTurn(turn, prefix, "exact", "activity", "", p.EventID, offset, *stamp, batch)
 			}
 			return
 		}
@@ -859,6 +871,24 @@ func (s *rolloutTimestampScan) record(line []byte, offset int64, prefix string, 
 				s.save(prefix, "exact", "tool", "", id, offset, *stamp, batch)
 			}
 		}
+	}
+}
+
+// Rollouts carry the core TurnItem enum's PascalCase names; native thread
+// items use camelCase. Accept only the explicitly supported spellings, so an
+// unknown item or arbitrary case variation cannot acquire an unrelated date.
+func rolloutTimestampLifecycleRole(kind string) string {
+	switch kind {
+	case "UserMessage", "userMessage":
+		return "user"
+	case "AgentMessage", "agentMessage":
+		return "assistant"
+	case "SubAgentActivity", "subAgentActivity":
+		return "activity"
+	case "CommandExecution", "commandExecution", "McpToolCall", "mcpToolCall", "DynamicToolCall", "dynamicToolCall", "FileChange", "fileChange", "WebSearch", "webSearch", "ImageGeneration", "imageGeneration", "CollabAgentToolCall", "collabAgentToolCall":
+		return "tool"
+	default:
+		return ""
 	}
 }
 
