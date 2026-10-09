@@ -46,6 +46,9 @@ func (c *rolloutStatsCache) historyRolloutPath(home, threadID string) string {
 			path, newest = filepath.Join(home, parts[2]), entry.used
 		}
 	}
+	if path == "" && c.store != nil {
+		path = c.store.loadRolloutTimestampPath(c.namespace, home, threadID)
+	}
 	return path
 }
 

@@ -28,11 +28,12 @@ const (
 // A separate bounded tail supplies recent activity while older prompt counts
 // catch up. Files are never loaded wholesale or handed to a model.
 type rolloutStatsCache struct {
-	mu        sync.Mutex
-	entries   map[string]*rolloutStatsEntry
-	store     *Store
-	namespace string
-	bytesRead int64
+	mu         sync.Mutex
+	entries    map[string]*rolloutStatsEntry
+	store      *Store
+	namespace  string
+	bytesRead  int64
+	timestamps rolloutTimestampIndex
 }
 
 type rolloutStatsEntry struct {

@@ -40,12 +40,13 @@ type webUIHistoryEntry struct {
 	Item            json.RawMessage `json:"item"`
 	StartedAtMS     *int64          `json:"startedAtMs,omitempty"`
 	CompletedAtMS   *int64          `json:"completedAtMs,omitempty"`
+	RecordedAtMS    *int64          `json:"recordedAtMs,omitempty"`
 	TurnStartedAt   *int64          `json:"turnStartedAt,omitempty"`
 	TurnCompletedAt *int64          `json:"turnCompletedAt,omitempty"`
 	TurnStatus      string          `json:"turnStatus,omitempty"`
 }
 
-// Native item lifecycle dates are milliseconds; the legacy turn dates above
+// Item lifecycle and recorded dates use milliseconds; legacy turn dates above
 // remain seconds. Optional invalid dates are omitted without losing the item.
 func (entry *webUIHistoryEntry) UnmarshalJSON(raw []byte) error {
 	type historyEntry webUIHistoryEntry
@@ -53,12 +54,14 @@ func (entry *webUIHistoryEntry) UnmarshalJSON(raw []byte) error {
 		*historyEntry
 		StartedAtMS   json.RawMessage `json:"startedAtMs"`
 		CompletedAtMS json.RawMessage `json:"completedAtMs"`
+		RecordedAtMS  json.RawMessage `json:"recordedAtMs"`
 	}{historyEntry: (*historyEntry)(entry)}
 	if err := json.Unmarshal(raw, &decoded); err != nil {
 		return err
 	}
 	entry.StartedAtMS = webUIHistoryMilliseconds(decoded.StartedAtMS)
 	entry.CompletedAtMS = webUIHistoryMilliseconds(decoded.CompletedAtMS)
+	entry.RecordedAtMS = webUIHistoryMilliseconds(decoded.RecordedAtMS)
 	return nil
 }
 
@@ -79,11 +82,16 @@ type webUIHistoryScope struct {
 	Generation      uint64
 }
 type webUIHistorySnapshot struct {
-	id            string
-	scope         webUIHistoryScope
-	turn          codexadapter.TranscriptTurn
-	bytes         int
-	created, used time.Time
+	id    string
+	scope webUIHistoryScope
+	turn  codexadapter.TranscriptTurn
+	// Only fingerprints and ordering metadata survive sanitization. Keeping
+	// them with the snapshot permits later pages to recover timestamps after
+	// incremental index backfill without retaining the original message text.
+	timestampQueries []rolloutTimestampQuery
+	recordedTimes    []*int64
+	bytes            int
+	created, used    time.Time
 }
 type webUIHistoryPosition struct {
 	scope        webUIHistoryScope
@@ -99,6 +107,29 @@ type webUIHistoryCache struct {
 	snapshots map[string]*webUIHistorySnapshot
 	cursors   map[string]webUIHistoryPosition
 	bytes     int
+}
+
+type webUIHistoryTimestampTarget struct {
+	snapshot *webUIHistorySnapshot
+	index    int
+}
+
+func (c *webUIHistoryCache) recordedAt(snapshot *webUIHistorySnapshot, index int) *int64 {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return snapshot.recordedTimes[index]
+}
+
+func (c *webUIHistoryCache) rememberRecorded(targets []webUIHistoryTimestampTarget, entries []webUIHistoryEntry) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for i, target := range targets {
+		if entries[i].RecordedAtMS != nil && target.snapshot.recordedTimes[target.index] == nil {
+			// Snapshots pin both item identity and its first verified saved
+			// record time, including when an active turn subsequently grows.
+			target.snapshot.recordedTimes[target.index] = entries[i].RecordedAtMS
+		}
+	}
 }
 
 func (c *webUIHistoryCache) prune(now time.Time) {
@@ -173,10 +204,13 @@ func (c *webUIHistoryCache) completed(scope webUIHistoryScope, turnID string) *w
 	}
 	return nil
 }
-func (c *webUIHistoryCache) insert(scope webUIHistoryScope, turn codexadapter.TranscriptTurn) (*webUIHistorySnapshot, error) {
+func (c *webUIHistoryCache) insert(scope webUIHistoryScope, turn codexadapter.TranscriptTurn, queries []rolloutTimestampQuery) (*webUIHistorySnapshot, error) {
 	bytes := 0
 	for _, item := range turn.Items {
 		bytes += len(item) + 32
+	}
+	for _, query := range queries {
+		bytes += len(query.TurnID) + len(query.ItemID) + len(query.Role) + len(query.Phase) + len(query.Digest) + len(query.ExpectedSequenceDigest) + 128
 	}
 	if bytes > webUIHistoryBytes {
 		return nil, validationError("This source turn exceeds the bounded history cache. Use the Codex terminal to inspect it.")
@@ -197,7 +231,7 @@ func (c *webUIHistoryCache) insert(scope webUIHistoryScope, turn codexadapter.Tr
 		c.bytes -= oldest.bytes
 		delete(c.snapshots, oldest.id)
 	}
-	snapshot := &webUIHistorySnapshot{id: uuid.NewString(), scope: scope, turn: turn, bytes: bytes, created: time.Now(), used: time.Now()}
+	snapshot := &webUIHistorySnapshot{id: uuid.NewString(), scope: scope, turn: turn, timestampQueries: queries, recordedTimes: make([]*int64, len(turn.Items)), bytes: bytes, created: time.Now(), used: time.Now()}
 	c.snapshots[snapshot.id] = snapshot
 	c.bytes += bytes
 	return snapshot, nil
@@ -244,6 +278,8 @@ func (s *sessionActor) webUIHistory(request webUIActorCommand) (json.RawMessage,
 		return nil, err
 	}
 	page := webUIHistoryPage{Data: make([]webUIHistoryEntry, 0, history.Limit)}
+	queries := make([]rolloutTimestampQuery, 0, history.Limit)
+	timestampTargets := make([]webUIHistoryTimestampTarget, 0, history.Limit)
 	seenCursors := make(map[string]bool)
 	var source webUIHistorySource
 	defer func() {
@@ -301,11 +337,12 @@ func (s *sessionActor) webUIHistory(request webUIActorCommand) (json.RawMessage,
 					return nil, validationError("Conversation changed while it was loading. Refresh the conversation.")
 				}
 				turn = full.Data[0]
+				fingerprints := webUIHistoryTimestampQueries(turn)
 				turn.Items, err = webUISanitizeHistoryItems(s.agent.redactor, turn.Items)
 				if err != nil {
 					return nil, err
 				}
-				snapshot, err = s.agent.webHistory.insert(scope, turn)
+				snapshot, err = s.agent.webHistory.insert(scope, turn, fingerprints)
 				if err != nil {
 					return nil, err
 				}
@@ -318,7 +355,9 @@ func (s *sessionActor) webUIHistory(request webUIActorCommand) (json.RawMessage,
 			}
 		}
 		for position.index >= 0 && position.index < len(snapshot.turn.Items) && len(page.Data) < history.Limit {
-			page.Data = append(page.Data, webUIHistoryEntry{TurnID: snapshot.turn.ID, Item: snapshot.turn.Items[position.index], TurnStartedAt: webUIHistoryTimestamp(snapshot.turn.StartedAt), TurnCompletedAt: webUIHistoryTimestamp(snapshot.turn.CompletedAt), TurnStatus: snapshot.turn.Status})
+			page.Data = append(page.Data, webUIHistoryEntry{TurnID: snapshot.turn.ID, Item: snapshot.turn.Items[position.index], RecordedAtMS: s.agent.webHistory.recordedAt(snapshot, position.index), TurnStartedAt: webUIHistoryTimestamp(snapshot.turn.StartedAt), TurnCompletedAt: webUIHistoryTimestamp(snapshot.turn.CompletedAt), TurnStatus: snapshot.turn.Status})
+			queries = append(queries, snapshot.timestampQueries[position.index])
+			timestampTargets = append(timestampTargets, webUIHistoryTimestampTarget{snapshot, position.index})
 			if history.Direction == "desc" {
 				position.index--
 			} else {
@@ -333,6 +372,8 @@ func (s *sessionActor) webUIHistory(request webUIActorCommand) (json.RawMessage,
 	if !position.done {
 		page.NextCursor = s.agent.webHistory.continuation(position)
 	}
+	s.enrichWebUIHistoryTimestamps(client, thread, page.Data, queries)
+	s.agent.webHistory.rememberRecorded(timestampTargets, page.Data)
 	raw, err := json.Marshal(page)
 	if err != nil {
 		return nil, err

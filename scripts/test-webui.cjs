@@ -75,17 +75,19 @@ const itemTimes = {};
 const timestampTurnSeconds = 1790965260;
 const timestampTurnMilliseconds = timestampTurnSeconds * 1000;
 const timestampItems = Array.from({ length: 26 }, (_, index) => ({ id: 'timestamp-' + index, type: 'agentMessage', text: 'Timestamp fixture ' + index + '\n\n' + 'Saved detail. '.repeat(35) }));
-for (const index of [18, 19, 20]) itemTimes['timestamp-' + index] = { startedAtMs: timestampTurnMilliseconds + index * 60000 + 123, completedAtMs: timestampTurnMilliseconds + (index + 1) * 60000 };
+for (const index of [18, 19, 20]) itemTimes['timestamp-' + index] = { startedAtMs: timestampTurnMilliseconds + index * 60000 + 123, completedAtMs: timestampTurnMilliseconds + (index + 1) * 60000, recordedAtMs: timestampTurnMilliseconds + (index + 2) * 60000 };
 timestampItems[19] = { id: 'timestamp-19', type: 'commandExecution', command: 'echo timestamp', status: 'completed', aggregatedOutput: 'Producer-timed tool' };
 timestampItems[20] = { id: 'timestamp-20', type: 'reasoning', summary: ['Producer-timed public summary'] };
 timestampItems[21].createdAt = timestampTurnSeconds + 21 * 60;
 timestampItems[22].createdAt = timestampTurnMilliseconds + 22 * 60000;
 timestampItems[23].createdAt = new Date(timestampTurnMilliseconds + 23 * 60000).toISOString();
+for (const index of [21, 22, 23]) itemTimes['timestamp-' + index] = { recordedAtMs: timestampTurnMilliseconds + (index + 2) * 60000 };
 itemTimes['timestamp-24'] = { completedAtMs: timestampTurnMilliseconds + 24 * 60000 + 456 };
 for (const [offset, invalid] of [null, 0, -1, 253402300800000, 1.5, '1790965260000', true, {}, 'invalid', '1', '2026-02-30T18:21:00Z'].entries()) {
-  itemTimes['timestamp-' + (offset + 6)] = { startedAtMs: invalid, completedAtMs: invalid };
+  itemTimes['timestamp-' + (offset + 6)] = { startedAtMs: invalid, completedAtMs: invalid, recordedAtMs: invalid };
   timestampItems[offset + 6].createdAt = invalid === 1.5 ? 'invalid' : invalid;
 }
+for (const index of [0, 1, 2, 14, 15, 16]) itemTimes['timestamp-' + index] = { ...itemTimes['timestamp-' + index], recordedAtMs: timestampTurnMilliseconds + index * 60000 + 654 };
 timestampItems[17].createdAt = '2026-10-02T20:38:00+02:00';
 itemTimes['timestamp-25'] = { startedAtMs: 0, completedAtMs: -1 };
 timestampItems[25].createdAt = 'invalid';
@@ -99,7 +101,7 @@ turns['thread-times'] = [
   ] },
 ];
 itemTimes['timestamp-small-ms'] = { startedAtMs: 1 };
-itemTimes['timestamp-invalid-time'] = { startedAtMs: -1, completedAtMs: 253402300800000 };
+itemTimes['timestamp-invalid-time'] = { startedAtMs: -1, completedAtMs: 253402300800000, recordedAtMs: '2026-10-02T18:21:00Z' };
 itemTimes['timestamp-older-completed'] = { startedAtMs: null, completedAtMs: timestampTurnMilliseconds - 60000 };
 
 (async () => {
@@ -2430,8 +2432,8 @@ itemTimes['timestamp-older-completed'] = { startedAtMs: null, completedAtMs: tim
     await page.waitForFunction(() => document.querySelectorAll('#messages article').length === 22);
     assert.match(await page.locator('#notice').textContent(), /Unrelated runtime error during pagination/, 'Successful pagination cannot clear an unrelated runtime error');
 
-    // Native item dates belong to each entry, while old runtimes only provide
-    // a turn date. Reloading must preserve this distinction for every row type.
+    // Native lifecycle dates and saved record dates belong to each entry.
+    // Reloading must preserve their provenance instead of reusing a turn date.
     sessions.push({ ...sessions[0], session_id: 'times', codex_thread_id: 'thread-times', name: 'Timestamp regression', cwd: '/projects/timestamps' });
     await page.locator('#refresh-sessions').click();
     await page.waitForSelector('[data-session-id="times"]');
@@ -2443,7 +2445,7 @@ itemTimes['timestamp-older-completed'] = { startedAtMs: null, completedAtMs: tim
       }, { selector, expected: new Date(milliseconds).toISOString(), source });
       const text = await page.locator(selector).textContent();
       if (label) assert.ok(text.startsWith(label + ' · '), id + ' visibly identifies timestamp provenance');
-      else assert.doesNotMatch(text, /Turn started|Completed|Observed/, id + ' has its own producer timestamp');
+      else assert.doesNotMatch(text, /Turn started|Completed|Observed|Recorded/, id + ' has its own producer timestamp');
     };
     const assertProducerTimes = async () => {
       for (const index of [18, 19, 20]) await assertItemTime('timestamp-' + index, timestampTurnMilliseconds + index * 60000 + 123, 'item-started');
@@ -2451,15 +2453,20 @@ itemTimes['timestamp-older-completed'] = { startedAtMs: null, completedAtMs: tim
       await assertItemTime('timestamp-17', timestampTurnMilliseconds + 17 * 60000, 'item-created');
       await assertItemTime('timestamp-24', timestampTurnMilliseconds + 24 * 60000 + 456, 'item-completed', 'Completed');
     };
+    const assertRecordedTimes = async (indexes = [14, 15, 16]) => {
+      for (const index of indexes) await assertItemTime('timestamp-' + index, timestampTurnMilliseconds + index * 60000 + 654, 'item-recorded', 'Recorded');
+    };
     await page.evaluate(() => { window.testHoldMetadata = true; window.testMalformedHistoryEntry = true; window.testItemTimes['timestamp-25'].turnStartedAt = undefined; });
     await page.locator('[data-session-id="times"]').click();
     await page.waitForFunction(() => Boolean(window.testSockets.at(-1).heldMetadata) && document.querySelectorAll('#messages article').length === 20);
     await assertProducerTimes();
+    await assertRecordedTimes();
     assert.equal(await page.locator('[data-item-id="timestamp-25"] time').count(), 0, 'Missing item times remain unavailable until turn metadata arrives');
     await page.evaluate(() => { const socket = window.testSockets.at(-1), held = socket.heldMetadata; window.testHoldMetadata = false; window.testMalformedHistoryEntry = false; socket.heldMetadata = null; socket.emit({ id: held.frame.id, result: held.result }); });
     await connected();
     await assertProducerTimes();
-    for (const index of [...Array.from({ length: 11 }, (_, offset) => offset + 6), 25]) await assertItemTime('timestamp-' + index, timestampTurnMilliseconds, 'turn-started', 'Turn started');
+    await assertRecordedTimes();
+    for (const index of [...Array.from({ length: 8 }, (_, offset) => offset + 6), 25]) await assertItemTime('timestamp-' + index, timestampTurnMilliseconds, 'turn-started', 'Turn started');
     await page.setViewportSize({ width: 320, height: 844 });
     await page.waitForFunction(() => document.documentElement.scrollWidth <= innerWidth && [...document.querySelectorAll('.message-header')].every(header => header.scrollWidth <= header.clientWidth + 1)).catch(async error => {
       console.error('Timestamp mobile layout:', await page.evaluate(() => ({ width: innerWidth, documentWidth: document.documentElement.scrollWidth, headers: [...document.querySelectorAll('.message-header')].filter(header => header.scrollWidth > header.clientWidth + 1).map(header => ({ text: header.textContent, width: header.clientWidth, contentWidth: header.scrollWidth })) })));
@@ -2472,10 +2479,12 @@ itemTimes['timestamp-older-completed'] = { startedAtMs: null, completedAtMs: tim
     for (const id of ['timestamp-no-time', 'timestamp-invalid-time']) assert.equal(await page.locator('[data-item-id="' + id + '"] time').count(), 0, 'Invalid or absent item and turn timestamps never become invented dates');
     await assertItemTime('timestamp-older-completed', timestampTurnMilliseconds - 60000, 'item-completed', 'Completed');
     await assertProducerTimes();
+    await assertRecordedTimes([0, 1, 2, 14, 15, 16]);
     await page.locator('#prompt').fill('/tghistory 20'); await page.locator('#send').click();
     await page.waitForFunction(() => document.querySelector('#command-title').textContent === 'Recent messages' && document.querySelectorAll('#command-content .command-history').length > 0);
     const timestampCommandHistory = await page.locator('#command-content').textContent();
     assert.match(timestampCommandHistory, /Completed:/, 'Command history preserves completion-only provenance');
+    assert.match(timestampCommandHistory, /Recorded:/, 'Command history identifies saved record dates');
     assert.match(timestampCommandHistory, /Turn started:/, 'Command history identifies turn fallbacks');
     await page.getByRole('button', { name: 'Close command menu', exact: true }).click();
     await page.locator('#prompt').fill('/export'); await page.locator('#send').click();
@@ -2484,17 +2493,23 @@ itemTimes['timestamp-older-completed'] = { startedAtMs: null, completedAtMs: tim
     const exportContent = fs.readFileSync(await (await exported).path(), 'utf8');
     assert.match(exportContent, /Turn started: 2026-10-02T18:21:00\.000Z/, 'Exports preserve turn-fallback provenance');
     assert.match(exportContent, /Completed: 2026-10-02T18:45:00\.456Z/, 'Exports preserve completion-only provenance');
+    for (const index of [0, 1, 2, 14, 15, 16]) assert.ok(exportContent.includes('Recorded: ' + new Date(timestampTurnMilliseconds + index * 60000 + 654).toISOString()), 'Exports preserve each same-turn saved record date');
     assert.match(exportContent, /2026-10-02T18:39:00\.123Z/, 'Exports preserve exact producer milliseconds');
     await page.getByRole('button', { name: 'Close command menu', exact: true }).click();
     await page.evaluate(() => { delete window.testItemTimes['timestamp-18'].startedAtMs; });
     await page.locator('#disconnect').click(); await page.locator('#reconnect').click(); await connected();
     await assertProducerTimes();
+    await assertRecordedTimes();
     await assertItemTime('timestamp-25', timestampTurnMilliseconds, 'turn-started', 'Turn started');
     await page.reload();
     await page.waitForSelector('[data-session-id="times"]');
     await choose('times');
     await assertProducerTimes();
+    await assertRecordedTimes();
     await assertItemTime('timestamp-25', timestampTurnMilliseconds, 'turn-started', 'Turn started');
+    await page.locator('#older').evaluate(button => button.click());
+    await page.waitForSelector('[data-item-id="timestamp-small-ms"]');
+    await assertRecordedTimes([0, 1, 2, 14, 15, 16]);
     const liveTimestampItem = { id: 'timestamp-live', type: 'agentMessage', text: 'Live timing' };
     await current({ method: 'item/started', params: { threadId: 'thread-times', turnId: 'timestamp-turn', startedAtMs: null, item: liveTimestampItem } });
     await page.waitForSelector('[data-item-id="timestamp-live"] time[data-source="observed-started"]');
@@ -2504,6 +2519,15 @@ itemTimes['timestamp-older-completed'] = { startedAtMs: null, completedAtMs: tim
     await assertItemTime('timestamp-live', observedStart, 'observed-started', 'Observed start');
     await current({ method: 'turn/started', params: { threadId: 'thread-times', turn: { id: 'timestamp-turn', status: 'inProgress', startedAt: timestampTurnSeconds, items: [liveTimestampItem] } } });
     await assertItemTime('timestamp-live', observedStart, 'observed-started', 'Observed start');
+    const recordedLiveTime = timestampTurnMilliseconds + 89 * 60000 + 654;
+    await page.evaluate(({ item, recordedAtMs }) => {
+      window.testTurns['thread-times'][0].items.push(item);
+      window.testItemTimes[item.id] = { recordedAtMs, completedAtMs: recordedAtMs + 1000 };
+    }, { item: liveTimestampItem, recordedAtMs: recordedLiveTime });
+    await page.locator('#disconnect').click(); await page.locator('#reconnect').click(); await connected();
+    await assertItemTime('timestamp-live', recordedLiveTime, 'item-recorded', 'Recorded');
+    await current({ method: 'item/started', params: { threadId: 'thread-times', turnId: 'timestamp-turn', item: liveTimestampItem } });
+    await assertItemTime('timestamp-live', recordedLiveTime, 'item-recorded', 'Recorded');
     const exactLiveStart = timestampTurnMilliseconds + 90 * 60000 + 789;
     await current({ method: 'item/started', params: { threadId: 'thread-times', turnId: 'timestamp-turn', startedAtMs: exactLiveStart, item: liveTimestampItem } });
     await assertItemTime('timestamp-live', exactLiveStart, 'item-started');

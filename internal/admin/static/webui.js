@@ -294,6 +294,7 @@
     const candidates = [
       [itemMilliseconds(timing.startedAtMs), 'item-started'],
       [legacyItemMilliseconds(item.createdAt), 'item-created'],
+      [itemMilliseconds(timing.recordedAtMs), 'item-recorded'],
       [itemMilliseconds(timing.observedStartedAtMs), 'observed-started'],
       [itemMilliseconds(timing.completedAtMs), 'item-completed'],
       [itemMilliseconds(timing.observedCompletedAtMs), 'observed-completed'],
@@ -314,7 +315,7 @@
     return value === undefined ? null : new Date(value);
   }
   function itemTimeLabel(item) {
-    return { 'turn-started': 'Turn started', 'item-completed': 'Completed', 'observed-started': 'Observed start', 'observed-completed': 'Observed completion' }[item._timeSource] || '';
+    return { 'turn-started': 'Turn started', 'item-recorded': 'Recorded', 'item-completed': 'Completed', 'observed-started': 'Observed start', 'observed-completed': 'Observed completion' }[item._timeSource] || '';
   }
   function isRunning(value) { return ['inProgress', 'in_progress', 'running', 'active'].includes(typeof value === 'object' ? value?.type : value); }
   function atBottom() { const scroller = $('transcript'); return scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 100; }

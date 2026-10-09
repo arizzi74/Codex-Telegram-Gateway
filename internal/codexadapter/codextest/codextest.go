@@ -107,13 +107,18 @@ func (s *Server) SetMethodResult(method string, result any) error {
 	return nil
 }
 
-func New(ctx context.Context) (*codexadapter.Client, *Server, error) {
+func New(ctx context.Context, info ...codexadapter.InitializeInfo) (*codexadapter.Client, *Server, error) {
 	inR, inW := io.Pipe()
 	outR, outW := io.Pipe()
 	s := &Server{in: bufio.NewScanner(inR), out: json.NewEncoder(outW), raw: outW, unavailable: map[string]bool{}, rpcErrors: map[string]rpcError{}, delays: map[string]time.Duration{}, close: func() { _ = inR.Close(); _ = inW.Close(); _ = outR.Close(); _ = outW.Close() }}
 	// Match the production adapter's JSONL bound so integration tests can
 	// exercise image requests larger than Scanner's default 64 KiB limit.
 	s.in.Buffer(make([]byte, 64*1024), 32<<20)
+	if len(info) > 0 {
+		if err := s.SetMethodResult("initialize", info[0]); err != nil {
+			return nil, nil, err
+		}
+	}
 	go s.serve()
 	c := codexadapter.New(codexadapter.Transport{In: inW, Out: outR, Close: func() error { s.close(); return nil }}, codexadapter.Config{})
 	if err := c.Initialize(ctx); err != nil {

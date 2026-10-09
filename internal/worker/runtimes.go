@@ -449,6 +449,7 @@ func (m *RuntimeManager) discover(ctx context.Context, runtime protocol.Runtime,
 			threads = append(threads, thread)
 		}
 	}
+	m.discoverTimestampIndex(client, threads)
 	visible := make(map[string]bool, len(threads))
 	observed := make(map[string]bool, len(threads))
 	for _, thread := range threads {

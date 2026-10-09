@@ -80,7 +80,7 @@ func TestWebUIItemPagesOmitInvalidLifecycleTimes(t *testing.T) {
 			name = "missing"
 		}
 		t.Run(name, func(t *testing.T) {
-			for _, field := range []string{"startedAtMs", "completedAtMs"} {
+			for _, field := range []string{"startedAtMs", "completedAtMs", "recordedAtMs"} {
 				other := "completedAtMs"
 				if field == other {
 					other = "startedAtMs"
