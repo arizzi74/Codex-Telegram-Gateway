@@ -71,6 +71,36 @@ turns['thread-c'] = [
   { id: 'old-c', status: 'completed', startedAt: now - 1000, items: Array.from({ length: 40 }, (_, index) => historyItem(index)) },
 ];
 turns['thread-d'] = [{ id: 'short-d', status: 'completed', startedAt: now - 500, items: Array.from({ length: 22 }, (_, index) => ({ id: 'short-' + index, type: 'agentMessage', text: 'Short message ' + index, createdAt: now - 500 + index })) }];
+const itemTimes = {};
+const timestampTurnSeconds = 1790965260;
+const timestampTurnMilliseconds = timestampTurnSeconds * 1000;
+const timestampItems = Array.from({ length: 26 }, (_, index) => ({ id: 'timestamp-' + index, type: 'agentMessage', text: 'Timestamp fixture ' + index + '\n\n' + 'Saved detail. '.repeat(35) }));
+for (const index of [18, 19, 20]) itemTimes['timestamp-' + index] = { startedAtMs: timestampTurnMilliseconds + index * 60000 + 123, completedAtMs: timestampTurnMilliseconds + (index + 1) * 60000 };
+timestampItems[19] = { id: 'timestamp-19', type: 'commandExecution', command: 'echo timestamp', status: 'completed', aggregatedOutput: 'Producer-timed tool' };
+timestampItems[20] = { id: 'timestamp-20', type: 'reasoning', summary: ['Producer-timed public summary'] };
+timestampItems[21].createdAt = timestampTurnSeconds + 21 * 60;
+timestampItems[22].createdAt = timestampTurnMilliseconds + 22 * 60000;
+timestampItems[23].createdAt = new Date(timestampTurnMilliseconds + 23 * 60000).toISOString();
+itemTimes['timestamp-24'] = { completedAtMs: timestampTurnMilliseconds + 24 * 60000 + 456 };
+for (const [offset, invalid] of [null, 0, -1, 253402300800000, 1.5, '1790965260000', true, {}, 'invalid', '1', '2026-02-30T18:21:00Z'].entries()) {
+  itemTimes['timestamp-' + (offset + 6)] = { startedAtMs: invalid, completedAtMs: invalid };
+  timestampItems[offset + 6].createdAt = invalid === 1.5 ? 'invalid' : invalid;
+}
+timestampItems[17].createdAt = '2026-10-02T20:38:00+02:00';
+itemTimes['timestamp-25'] = { startedAtMs: 0, completedAtMs: -1 };
+timestampItems[25].createdAt = 'invalid';
+turns['thread-times'] = [
+  { id: 'timestamp-turn', status: 'completed', startedAt: timestampTurnSeconds, items: timestampItems },
+  { id: 'timestamp-older-turn', status: 'completed', startedAt: 0, items: [
+    { id: 'timestamp-small-ms', type: 'agentMessage', text: 'A native timestamp is always milliseconds.' },
+    { id: 'timestamp-no-time', type: 'agentMessage', text: 'No timestamp is available.' },
+    { id: 'timestamp-invalid-time', type: 'reasoning', summary: ['No valid timestamp is available.'], createdAt: -1 },
+    { id: 'timestamp-older-completed', type: 'commandExecution', command: 'echo complete', status: 'completed', aggregatedOutput: 'Only completion was recorded.' },
+  ] },
+];
+itemTimes['timestamp-small-ms'] = { startedAtMs: 1 };
+itemTimes['timestamp-invalid-time'] = { startedAtMs: -1, completedAtMs: 253402300800000 };
+itemTimes['timestamp-older-completed'] = { startedAtMs: null, completedAtMs: timestampTurnMilliseconds - 60000 };
 
 (async () => {
   const browser = await chromium.launch({ headless: true });
@@ -167,7 +197,8 @@ turns['thread-d'] = [{ id: 'short-d', status: 'completed', startedAt: now - 500,
     const csp = filename === 'webui-mermaid-frame.html' ? "default-src 'none'; base-uri 'none'; frame-ancestors 'self'; form-action 'none'; object-src 'none'; connect-src 'none'; script-src https://webui.test/tgw/webui/static/webui-mermaid-runtime.js; style-src 'unsafe-inline'; img-src 'none'; font-src 'none'; frame-src 'none'; worker-src 'none'; sandbox allow-scripts" : "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' blob:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'";
     await route.fulfill({ contentType, headers: { 'Content-Security-Policy': csp }, body: fs.readFileSync(path.join(assets, filename)) });
   });
-  await page.addInitScript(({ turns, rateLimits, sessions }) => {
+  await page.addInitScript(({ turns, itemTimes, rateLimits, sessions }) => {
+    window.testTurns = turns; window.testItemTimes = itemTimes;
     Object.defineProperty(navigator, 'credentials', { configurable: true, value: { get: async () => ({ id: 'browser-passkey', rawId: new Uint8Array([1, 2]), type: 'public-key', response: { clientDataJSON: new Uint8Array([3]), authenticatorData: new Uint8Array([4]), signature: new Uint8Array([5]), userHandle: null }, getClientExtensionResults: () => ({}) }) } });
     // Desktop automation has no native phone keyboard. Keep ordinary viewport
     // changes real, but allow keyboard resize/pan events to be delivered
@@ -259,14 +290,15 @@ turns['thread-d'] = [{ id: 'short-d', status: 'completed', startedAt: now - 500,
             : frame.params.cursor ? { data: [{ id: 'earliest', status: 'completed', startedAt: 1600000000, items: [{ id: 'earliest-message', type: 'agentMessage', text: 'The first conversation.' }] }], nextCursor: null } : { data: turns[frame.params.threadId], nextCursor: frame.params.threadId === 'thread-a' ? 'older' : null };
           if (window.testHoldMetadata && frame.params.itemsView === 'notLoaded') { this.heldMetadata = { frame, result }; return; }
         } else if (frame.method === 'thread/items/list') {
-          const items = (turns[frame.params.threadId] || []).flatMap(turn => [...turn.items].reverse().map(item => ({ turnId: turn.id, item: { ...item, createdAt: item.createdAt || turn.startedAt } })));
-          if (frame.params.threadId === 'thread-a') items.push({ turnId: 'earliest', item: { id: 'earliest-message', type: 'agentMessage', text: 'The first conversation.', createdAt: 1600000000 } });
+          const items = (turns[frame.params.threadId] || []).flatMap(turn => [...turn.items].reverse().map(item => ({ turnId: turn.id, item: { ...item }, turnStartedAt: turn.startedAt, ...itemTimes[item.id] })));
+          if (frame.params.threadId === 'thread-a') items.push({ turnId: 'earliest', turnStartedAt: 1600000000, item: { id: 'earliest-message', type: 'agentMessage', text: 'The first conversation.' } });
           const offset = Number(frame.params.cursor || 0);
           const limit = frame.params.limit || 20;
           // Keep the small fixture's old item on a second native page so
           // existing chronology and malformed-history checks still cover paging.
           const size = frame.params.threadId === 'thread-a' && !offset ? Math.min(limit, items.length - 1) : limit;
           result = { data: items.slice(offset, offset + size), nextCursor: offset + size < items.length ? String(offset + size) : null, backwardsCursor: null };
+          if (window.testMalformedHistoryEntry) result.data.unshift({});
           if (window.testFailInitialItems && !frame.params.cursor) { window.testFailInitialItems = false; setTimeout(() => this.emit({ id: frame.id, error: { message: 'Initial conversation history unavailable' } }), 1); return; }
           if (window.testHoldInitialItems && !frame.params.cursor) { this.heldInitialItems = { frame, result }; return; }
           if (window.testFailOlderItems && frame.params.cursor) { window.testFailOlderItems = false; setTimeout(() => this.emit({ id: frame.id, error: { message: 'Saved history cursor expired' } }), 1); return; }
@@ -345,7 +377,7 @@ turns['thread-d'] = [{ id: 'short-d', status: 'completed', startedAt: now - 500,
       }
     }
     window.WebSocket = FakeSocket;
-  }, { turns, rateLimits, sessions });
+  }, { turns, itemTimes, rateLimits, sessions });
   const current = async value => page.evaluate(value => window.testSockets.at(-1).emit(value), value);
   const activity = async values => page.evaluate(values => {
     const socket = window.testActivitySocket; window.testActivityRows = values;
@@ -1272,7 +1304,7 @@ turns['thread-d'] = [{ id: 'short-d', status: 'completed', startedAt: now - 500,
       await page.waitForFunction(count => document.querySelectorAll('#command-content .command-history').length === count, expectedCount);
       const history = await page.locator('#command-content .command-history').allTextContents();
       assert.match(history.at(-1), /Ready to continue/, 'History ends with the most recent Codex response');
-      for (const item of history) assert.match(item, /Turn time:.*\d.*\d:\d/, 'Every historical message includes a date and time');
+      for (const item of history) assert.match(item, /Turn started:.*\d.*\d:\d/, 'Historical message fallbacks explicitly identify the turn start');
       if (expectedCount === 3) assert.match(history[0], /The earlier prompt/, 'Explicit history counts preserve chronological order');
     }
     await page.getByRole('button', { name: 'Close command menu', exact: true }).click();
@@ -2378,7 +2410,9 @@ turns['thread-d'] = [{ id: 'short-d', status: 'completed', startedAt: now - 500,
     await page.getByRole('button', { name: 'Reload recent messages', exact: true }).waitFor();
     assert.match(await page.locator('#notice').textContent(), /Saved history cursor expired/, 'A failed older-history read explains the failed operation');
     assert.equal(await page.locator('#prompt').inputValue(), 'Selected session remains usable after pagination.', 'A history failure preserves the prompt draft');
-    await page.locator('#older').click();
+    // Scrolling a short page to expose this button can itself finish pagination
+    // before Playwright clicks it. Exercise the retry handler directly here.
+    await page.locator('#older').evaluate(button => button.click());
     await page.waitForFunction(() => document.querySelectorAll('#messages article').length === 22);
     assert.equal(await page.locator('#notice').isHidden(), true, 'A successful older-history retry removes its recovered error banner');
     assert.equal(await page.locator('#reconnect').isHidden(), true, 'The reload fallback disappears after pagination recovers');
@@ -2392,9 +2426,99 @@ turns['thread-d'] = [{ id: 'short-d', status: 'completed', startedAt: now - 500,
     assert.equal(await page.locator('#notice').isHidden(), true, 'Reloading recent messages clears the resolved older-history error');
     assert.equal(await page.locator('#reconnect').isHidden(), true);
     await current({ method: 'error', params: { threadId: 'thread-d', error: { message: 'Unrelated runtime error during pagination' } } });
-    await page.locator('#older').click();
+    await page.locator('#older').evaluate(button => button.click());
     await page.waitForFunction(() => document.querySelectorAll('#messages article').length === 22);
     assert.match(await page.locator('#notice').textContent(), /Unrelated runtime error during pagination/, 'Successful pagination cannot clear an unrelated runtime error');
+
+    // Native item dates belong to each entry, while old runtimes only provide
+    // a turn date. Reloading must preserve this distinction for every row type.
+    sessions.push({ ...sessions[0], session_id: 'times', codex_thread_id: 'thread-times', name: 'Timestamp regression', cwd: '/projects/timestamps' });
+    await page.locator('#refresh-sessions').click();
+    await page.waitForSelector('[data-session-id="times"]');
+    const assertItemTime = async (id, milliseconds, source, label = '') => {
+      const selector = '[data-item-id="' + id + '"] time';
+      await page.waitForFunction(({ selector, expected, source }) => {
+        const time = document.querySelector(selector);
+        return time?.dateTime === expected && time.dataset.source === source;
+      }, { selector, expected: new Date(milliseconds).toISOString(), source });
+      const text = await page.locator(selector).textContent();
+      if (label) assert.ok(text.startsWith(label + ' · '), id + ' visibly identifies timestamp provenance');
+      else assert.doesNotMatch(text, /Turn started|Completed|Observed/, id + ' has its own producer timestamp');
+    };
+    const assertProducerTimes = async () => {
+      for (const index of [18, 19, 20]) await assertItemTime('timestamp-' + index, timestampTurnMilliseconds + index * 60000 + 123, 'item-started');
+      for (const index of [21, 22, 23]) await assertItemTime('timestamp-' + index, timestampTurnMilliseconds + index * 60000, 'item-created');
+      await assertItemTime('timestamp-17', timestampTurnMilliseconds + 17 * 60000, 'item-created');
+      await assertItemTime('timestamp-24', timestampTurnMilliseconds + 24 * 60000 + 456, 'item-completed', 'Completed');
+    };
+    await page.evaluate(() => { window.testHoldMetadata = true; window.testMalformedHistoryEntry = true; window.testItemTimes['timestamp-25'].turnStartedAt = undefined; });
+    await page.locator('[data-session-id="times"]').click();
+    await page.waitForFunction(() => Boolean(window.testSockets.at(-1).heldMetadata) && document.querySelectorAll('#messages article').length === 20);
+    await assertProducerTimes();
+    assert.equal(await page.locator('[data-item-id="timestamp-25"] time').count(), 0, 'Missing item times remain unavailable until turn metadata arrives');
+    await page.evaluate(() => { const socket = window.testSockets.at(-1), held = socket.heldMetadata; window.testHoldMetadata = false; window.testMalformedHistoryEntry = false; socket.heldMetadata = null; socket.emit({ id: held.frame.id, result: held.result }); });
+    await connected();
+    await assertProducerTimes();
+    for (const index of [...Array.from({ length: 11 }, (_, offset) => offset + 6), 25]) await assertItemTime('timestamp-' + index, timestampTurnMilliseconds, 'turn-started', 'Turn started');
+    await page.setViewportSize({ width: 320, height: 844 });
+    await page.waitForFunction(() => document.documentElement.scrollWidth <= innerWidth && [...document.querySelectorAll('.message-header')].every(header => header.scrollWidth <= header.clientWidth + 1)).catch(async error => {
+      console.error('Timestamp mobile layout:', await page.evaluate(() => ({ width: innerWidth, documentWidth: document.documentElement.scrollWidth, headers: [...document.querySelectorAll('.message-header')].filter(header => header.scrollWidth > header.clientWidth + 1).map(header => ({ text: header.textContent, width: header.clientWidth, contentWidth: header.scrollWidth })) })));
+      throw error;
+    });
+    await page.setViewportSize({ width: 1440, height: 1000 });
+    await page.locator('#older').evaluate(button => button.click());
+    await page.waitForSelector('[data-item-id="timestamp-small-ms"]');
+    await assertItemTime('timestamp-small-ms', 1, 'item-started');
+    for (const id of ['timestamp-no-time', 'timestamp-invalid-time']) assert.equal(await page.locator('[data-item-id="' + id + '"] time').count(), 0, 'Invalid or absent item and turn timestamps never become invented dates');
+    await assertItemTime('timestamp-older-completed', timestampTurnMilliseconds - 60000, 'item-completed', 'Completed');
+    await assertProducerTimes();
+    await page.locator('#prompt').fill('/tghistory 20'); await page.locator('#send').click();
+    await page.waitForFunction(() => document.querySelector('#command-title').textContent === 'Recent messages' && document.querySelectorAll('#command-content .command-history').length > 0);
+    const timestampCommandHistory = await page.locator('#command-content').textContent();
+    assert.match(timestampCommandHistory, /Completed:/, 'Command history preserves completion-only provenance');
+    assert.match(timestampCommandHistory, /Turn started:/, 'Command history identifies turn fallbacks');
+    await page.getByRole('button', { name: 'Close command menu', exact: true }).click();
+    await page.locator('#prompt').fill('/export'); await page.locator('#send').click();
+    const exported = page.waitForEvent('download');
+    await page.getByRole('button', { name: 'Download loaded conversation', exact: true }).click();
+    const exportContent = fs.readFileSync(await (await exported).path(), 'utf8');
+    assert.match(exportContent, /Turn started: 2026-10-02T18:21:00\.000Z/, 'Exports preserve turn-fallback provenance');
+    assert.match(exportContent, /Completed: 2026-10-02T18:45:00\.456Z/, 'Exports preserve completion-only provenance');
+    assert.match(exportContent, /2026-10-02T18:39:00\.123Z/, 'Exports preserve exact producer milliseconds');
+    await page.getByRole('button', { name: 'Close command menu', exact: true }).click();
+    await page.evaluate(() => { delete window.testItemTimes['timestamp-18'].startedAtMs; });
+    await page.locator('#disconnect').click(); await page.locator('#reconnect').click(); await connected();
+    await assertProducerTimes();
+    await assertItemTime('timestamp-25', timestampTurnMilliseconds, 'turn-started', 'Turn started');
+    await page.reload();
+    await page.waitForSelector('[data-session-id="times"]');
+    await choose('times');
+    await assertProducerTimes();
+    await assertItemTime('timestamp-25', timestampTurnMilliseconds, 'turn-started', 'Turn started');
+    const liveTimestampItem = { id: 'timestamp-live', type: 'agentMessage', text: 'Live timing' };
+    await current({ method: 'item/started', params: { threadId: 'thread-times', turnId: 'timestamp-turn', startedAtMs: null, item: liveTimestampItem } });
+    await page.waitForSelector('[data-item-id="timestamp-live"] time[data-source="observed-started"]');
+    const observedStart = Date.parse(await page.locator('[data-item-id="timestamp-live"] time').getAttribute('datetime'));
+    await page.clock.fastForward(2000);
+    await current({ method: 'item/completed', params: { threadId: 'thread-times', turnId: 'timestamp-turn', completedAtMs: Date.now(), item: liveTimestampItem } });
+    await assertItemTime('timestamp-live', observedStart, 'observed-started', 'Observed start');
+    await current({ method: 'turn/started', params: { threadId: 'thread-times', turn: { id: 'timestamp-turn', status: 'inProgress', startedAt: timestampTurnSeconds, items: [liveTimestampItem] } } });
+    await assertItemTime('timestamp-live', observedStart, 'observed-started', 'Observed start');
+    const exactLiveStart = timestampTurnMilliseconds + 90 * 60000 + 789;
+    await current({ method: 'item/started', params: { threadId: 'thread-times', turnId: 'timestamp-turn', startedAtMs: exactLiveStart, item: liveTimestampItem } });
+    await assertItemTime('timestamp-live', exactLiveStart, 'item-started');
+    await current({ method: 'item/completed', params: { threadId: 'thread-times', turnId: 'timestamp-turn', completedAtMs: exactLiveStart + 1000, item: liveTimestampItem } });
+    await assertItemTime('timestamp-live', exactLiveStart, 'item-started');
+    const completionItem = { id: 'timestamp-live-completed', type: 'commandExecution', command: 'echo live', status: 'completed' };
+    await current({ method: 'item/completed', params: { threadId: 'thread-times', turnId: 'timestamp-turn', completedAtMs: exactLiveStart + 3000, item: completionItem } });
+    await assertItemTime(completionItem.id, exactLiveStart + 3000, 'item-completed', 'Completed');
+    await current({ method: 'item/completed', params: { threadId: 'thread-times', turnId: 'timestamp-turn', completedAtMs: 0, item: { id: 'timestamp-observed-completed', type: 'reasoning', summary: ['Completion received without a producer date.'] } } });
+    await page.waitForSelector('[data-item-id="timestamp-observed-completed"] time[data-source="observed-completed"]');
+    assert.match(await page.locator('[data-item-id="timestamp-observed-completed"] time').textContent(), /^Observed completion · /, 'A completion-only live observation is never presented as item onset');
+    await current({ method: 'item/completed', params: { threadId: 'thread-times', turnId: 'different-timestamp-turn', completedAtMs: exactLiveStart + 5000, item: liveTimestampItem } });
+    await assertItemTime('timestamp-live', exactLiveStart + 5000, 'item-completed', 'Completed');
+    await current({ method: 'turn/completed', params: { threadId: 'thread-times', turn: { id: 'timestamp-turn', status: 'completed' } } });
+    await choose('d');
 
     // Sidebar deletion is a scoped gateway operation: inspecting or deleting
     // another row must not resume that thread or change the selected session.

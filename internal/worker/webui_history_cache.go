@@ -38,10 +38,38 @@ type webUIHistoryRequest struct {
 type webUIHistoryEntry struct {
 	TurnID          string          `json:"turnId"`
 	Item            json.RawMessage `json:"item"`
+	StartedAtMS     *int64          `json:"startedAtMs,omitempty"`
+	CompletedAtMS   *int64          `json:"completedAtMs,omitempty"`
 	TurnStartedAt   *int64          `json:"turnStartedAt,omitempty"`
 	TurnCompletedAt *int64          `json:"turnCompletedAt,omitempty"`
 	TurnStatus      string          `json:"turnStatus,omitempty"`
 }
+
+// Native item lifecycle dates are milliseconds; the legacy turn dates above
+// remain seconds. Optional invalid dates are omitted without losing the item.
+func (entry *webUIHistoryEntry) UnmarshalJSON(raw []byte) error {
+	type historyEntry webUIHistoryEntry
+	decoded := struct {
+		*historyEntry
+		StartedAtMS   json.RawMessage `json:"startedAtMs"`
+		CompletedAtMS json.RawMessage `json:"completedAtMs"`
+	}{historyEntry: (*historyEntry)(entry)}
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		return err
+	}
+	entry.StartedAtMS = webUIHistoryMilliseconds(decoded.StartedAtMS)
+	entry.CompletedAtMS = webUIHistoryMilliseconds(decoded.CompletedAtMS)
+	return nil
+}
+
+func webUIHistoryMilliseconds(raw json.RawMessage) *int64 {
+	var value int64
+	if len(raw) == 0 || json.Unmarshal(raw, &value) != nil || value <= 0 || value > 253402300799999 {
+		return nil
+	}
+	return &value
+}
+
 type webUIHistoryPage struct {
 	Data       []webUIHistoryEntry `json:"data"`
 	NextCursor string              `json:"nextCursor,omitempty"`

@@ -713,7 +713,7 @@ git push origin vMAJOR.MINOR.PATCH
 
 The release workflow runs formatting, vet, govulncheck, migration and race tests,
 all platform builds, and archive verification. CI uses the latest Go 1.26 patch
-(at least 1.26.8); a daily scheduled CI run checks for newly published advisories. Only after those checks pass does it publish
+(at least 1.26.9); a daily scheduled CI run checks for newly published advisories. Only after those checks pass does it publish
 the version's binaries, installer, update manager, and checksum manifest. It
 uploads a draft first so automatic updaters never select a partially uploaded
 release. Published releases are not overwritten; corrections use a new version.

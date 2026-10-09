@@ -25,12 +25,98 @@ func TestWebUIItemPagesCountItemsAndRemainSessionScoped(t *testing.T) {
 	}
 	items := make([]map[string]any, 20)
 	for i := range items {
-		items[i] = map[string]any{"turnId": "same-enormous-turn", "item": map[string]any{"id": fmt.Sprintf("message-%d", i), "type": "agentMessage", "text": "message", "createdAt": 1800000000 + i}}
+		items[i] = map[string]any{"turnId": "same-enormous-turn", "startedAtMs": int64(1800000000123 + i*1000), "completedAtMs": int64(1800000000456 + i*1000), "item": map[string]any{"id": fmt.Sprintf("message-%d", i), "type": "agentMessage", "text": "message"}}
 	}
 	response, _ := json.Marshal(map[string]any{"id": 1, "result": map[string]any{"data": items, "nextCursor": "older-items", "backwardsCursor": "reverse", "unexpected": "do not forward"}})
 	result, err := r.serverMessage(response)
-	if err != nil || strings.Contains(string(result), "unexpected") || !strings.Contains(string(result), `"nextCursor":"older-items"`) || !strings.Contains(string(result), `"createdAt":1800000019`) {
+	if err != nil || strings.Contains(string(result), "unexpected") || !strings.Contains(string(result), `"nextCursor":"older-items"`) || !strings.Contains(string(result), `"startedAtMs":1800000019123`) || !strings.Contains(string(result), `"completedAtMs":1800000019456`) {
 		t.Fatalf("item page lost cursor/time or kept extra fields: %s %v", result, err)
+	}
+}
+
+func TestWebUIItemPagesPreserveTimesThroughRedactionAndDisplayLimits(t *testing.T) {
+	redactor, err := newWorkerRedactor([]string{`private-secret`})
+	if err != nil {
+		t.Fatal(err)
+	}
+	items := []map[string]any{
+		{"turnId": "same-turn", "startedAtMs": int64(1800000000123), "completedAtMs": int64(1800000000999), "item": map[string]any{"id": "reply", "type": "agentMessage", "text": "reply private-secret"}},
+		{"turnId": "same-turn", "startedAtMs": int64(1800000010456), "completedAtMs": int64(1800000010999), "item": map[string]any{"id": "reasoning", "type": "reasoning", "summary": []string{"public private-secret"}, "content": []string{"RAW_REASONING"}, "encryptedContent": "RAW_REASONING"}},
+		{"turnId": "same-turn", "startedAtMs": int64(1800000020789), "completedAtMs": int64(1800000020999), "item": map[string]any{"id": "tool", "type": "commandExecution", "status": "completed", "aggregatedOutput": strings.Repeat("private-secret ", 30000)}},
+		{"turnId": "same-turn", "turnStartedAt": int64(1800000000), "turnCompletedAt": int64(1800000030), "item": map[string]any{"id": "undated", "type": "userMessage", "content": []any{}}},
+	}
+	raw, err := json.Marshal(map[string]any{"data": items})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := webUIItemPage(raw, redactor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(result), "private-secret") || strings.Contains(string(result), "RAW_REASONING") {
+		t.Fatalf("private content survived page sanitization: %.200s", result)
+	}
+	page := webUITestPage(t, result)
+	for i := 0; i < 3; i++ {
+		entry := page.Data[i]
+		if entry.TurnID != "same-turn" || entry.StartedAtMS == nil || *entry.StartedAtMS != items[i]["startedAtMs"] || entry.CompletedAtMS == nil || *entry.CompletedAtMS != items[i]["completedAtMs"] {
+			t.Fatalf("entry %d lost native times: %#v", i, entry)
+		}
+	}
+	if !strings.Contains(string(page.Data[1].Item), "public [REDACTED]") || !strings.Contains(string(page.Data[2].Item), "displayNotice") || len(page.Data[2].Item) > webUIHistoryItemBytes {
+		t.Fatal("reasoning/oversized item projections changed")
+	}
+	undated := page.Data[3]
+	if undated.StartedAtMS != nil || undated.CompletedAtMS != nil || undated.TurnStartedAt == nil || *undated.TurnStartedAt != 1800000000 || undated.TurnCompletedAt == nil || *undated.TurnCompletedAt != 1800000030 {
+		t.Fatalf("turn seconds became item milliseconds: %#v", undated)
+	}
+}
+
+func TestWebUIItemPagesOmitInvalidLifecycleTimes(t *testing.T) {
+	invalid := []string{"", "null", "0", "-1", "253402300800000", "9223372036854775807", "9223372036854775808", "-9223372036854775809", "1.5", `"1800000000123"`, "true", "{}", "[]"}
+	for _, value := range invalid {
+		name := value
+		if name == "" {
+			name = "missing"
+		}
+		t.Run(name, func(t *testing.T) {
+			for _, field := range []string{"startedAtMs", "completedAtMs"} {
+				other := "completedAtMs"
+				if field == other {
+					other = "startedAtMs"
+				}
+				invalidField := ""
+				if value != "" {
+					invalidField = fmt.Sprintf(`,"%s":%s`, field, value)
+				}
+				raw := fmt.Sprintf(`{"data":[{"turnId":"turn","item":{"id":"item","type":"agentMessage","text":"reply"},"turnStartedAt":1800000000,"%s":1800000000123%s}]}`, other, invalidField)
+				result, err := webUIItemPage([]byte(raw))
+				if err != nil {
+					t.Fatalf("invalid optional %s prevented loading the item: %v", field, err)
+				}
+				var page struct {
+					Data []map[string]json.RawMessage `json:"data"`
+				}
+				if err := json.Unmarshal(result, &page); err != nil {
+					t.Fatal(err)
+				}
+				entry := page.Data[0]
+				if _, exists := entry[field]; exists || string(entry[other]) != "1800000000123" || string(entry["turnStartedAt"]) != "1800000000" {
+					t.Fatalf("invalid time replaced or corrupted an independent date: %s", result)
+				}
+			}
+		})
+	}
+	for _, value := range []int64{1, 253402300799999} {
+		raw := fmt.Sprintf(`{"data":[{"turnId":"turn","item":{"id":"item","type":"agentMessage","text":"reply"},"startedAtMs":%d,"completedAtMs":%d}]}`, value, value)
+		result, err := webUIItemPage([]byte(raw))
+		if err != nil {
+			t.Fatal(err)
+		}
+		entry := webUITestPage(t, result).Data[0]
+		if entry.StartedAtMS == nil || *entry.StartedAtMS != value || entry.CompletedAtMS == nil || *entry.CompletedAtMS != value {
+			t.Fatalf("valid millisecond boundary %d was lost", value)
+		}
 	}
 }
 

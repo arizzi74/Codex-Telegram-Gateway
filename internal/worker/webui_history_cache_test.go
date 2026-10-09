@@ -79,8 +79,13 @@ func TestWebUIHistoryFallbackCountsItemsAndCachesCompletedTurns(t *testing.T) {
 	if len(page.Data) != 20 || webUIItemID(page.Data[0].Item) != "latest-054" || webUIItemID(page.Data[19].Item) != "latest-035" || page.NextCursor == "" || fullWebUIHistoryReads(server) != 1 {
 		t.Fatalf("first bounded page = %#v, full reads=%d", page, fullWebUIHistoryReads(server))
 	}
-	if page.Data[0].TurnStartedAt == nil || *page.Data[0].TurnStartedAt != 1700000000 || page.Data[0].TurnStatus != "completed" {
+	if page.Data[0].TurnStartedAt == nil || *page.Data[0].TurnStartedAt != 1700000000 || page.Data[0].TurnCompletedAt == nil || *page.Data[0].TurnCompletedAt != 1700000100 || page.Data[0].TurnStatus != "completed" {
 		t.Fatal("source dates/status missing")
+	}
+	for _, entry := range page.Data {
+		if entry.StartedAtMS != nil || entry.CompletedAtMS != nil {
+			t.Fatal("legacy turn times became item lifecycle times")
+		}
 	}
 	// A new connection/page revisit refreshes metadata but not completed items.
 	if _, err := a.webUIHistory(t.Context(), runtime, session, request); err != nil {
@@ -97,6 +102,11 @@ func TestWebUIHistoryFallbackCountsItemsAndCachesCompletedTurns(t *testing.T) {
 	page = webUITestPage(t, raw)
 	if len(page.Data) != 20 || webUIItemID(page.Data[0].Item) != "latest-034" || fullWebUIHistoryReads(server) != 1 {
 		t.Fatal("same-turn continuation reread or reordered history")
+	}
+	for _, entry := range page.Data {
+		if entry.StartedAtMS != nil || entry.CompletedAtMS != nil || entry.TurnStartedAt == nil || *entry.TurnStartedAt != 1700000000 {
+			t.Fatal("cached continuation manufactured or converted dates")
+		}
 	}
 	request.Cursor = page.NextCursor
 	raw, err = a.webUIHistory(t.Context(), runtime, session, request)

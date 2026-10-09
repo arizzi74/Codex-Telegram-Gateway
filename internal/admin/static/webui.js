@@ -275,6 +275,47 @@
     const date = new Date(typeof value === 'number' && value < 1e12 ? value * 1000 : value);
     return Number.isNaN(date.getTime()) ? null : date;
   }
+  function itemMilliseconds(value) {
+    return Number.isSafeInteger(value) && value > 0 && value <= 253402300799999 ? value : undefined;
+  }
+  function legacyItemMilliseconds(value) {
+    if (!['number', 'string'].includes(typeof value)) return undefined;
+    if (typeof value === 'string') {
+      const parts = value.match(/^(\d{4})-(\d{2})-(\d{2})T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:\d{2})$/i);
+      if (!parts) return undefined;
+      const [year, month, day] = parts.slice(1).map(Number);
+      if (month < 1 || month > 12 || day < 1 || day > new Date(Date.UTC(year, month, 0)).getUTCDate()) return undefined;
+    }
+    return itemMilliseconds(timestamp(value)?.getTime());
+  }
+  function itemTiming(item, turn = {}, timing = {}, previous) {
+    // Native lifecycle fields are milliseconds; turn dates and older createdAt
+    // fields can be seconds. Keep one unit and preserve how each date is known.
+    const candidates = [
+      [itemMilliseconds(timing.startedAtMs), 'item-started'],
+      [legacyItemMilliseconds(item.createdAt), 'item-created'],
+      [itemMilliseconds(timing.observedStartedAtMs), 'observed-started'],
+      [itemMilliseconds(timing.completedAtMs), 'item-completed'],
+      [itemMilliseconds(timing.observedCompletedAtMs), 'observed-completed'],
+      [legacyItemMilliseconds(turn.startedAt), 'turn-started'],
+    ];
+    const previousRank = candidates.findIndex(([, source]) => source === previous?._timeSource);
+    const previousTime = itemMilliseconds(previous?._time);
+    for (let rank = 0; rank < candidates.length; rank++) {
+      const [value, source] = candidates[rank];
+      if (value === undefined) continue;
+      if (previousTime !== undefined && previousRank >= 0 && previousRank <= rank) break;
+      return { _time: value, _timeSource: source };
+    }
+    return previousTime !== undefined && previousRank >= 0 ? { _time: previousTime, _timeSource: previous._timeSource } : { _time: undefined, _timeSource: undefined };
+  }
+  function itemDate(item) {
+    const value = itemMilliseconds(item._time);
+    return value === undefined ? null : new Date(value);
+  }
+  function itemTimeLabel(item) {
+    return { 'turn-started': 'Turn started', 'item-completed': 'Completed', 'observed-started': 'Observed start', 'observed-completed': 'Observed completion' }[item._timeSource] || '';
+  }
   function isRunning(value) { return ['inProgress', 'in_progress', 'running', 'active'].includes(typeof value === 'object' ? value?.type : value); }
   function atBottom() { const scroller = $('transcript'); return scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 100; }
   function jump() {
@@ -999,6 +1040,7 @@
       if (generation !== state.generation || state.socket !== socket) return;
       let message;
       try { message = JSON.parse(event.data); } catch (_) { notice('Received an unreadable update. Reconnect to refresh this conversation.', 'connection'); return; }
+      if (message.method === 'item/started' || message.method === 'item/completed') message._observedAtMs = Date.now();
       if (message.type === 'ready') {
         clearTimeout(handshakeTimer);
         state.connected = true;
@@ -1097,11 +1139,15 @@
         if (!current()) return;
         const preserve = state.items.size > 0;
         const previous = { top: $('transcript').scrollTop, bottom: followLatest };
-        state.items.clear();
+        const previousItems = state.items; state.items = new Map();
         state.cursor = page.nextCursor || null;
         // The authoritative pending-question response owns restored questions;
         // historical async questions may already have been dismissed.
-        for (const entry of [...(page.data || [])].reverse()) ingestHistoryEntry(entry, false);
+        for (const entry of [...(page.data || [])].reverse()) {
+          const previous = previousItems.get(entry.item?.id);
+          if (previous && entry.turnId && previous._turn === entry.turnId) state.items.set(entry.item.id, { _turn: previous._turn, _time: previous._time, _timeSource: previous._timeSource });
+          ingestHistoryEntry(entry, false);
+        }
         renderMessages(false);
         $('older').hidden = !state.cursor; $('older').disabled = true;
         connection('loading', 'Connected · Checking active turn…');
@@ -1116,7 +1162,7 @@
     rememberTurns(metadata.data || []);
     for (const item of state.items.values()) {
       const turn = turnTimes.get(item._turn);
-      if (turn) { item._time ??= turn.startedAt; item._complete = !isRunning(turn.status); }
+      if (turn) { Object.assign(item, itemTiming(item, turn, {}, item)); item._complete = !isRunning(turn.status); }
     }
     for (const turn of metadata.data || []) if (isRunning(turn.status)) state.turn = turn.id;
     // Resume can know a new turn before the lightweight state page catches up.
@@ -1179,16 +1225,16 @@
     const turn = { ...turnTimes.get(entry.turnId), id: entry.turnId };
     if (entry.turnStartedAt !== undefined) turn.startedAt = entry.turnStartedAt;
     if (entry.turnStatus) turn.status = entry.turnStatus;
-    ingestItem(entry.item, turn, false, trackQuestions);
+    ingestItem(entry.item, turn, false, trackQuestions, entry);
   }
   function ingestTurn(turn, prepend = false) {
     if (isRunning(turn.status)) state.turn = turn.id;
     for (const item of turn.items || []) ingestItem(item, turn, prepend);
   }
-  function ingestItem(item, turn = {}, prepend = false, trackQuestions = true) {
+  function ingestItem(item, turn = {}, prepend = false, trackQuestions = true, timing = {}) {
     const key = item.id || 'item-' + (++state.sequence);
     const previous = state.items.get(key);
-    const value = { ...previous, ...item, _turn: turn.id || previous?._turn, _time: item.createdAt ?? turn.startedAt ?? previous?._time, _complete: previous?._complete || !isRunning(turn.status) };
+    const value = { ...previous, ...item, _turn: turn.id || previous?._turn, ...itemTiming(item, turn, timing, turn.id && previous?._turn === turn.id ? previous : undefined), _complete: previous?._complete || !isRunning(turn.status) };
     if (prepend && !previous) state.items = new Map([[key, value], ...state.items]); else state.items.set(key, value);
     if (trackQuestions) trackAsyncQuestions(value);
   }
@@ -1277,8 +1323,8 @@
     if (isReasoning) article.classList.add('reasoning');
     article.dataset.itemId = item.id || '';
     const header = node('div', 'message-header'); header.append(node('span', 'role', isUser ? '› You' : isTool ? '• ' + (isReasoning ? reasoningLabel : 'Tool') : '• Codex'));
-    const date = timestamp(item._time);
-    if (date) { const time = node('time', '', date.toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })); time.dateTime = date.toISOString(); time.title = date.toLocaleString(); header.append(time); }
+    const date = itemDate(item), timeLabel = itemTimeLabel(item);
+    if (date) { const time = node('time', '', (timeLabel ? timeLabel + ' · ' : '') + date.toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })); time.dateTime = date.toISOString(); time.dataset.source = item._timeSource; time.title = (timeLabel || (item._timeSource === 'item-started' ? 'Item started' : 'Item created')) + ': ' + date.toLocaleString(); header.append(time); }
     article.append(header);
     if (isUser) article.append(node('div', 'plain', clean(itemText(item))));
     else if (isAssistant) article.append(rawView ? node('div', 'command-raw', clean(itemText(item))) : markdown(itemText(item)));
@@ -1439,7 +1485,12 @@
     } else if (method === 'thread/status/changed') {
       if (p.status?.type === 'idle') { state.turn = null; }
     } else if (method === 'item/started' || method === 'item/completed') {
-      if (p.item) { ingestItem({ ...p.item, _liveStarted: method === 'item/started', _complete: method === 'item/completed' }, { id: p.turnId, startedAt: state.items.get(p.item.id)?._time || Date.now(), status: method === 'item/started' ? 'inProgress' : 'completed' }); renderQuestions(); }
+      if (p.item) {
+        const started = method === 'item/started';
+        const observed = itemMilliseconds(message._observedAtMs) ?? Date.now();
+        ingestItem({ ...p.item, _liveStarted: started, _complete: !started }, { id: p.turnId, status: started ? 'inProgress' : 'completed' }, false, true, { startedAtMs: p.startedAtMs, completedAtMs: p.completedAtMs, ...(started ? { observedStartedAtMs: observed } : { observedCompletedAtMs: observed }) });
+        renderQuestions();
+      }
     } else if (method === 'item/agentMessage/delta') {
       const item = state.items.get(p.itemId) || { id: p.itemId, type: 'agentMessage', text: '', _turn: p.turnId };
       item.text = (item.text || '') + (p.delta || ''); state.items.set(p.itemId, item);
@@ -1775,8 +1826,10 @@
           if (seen.has(key)) continue; seen.add(key);
           const value = item.type === 'userMessage' ? promptText(itemText(item)) : itemText(item);
           if (!value.trim()) continue;
-          const date = timestamp(item.createdAt ?? turn.startedAt);
-          found.push({ role: item.type === 'userMessage' ? 'You' : 'Codex', text: value, time: date ? (item.createdAt ? '' : 'Turn time: ') + date.toLocaleString() : 'Date/time unavailable' });
+          const previous = state.items.get(item.id);
+          const timing = itemTiming(item, turn, {}, previous?._turn === turn.id ? previous : undefined);
+          const date = itemDate(timing), label = itemTimeLabel(timing);
+          found.push({ role: item.type === 'userMessage' ? 'You' : 'Codex', text: value, time: date ? (label ? label + ': ' : '') + date.toLocaleString() : 'Date/time unavailable' });
           if (found.length === count) break;
         }
         if (found.length === count) break;
@@ -1793,7 +1846,7 @@
     composerHidden: () => $('composer').hidden, gatewayCommand, applyResult: applyCommandResult, disconnect,
     readHistory: commandHistory, setRaw: value => { rawView = value; renderMessages(false); },
     lastResponse: () => itemText([...state.items.values()].reverse().find(item => item.type === 'agentMessage' && item.phase !== 'commentary') || {}),
-    exportText: () => '# ' + title(state.selected) + '\n\n' + [...state.items.values()].filter(item => ['userMessage', 'agentMessage'].includes(item.type)).map(item => '## ' + (item.type === 'userMessage' ? 'You' : 'Codex') + (timestamp(item._time) ? ' · ' + timestamp(item._time).toISOString() : '') + '\n\n' + clean(item.type === 'userMessage' ? promptText(itemText(item)) : itemText(item))).join('\n\n'),
+    exportText: () => '# ' + title(state.selected) + '\n\n' + [...state.items.values()].filter(item => ['userMessage', 'agentMessage'].includes(item.type)).map(item => '## ' + (item.type === 'userMessage' ? 'You' : 'Codex') + (itemDate(item) ? ' · ' + (itemTimeLabel(item) ? itemTimeLabel(item) + ': ' : '') + itemDate(item).toISOString() : '') + '\n\n' + clean(item.type === 'userMessage' ? promptText(itemText(item)) : itemText(item))).join('\n\n'),
   });
   $('show-sessions').addEventListener('click', () => showSessions(true));
   $('empty-sessions').addEventListener('click', () => showSessions(true));
