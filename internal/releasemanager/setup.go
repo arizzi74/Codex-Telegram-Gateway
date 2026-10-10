@@ -97,8 +97,8 @@ func (m *Manager) setupWorker(ctx context.Context, l *Layout, cwd string, openPr
 	if err != nil {
 		return err
 	}
-	fmt.Fprintln(m.Out, "Enrollment URLs last 10 minutes and can be used once. The pasted URL is hidden.")
-	enrollmentValue, err := askSetupValue(ctx, prompt, m.Out, "Enrollment URL (hidden)", "", true, normalizeWorkerEnrollmentURL)
+	fmt.Fprintln(m.Out, "Enrollment URLs last 10 minutes and can be used once. The pasted URL is visible so you can check it before continuing.")
+	enrollmentValue, err := askSetupValue(ctx, prompt, m.Out, "Enrollment URL", "", false, normalizeWorkerEnrollmentURL)
 	if err != nil {
 		return err
 	}
@@ -107,6 +107,10 @@ func (m *Manager) setupWorker(ctx context.Context, l *Layout, cwd string, openPr
 		return errors.New("worker home must be an existing directory")
 	}
 	fmt.Fprintf(m.Out, "The worker starts in your home directory (%s) and can use all its subfolders.\n", l.Home)
+	serviceAccess, err := m.setupWorkerServiceAccess(ctx, l, prompt)
+	if err != nil {
+		return err
+	}
 	codex, err := m.setupWorkerCodex(ctx, prompt, l)
 	if err != nil {
 		return err
@@ -129,7 +133,7 @@ func (m *Manager) setupWorker(ctx context.Context, l *Layout, cwd string, openPr
 			return err
 		}
 		fmt.Fprintln(m.Out, err)
-		enrollmentValue, err = askSetupValue(ctx, prompt, m.Out, "Fresh enrollment URL (hidden)", "", true, func(value string) (string, error) {
+		enrollmentValue, err = askSetupValue(ctx, prompt, m.Out, "Fresh enrollment URL", "", false, func(value string) (string, error) {
 			fresh, err := parseWorkerEnrollmentURL(value)
 			if err != nil {
 				return "", err
@@ -143,8 +147,11 @@ func (m *Manager) setupWorker(ctx context.Context, l *Layout, cwd string, openPr
 			return err
 		}
 	}
+	if l.System != "linux" {
+		serviceAccess = enrollmentResponse.ServiceAccess
+	}
 	recovery := &workerSetupRecovery{
-		Schema: 1, Token: enrollmentResponse.Token, ServiceAccess: enrollmentResponse.ServiceAccess, Version: version,
+		Schema: 1, Token: enrollmentResponse.Token, ServiceAccess: serviceAccess, Version: version,
 		Config: config.WorkerConfig{
 			WorkerID: enrollmentResponse.WorkerID, Name: name,
 			StateFile:  filepath.Join(l.Home, ".local/state/codex-worker/worker.db"),

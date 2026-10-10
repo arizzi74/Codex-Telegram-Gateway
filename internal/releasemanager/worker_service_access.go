@@ -39,7 +39,7 @@ func (m *Manager) setupWorkerServiceAccess(ctx context.Context, l *Layout, promp
 		return "", nil
 	}
 	fmt.Fprintln(m.Out, "Choose the Linux worker service access. Restricted services use private temporary files and user isolation, and block gaining privileges. For example, sudo apt update from a worker session will be blocked even if this account can normally use sudo.")
-	fmt.Fprintln(m.Out, "Full system access removes these service restrictions. The worker still runs as your account: normal file permissions and your existing sudo policy apply. This does not grant sudo access or change Codex session permissions or allowed working directories.")
+	fmt.Fprintln(m.Out, "Full system access removes these service restrictions. The worker still runs as your account: normal file permissions and your existing sudo policy apply. For example, sudo apt update can run if this account already has permission to use sudo. This does not grant sudo access or change Codex session permissions or allowed working directories.")
 	answer, err := askSetupValue(ctx, prompt, m.Out, "Restrict this worker service? (yes = restricted, no = full system access)", "yes", false, setupYesNo)
 	if err != nil {
 		return "", err

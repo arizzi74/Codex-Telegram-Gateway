@@ -10,6 +10,27 @@ Database integration tests now run automatically against fresh temporary SQLite
 files. Historical entries below describe the release and backend tested on their
 recorded date; PostgreSQL outage evidence applies to the retired backend.
 
+## Local worker service choice and visible enrollment URLs (2026-10-10)
+
+`go test ./internal/releasemanager` passed. Installer and service tests verify:
+
+- Initial and replacement enrollment URLs use visible input. A real Linux
+  pseudo-terminal check confirms URL echo; existing token-entry checks confirm
+  hidden input and terminal restoration. These terminal checks passed 10 runs.
+- Fresh Linux setup defaults to restricted access and accepts an explicit yes
+  or no before redemption. Each answer overrides the opposite access returned
+  by enrollment; service rendering applies the matching systemd settings.
+- Cancellation or EOF at the restriction question stops before Codex setup,
+  redemption, installation, or recovery-journal creation.
+- Installation failure, cancellation, and an expired-URL retry retain the local
+  choice. Recovery resumes without another enrollment or permission question;
+  adoption, updates, and prepared configurations preserve their existing paths.
+- Fresh macOS enrollment asks no systemd restriction question and passes no
+  Linux service-access option to installation.
+
+These checks use isolated fixtures and synthetic credentials; no live worker
+was enrolled or reconfigured to obtain this evidence.
+
 ## Optional password access and worker visibility (2026-10-10)
 
 Isolated SQLite, HTTP and Playwright checks verify:
@@ -43,8 +64,9 @@ Isolated SQLite, HTTPS installer/gateway integration and Playwright checks verif
   produce one worker and one event watermark. Failed writes roll back together.
 - Only code and worker-token hashes are stored on the gateway. Request bounds,
   validation, origin checks and per-client/global throttling are enforced.
-- Fresh setup asks for a name and hidden URL, uses the home directory and
-  admin-selected service access, and completes Codex prerequisites before redemption.
+- The original setup asked for a name and hidden URL, used the home directory
+  and admin-selected service access, and completed Codex prerequisites before
+  redemption. URL visibility and the Linux access choice change in v0.5.82.
 - Private durable recovery preserves the enrolled identity after interruption.
   Concurrent setup, mismatched configurations, unmanaged workers and downgrades
   are blocked; an active matching worker is verified without restarting it.

@@ -318,10 +318,14 @@ codex-gateway --config /etc/codex-gateway/gateway.json admin bootstrap
 
 It expires in 15 minutes and is shown once. Open `/tgw/admin/` over HTTPS, enroll a
 resident user-verified personal passkey, and add a second passkey before
-revoking the first. **Enroll worker** creates a one-use URL, valid for 10 minutes,
-with restricted service access by default. Choose full account permissions in
-that dialog when required. The installer asks for a worker name and this URL,
-then retrieves and stores its gateway address, ID and private token. Opening the
+revoking the first. **Enroll worker** creates a one-use URL, valid for 10 minutes.
+The installer asks for a worker name and this visibly echoed URL. On Linux it
+then asks **Restrict this worker service?** before redemption: **yes** (the
+default) blocks sudo; **no** uses the account's existing permissions and sudo
+rules without granting privileges. This local answer determines installed
+access; the admin dialog's selection remains for older installers. macOS skips
+the question and uses normal account permissions. Setup retrieves and stores
+the gateway address, ID and private token. Opening the
 URL in a browser does not redeem it. An unused URL creates no placeholder worker.
 Changing its permissions or creating a replacement revokes the previous unused
 URL first; **Cancel and revoke** disables it. Closing the dialog leaves it valid

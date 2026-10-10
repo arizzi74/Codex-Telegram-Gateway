@@ -89,21 +89,26 @@ owns your projects, without sudo:
 curl -fsSL https://raw.githubusercontent.com/arizzi74/Codex-Telegram-Gateway/main/scripts/install.sh | sh
 ```
 
-Enter only a worker display name and the enrollment URL. The URL expires after
-10 minutes and can be redeemed once; opening it in a browser does not consume
+Enter a worker display name and the enrollment URL, which is visible as you
+paste or type it. On Linux, answer **Restrict this worker service?** before
+enrollment: **yes** (the default) restricts the service; **no** uses full account
+permissions. The URL expires after 10 minutes and can be redeemed once; opening
+it in a browser does not consume
 it. Setup retrieves the gateway address, worker ID and token automatically,
 installs Codex if missing, and guides sign-in with device login over SSH. New
 guided workers start in your home directory and can access all its subfolders.
-Choose service access in the admin enrollment dialog: restricted by default on
-Linux, or full account permissions. Restricted access blocks privilege elevation
-such as `sudo apt update`; full access follows your account's normal permissions.
+The installer's local answer determines Linux service access. Restricted access
+blocks privilege elevation such as `sudo apt update`; full access follows your
+account's existing permissions and sudo rules without granting new privileges.
+The admin dialog's service-access selection remains for older installers.
 Setup attempts to enable background startup after logout, requesting sudo if
 required. If this fails, it prints the command for an administrator; the worker
 is installed but may stop after logout. On macOS, it runs while your desktop
 account is logged in.
 
-Prompts work through the pipe and secret input is hidden. Rerunning the installer
-preserves existing configurations and running sessions; prepared private JSON
+Prompts work through the pipe; bot-token input is hidden and enrollment URLs are
+visible. Rerunning the installer preserves existing configurations and running
+sessions; prepared private JSON
 configurations are also supported. Gateway completion can be resumed with
 `sudo codex-telegramgw finish gateway`.
 

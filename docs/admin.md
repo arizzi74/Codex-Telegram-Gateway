@@ -107,18 +107,22 @@ Run the worker installer as the project account, without sudo:
 curl -fsSL https://raw.githubusercontent.com/arizzi74/Codex-Telegram-Gateway/main/scripts/install.sh | sh
 ```
 
-A fresh setup asks for a worker display name and the enrollment URL. It
-retrieves the worker ID, authentication token, gateway connection address and
-service access automatically. New workers start in the account's home
+A fresh setup asks for a worker display name and the enrollment URL, with the
+URL visibly echoed. Linux setup then asks **Restrict this worker service?**
+before redemption. It retrieves the worker ID, authentication token and gateway
+connection address automatically. New workers start in the account's home
 directory and can access its subfolders. Codex installation and account
 sign-in are handled before redemption; provider sign-in or enabling service
 startup after logout may require account approval or a system password.
 
-The dialog defaults to restricted service access. On Linux this blocks
-privilege elevation, including sudo. Select full access before copying the
-URL to use the account's normal permissions and sudo rules. Full access does
-not grant new privileges or change Codex session permissions. macOS workers
-use the account's normal permissions.
+The installer's Linux restriction question defaults to **yes**, setting
+`PrivateTmp`, `PrivateUsers`, and `NoNewPrivileges` to `yes` and blocking
+privilege elevation, including sudo. Answer **no** to set all three to `no` and
+use the account's existing permissions and sudo rules. This grants no new
+privileges and does not change Codex session permissions. The local answer
+determines installed access, overriding the service access returned by the
+enrollment API. The dialog's access selection remains for older installers.
+macOS skips this question and uses normal account permissions through launchd.
 
 Closing the dialog keeps its URL valid until it is used or expires. **Cancel
 and revoke** invalidates an unused URL. Changing service access or creating a
@@ -145,8 +149,10 @@ configured origin; command-line requests do not need an Origin header.
 
 The installer saves returned credentials in private recovery storage before
 installing the service. If installation is interrupted, rerunning the same
-command resumes with the saved identity. A lost redemption response is not
-automatically replayed: inspect the worker inventory, revoke any incomplete
+command resumes with the saved identity and access choice. Existing installations
+and prepared configurations do not receive the fresh-enrollment restriction
+question. A lost redemption response is not automatically replayed: inspect the
+worker inventory, revoke any incomplete
 worker created by that attempt, and generate a fresh URL. Worker credentials
 remain valid after the enrollment URL expires, until rotated or revoked.
 

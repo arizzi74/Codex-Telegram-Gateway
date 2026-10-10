@@ -21,7 +21,7 @@ func savedWorkerSetupFixture(t *testing.T) (*Manager, *Layout, string, *workerSe
 	value := setupEnrollmentServer(t, m, func(w http.ResponseWriter, r *http.Request, _ protocol.RedeemWorkerEnrollmentRequest) {
 		writeSetupEnrollmentResponse(w, r, workerServiceRestricted)
 	})
-	prompt := &scriptedWorkerSetup{t: t, answers: []string{"", value}}
+	prompt := &scriptedWorkerSetup{t: t, answers: []string{"", value, ""}}
 	stop := errors.New("stop after preparing installation")
 	var prepared string
 	err := m.setupWorker(t.Context(), l, cwd, func() (workerSetupPrompt, error) { return prompt, nil }, func(_ context.Context, opts options) error {

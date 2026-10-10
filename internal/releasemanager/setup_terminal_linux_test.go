@@ -60,6 +60,68 @@ func setupTestTerminal(t *testing.T) (*os.File, *workerSetupTerminal) {
 	return master, &workerSetupTerminal{file: slave}
 }
 
+func TestSetupTerminalShowsEnrollmentURLWithoutChangingSettings(t *testing.T) {
+	master, terminal := setupTestTerminal(t)
+	before, err := workerTerminalState(int(terminal.file.Fd()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+	defer cancel()
+	type result struct {
+		answer string
+		err    error
+	}
+	done := make(chan result, 1)
+	go func() {
+		answer, err := terminal.Ask(ctx, "Enrollment URL", "", false)
+		done <- result{answer, err}
+	}()
+	poll := []unix.PollFd{{Fd: int32(master.Fd()), Events: unix.POLLIN}}
+	if ready, err := setupTestPoll(poll, 2000); err != nil || ready == 0 {
+		t.Fatal("enrollment URL prompt did not appear", err)
+	}
+	during, err := workerTerminalState(int(terminal.file.Fd()))
+	if err != nil || *before != *during {
+		t.Fatal("visible enrollment prompt changed terminal settings", err)
+	}
+	const enrollmentURL = "https://gateway.example/tgw/enroll/#ABCD2345EFGH"
+	if _, err := unix.Write(int(master.Fd()), []byte(enrollmentURL+"\n")); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case result := <-done:
+		if result.err != nil || result.answer != enrollmentURL {
+			t.Fatalf("visible prompt returned %q, %v", result.answer, result.err)
+		}
+	case <-ctx.Done():
+		t.Fatal("visible enrollment prompt did not finish", ctx.Err())
+	}
+	after, err := workerTerminalState(int(terminal.file.Fd()))
+	if err != nil || *before != *after {
+		t.Fatal("visible enrollment prompt changed terminal settings", err)
+	}
+	var output strings.Builder
+	for {
+		ready, err := setupTestPoll(poll, 20)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if ready == 0 {
+			break
+		}
+		buffer := make([]byte, 1024)
+		n, err := unix.Read(int(master.Fd()), buffer)
+		if err != nil {
+			t.Fatal(err)
+		}
+		output.Write(buffer[:n])
+	}
+	if !strings.Contains(output.String(), "Enrollment URL: "+enrollmentURL) {
+		t.Fatal("terminal did not echo the complete enrollment URL")
+	}
+}
+
 func TestSetupTerminalHidesTokenAndRestoresEcho(t *testing.T) {
 	for _, cancelInput := range []bool{false, true} {
 		t.Run(map[bool]string{false: "answer", true: "cancel"}[cancelInput], func(t *testing.T) {

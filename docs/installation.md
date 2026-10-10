@@ -40,8 +40,10 @@ under `/var/lib/codex-gateway`.
 
 For a worker, choose **Enroll worker** in the gateway admin console and copy the
 one-use enrollment URL. It expires after 10 minutes and is redeemed only when
-the installer submits it; opening the URL in a browser does not consume it. The
-admin dialog selects service access, with restricted access as the default.
+the installer submits it; opening the URL in a browser does not consume it.
+Linux setup asks whether to restrict the worker service, with **yes** as the
+default. That local choice determines the installed service's access; the admin
+dialog's service-access selection remains for compatibility with older installers.
 Setup automatically installs the standalone Codex CLI if it is missing and
 guides its account sign-in. You can use device login over SSH, opening the
 displayed link on another computer. The guided installer creates the worker
@@ -227,11 +229,12 @@ automatic updates enabled:
 - Otherwise, if a worker is already installed in the standard location, setup adopts it
   without changing its configuration or restarting its sessions.
 - Otherwise, it uses a private `worker.json` in the current directory if present.
-- If neither exists, it asks only for a worker display name and the enrollment
-  URL. It retrieves the gateway address, worker ID, token and service access
-  automatically, installs Codex if needed, and guides device sign-in. Invalid
-  names or URLs can be corrected without restarting the wizard. Enrollment URL
-  entry is hidden.
+- If neither exists, it asks for a worker display name and the enrollment URL.
+  On Linux it then asks **Restrict this worker service?**, with **yes** as the
+  default. It retrieves the gateway address, worker ID and token automatically,
+  installs Codex if needed, and guides device sign-in. Invalid names or URLs can
+  be corrected without restarting the wizard. Both **Enrollment URL** and
+  **Fresh enrollment URL** entry are visibly echoed so you can check the URL.
 - A newly generated configuration starts the primary runtime in the user's home
   directory and allows that entire directory and its subfolders. Explicit
   workspace restrictions in prepared or existing configurations are preserved.
@@ -255,12 +258,11 @@ startup without changing the configured path. A private `.bbolt-backup` copy is
 retained before conversion; see [worker storage and recovery](operations.md#worker-storage-and-ambiguous-outcomes)
 before restoring a backup or rolling back to an older binary.
 
-For a fresh enrollment, choose service access in the admin dialog before copying
-the URL. Changing the selection revokes the previous unused URL and creates a
-new one. **Restricted** is the default. On Linux, it enables `PrivateTmp`,
-`PrivateUsers`, and `NoNewPrivileges`; for example, a command such as `sudo apt update` cannot
-elevate privileges from the worker. **Full account permissions**
-installs these settings:
+For a fresh Linux enrollment, answer **Restrict this worker service?** in the
+local installer before it redeems the URL. **Yes** is the default and installs
+`PrivateTmp=yes`, `PrivateUsers=yes`, and `NoNewPrivileges=yes`; for example,
+`sudo apt update` cannot elevate privileges from the worker. Answering **no**
+selects full account permissions and installs these settings:
 
 ```ini
 [Service]
@@ -271,10 +273,13 @@ NoNewPrivileges=no
 
 Full access uses the Linux account's existing permissions and sudo rules. It
 does not grant sudo privileges or change Codex session permissions or configured
-workspace roots. The installer applies the selection from the enrollment URL
-without another permissions question. Updates, adoption, and repeated setup
-preserve the existing service's access settings. macOS services use the account's
-normal permissions; the Linux restriction choice does not apply to launchd.
+workspace roots. The installer's local answer overrides the service access
+returned by enrollment and is applied locally. The admin dialog retains its
+service-access selection for older installers; changing it revokes the previous
+unused URL and creates a new one. Saved recovery resumes with its chosen access;
+updates, adoption, repeated setup, and prepared configurations keep their
+existing settings without the fresh-enrollment question. macOS does not ask
+this systemd question: launchd services use the account's normal permissions.
 
 On Linux, setup attempts to enable systemd lingering so the
 worker can stay online after logout and start at boot. If administrator access
@@ -294,9 +299,10 @@ appears in the dashboard only after the installer redeems the URL and supplies
 its name. Failed admin requests require an explicit retry and never silently
 issue another URL.
 
-Before redeeming a URL, setup checks the service manager and completes Codex
-installation and sign-in. After redemption, it atomically saves private recovery
-credentials and configuration under `~/.local/state/codex-worker/setup/`, with
+Before redeeming a URL, setup checks the service manager, records the local Linux
+restriction choice, and completes Codex installation and sign-in. After
+redemption, it atomically saves credentials, configuration, and the access choice
+under `~/.local/state/codex-worker/setup/`, with
 owner-only permissions. If service installation fails or setup is interrupted,
 rerun the same installer command as the same user; it resumes that saved worker
 without asking for another URL. The recovery files are removed after successful

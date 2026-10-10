@@ -17,9 +17,15 @@ import (
 	"github.com/iaia/telegramgw/internal/protocol"
 )
 
-func TestSetupWorkerEnrollmentNeedsOnlyNameAndHiddenURL(t *testing.T) {
-	for _, profile := range []string{workerServiceRestricted, workerServiceFull} {
-		t.Run(profile, func(t *testing.T) {
+func TestSetupWorkerEnrollmentUsesVisibleURLAndLocalServiceAccess(t *testing.T) {
+	for _, tc := range []struct {
+		name, answer, access, enrollmentAccess string
+	}{
+		{"default restricted", "", workerServiceRestricted, workerServiceFull},
+		{"explicit restricted", "yes", workerServiceRestricted, workerServiceFull},
+		{"full", "no", workerServiceFull, workerServiceRestricted},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
 			m, l, cwd := setupFixture(t)
 			var out bytes.Buffer
 			m.Out = &out
@@ -27,14 +33,18 @@ func TestSetupWorkerEnrollmentNeedsOnlyNameAndHiddenURL(t *testing.T) {
 				if body.Name != `Worker "one"` {
 					t.Error("worker name changed")
 				}
-				writeSetupEnrollmentResponse(w, r, profile)
+				writeSetupEnrollmentResponse(w, r, tc.enrollmentAccess)
 			})
-			prompt := &scriptedWorkerSetup{t: t, answers: []string{`Worker "one"`, value}}
+			prompt := &scriptedWorkerSetup{t: t, answers: []string{`Worker "one"`, value, tc.answer}}
 			var staged string
 			err := m.setupWorker(t.Context(), l, cwd, func() (workerSetupPrompt, error) { return prompt, nil }, func(_ context.Context, opts options) error {
 				staged = filepath.Dir(opts.Config)
-				if opts.Action != "install" || opts.Component != "worker" || !opts.AutoUpdate || !opts.WorkerSetupRecovery || opts.WorkerServiceAccess != profile || opts.Version != "v0.5.1" {
+				if opts.Action != "install" || opts.Component != "worker" || !opts.AutoUpdate || !opts.WorkerSetupRecovery || opts.WorkerServiceAccess != tc.access || opts.Version != "v0.5.1" {
 					t.Fatalf("incorrect install options: %+v", opts)
+				}
+				recovery, err := loadWorkerSetupRecovery(l)
+				if err != nil || recovery == nil || recovery.ServiceAccess != tc.access {
+					t.Fatal("local service access choice was not saved durably", err)
 				}
 				cfg, err := config.LoadWorker(opts.Config)
 				if err != nil {
@@ -65,37 +75,114 @@ func TestSetupWorkerEnrollmentNeedsOnlyNameAndHiddenURL(t *testing.T) {
 				}
 				return nil
 			})
-			if err != nil || !prompt.closed || !reflect.DeepEqual(prompt.secrets, []bool{false, true}) || len(prompt.answers) != 0 || staged == "" || FileExists(staged) {
-				t.Fatal("two-input worker setup failed", err)
+			if err != nil || !prompt.closed || !reflect.DeepEqual(prompt.secrets, []bool{false, false, false}) || len(prompt.answers) != 0 || staged == "" || FileExists(staged) {
+				t.Fatal("guided worker setup failed", err)
 			}
-			if strings.Contains(out.String(), value) || strings.Contains(out.String(), testWorkerEnrollmentToken) || strings.Contains(out.String(), testWorkerEnrollmentCode) {
-				t.Fatal("setup output leaked enrollment credentials")
+			if prompt.labels[1] != "Enrollment URL" || strings.Contains(out.String(), "hidden") || !strings.Contains(out.String(), "pasted URL is visible") {
+				t.Fatal("enrollment URL input is not described as visible")
+			}
+			if strings.Contains(out.String(), testWorkerEnrollmentToken) {
+				t.Fatal("setup output leaked the worker authentication token")
+			}
+		})
+	}
+}
+
+func TestSetupWorkerMacOSEnrollmentSkipsServiceAccessQuestion(t *testing.T) {
+	m, linux, cwd := setupFixture(t)
+	l, err := newLayout("worker", "darwin", "arm64", linux.Home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldRun := m.Run
+	m.Run = func(ctx context.Context, args ...string) (CommandResult, error) {
+		if len(args) >= 2 && args[0] == "launchctl" && args[1] == "print" {
+			return CommandResult{}, nil
+		}
+		return oldRun(ctx, args...)
+	}
+	value := setupEnrollmentServer(t, m, func(w http.ResponseWriter, r *http.Request, _ protocol.RedeemWorkerEnrollmentRequest) {
+		writeSetupEnrollmentResponse(w, r, workerServiceFull)
+	})
+	prompt := &scriptedWorkerSetup{t: t, answers: []string{"", value}}
+	err = m.setupWorker(t.Context(), l, cwd, func() (workerSetupPrompt, error) { return prompt, nil }, func(_ context.Context, opts options) error {
+		if opts.WorkerServiceAccess != "" {
+			t.Fatal("macOS installation received a Linux service profile")
+		}
+		recovery, err := loadWorkerSetupRecovery(l)
+		if err != nil || recovery == nil || recovery.ServiceAccess != workerServiceFull {
+			t.Fatal("macOS enrollment recovery changed", err)
+		}
+		return nil
+	})
+	if err != nil || !prompt.closed || !reflect.DeepEqual(prompt.labels, []string{"Worker name", "Enrollment URL"}) || !reflect.DeepEqual(prompt.secrets, []bool{false, false}) {
+		t.Fatal("macOS setup asked a Linux service access question", err, prompt.labels)
+	}
+}
+
+func TestSetupWorkerServiceAccessCancellationDoesNotRedeem(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+	}{
+		{"cancelled choice", context.Canceled},
+		{"closed choice", io.EOF},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m, l, cwd := setupFixture(t)
+			oldRun := m.Run
+			m.Run = func(ctx context.Context, args ...string) (CommandResult, error) {
+				if filepath.Base(args[0]) == "codex" {
+					t.Fatal("cancelled service choice proceeded to Codex setup")
+				}
+				return oldRun(ctx, args...)
+			}
+			m.HTTP.Transport = coreRoundTripper(func(*http.Request) (*http.Response, error) {
+				t.Fatal("cancelled service choice consumed enrollment URL")
+				return nil, nil
+			})
+			prompt := &scriptedWorkerSetup{t: t, answers: []string{"", "https://gateway.example/tgw/enroll/#" + testWorkerEnrollmentCode}, endErr: tc.err}
+			err := m.setupWorker(t.Context(), l, cwd, func() (workerSetupPrompt, error) { return prompt, nil }, func(context.Context, options) error {
+				t.Fatal("cancelled service choice reached installation")
+				return nil
+			})
+			if !errors.Is(err, tc.err) || !prompt.closed || FileExists(workerSetupRecoveryPath(l)) || FileExists(l.Config) {
+				t.Fatal("cancelled service choice left an enrolled worker", err)
 			}
 		})
 	}
 }
 
 func TestSetupWorkerKeepsRecoveryCredentialsAcrossFailureAndRerun(t *testing.T) {
-	for _, cancelInstall := range []bool{false, true} {
-		t.Run(map[bool]string{false: "failure", true: "cancellation"}[cancelInstall], func(t *testing.T) {
+	for _, tc := range []struct {
+		name, answer, access, enrollmentAccess string
+		installErr                             error
+	}{
+		{"restricted after failure", "yes", workerServiceRestricted, workerServiceFull, errors.New("installation failed")},
+		{"full after cancellation", "no", workerServiceFull, workerServiceRestricted, context.Canceled},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
 			m, l, cwd := setupFixture(t)
 			calls := 0
 			value := setupEnrollmentServer(t, m, func(w http.ResponseWriter, r *http.Request, _ protocol.RedeemWorkerEnrollmentRequest) {
 				calls++
-				writeSetupEnrollmentResponse(w, r, workerServiceFull)
+				writeSetupEnrollmentResponse(w, r, tc.enrollmentAccess)
 			})
-			prompt := &scriptedWorkerSetup{t: t, answers: []string{"", value}}
-			installErr := errors.New("installation failed")
-			if cancelInstall {
-				installErr = context.Canceled
-			}
+			prompt := &scriptedWorkerSetup{t: t, answers: []string{"", value, tc.answer}}
 			var first config.WorkerConfig
 			err := m.setupWorker(t.Context(), l, cwd, func() (workerSetupPrompt, error) { return prompt, nil }, func(_ context.Context, opts options) error {
+				if opts.WorkerServiceAccess != tc.access {
+					t.Fatal("initial install ignored local service access choice")
+				}
 				first, _ = config.LoadWorker(opts.Config)
-				return installErr
+				return tc.installErr
 			})
-			if !errors.Is(err, installErr) || calls != 1 || !FileExists(workerSetupRecoveryPath(l)) || first.Name != "my-worker" {
+			if !errors.Is(err, tc.installErr) || calls != 1 || !FileExists(workerSetupRecoveryPath(l)) || first.Name != "my-worker" {
 				t.Fatal("failed setup lost enrollment credentials", err)
+			}
+			recovery, err := loadWorkerSetupRecovery(l)
+			if err != nil || recovery == nil || recovery.ServiceAccess != tc.access {
+				t.Fatal("failed setup lost the local service access choice", err)
 			}
 			m.HTTP.Transport = coreRoundTripper(func(*http.Request) (*http.Response, error) {
 				t.Fatal("recovered installation attempted new enrollment")
@@ -106,7 +193,7 @@ func TestSetupWorkerKeepsRecoveryCredentialsAcrossFailureAndRerun(t *testing.T) 
 				return nil, nil
 			}, func(_ context.Context, opts options) error {
 				second, err := config.LoadWorker(opts.Config)
-				if err != nil || !reflect.DeepEqual(first, second) || opts.WorkerServiceAccess != workerServiceFull || !opts.WorkerSetupRecovery {
+				if err != nil || !reflect.DeepEqual(first, second) || opts.WorkerServiceAccess != tc.access || !opts.WorkerSetupRecovery {
 					t.Fatal("saved worker identity or settings changed", err)
 				}
 				return nil
@@ -133,23 +220,31 @@ func TestSetupWorkerExpiredURLRequiresFreshURLAndKeepsName(t *testing.T) {
 		writeSetupEnrollmentResponse(w, r, workerServiceRestricted)
 	})
 	fresh := strings.TrimSuffix(value, testWorkerEnrollmentCode) + "ABCDEFGH2346"
-	prompt := &scriptedWorkerSetup{t: t, answers: []string{"Worker one", value, value, fresh}}
-	err := m.setupWorker(t.Context(), l, cwd, func() (workerSetupPrompt, error) { return prompt, nil }, func(context.Context, options) error { return nil })
-	if err != nil || calls != 2 || !reflect.DeepEqual(prompt.secrets, []bool{false, true, true, true}) || len(prompt.answers) != 0 {
+	prompt := &scriptedWorkerSetup{t: t, answers: []string{"Worker one", value, "no", value, fresh}}
+	err := m.setupWorker(t.Context(), l, cwd, func() (workerSetupPrompt, error) { return prompt, nil }, func(_ context.Context, opts options) error {
+		if opts.WorkerServiceAccess != workerServiceFull {
+			t.Fatal("fresh URL reset the local service access choice")
+		}
+		return nil
+	})
+	if err != nil || calls != 2 || !reflect.DeepEqual(prompt.secrets, []bool{false, false, false, false, false}) || len(prompt.answers) != 0 {
 		t.Fatal("expired URL did not safely recover", err, calls)
+	}
+	if prompt.labels[1] != "Enrollment URL" || prompt.labels[3] != "Fresh enrollment URL" || prompt.labels[4] != "Fresh enrollment URL" {
+		t.Fatal("retry URL prompts were not visible", prompt.labels)
 	}
 }
 
-func TestSetupWorkerRejectsInvalidNameAndURLPrivately(t *testing.T) {
+func TestSetupWorkerRejectsInvalidNameAndURLWithoutEchoingValues(t *testing.T) {
 	m, l, cwd := setupFixture(t)
 	var out bytes.Buffer
 	m.Out = &out
 	value := setupEnrollmentServer(t, m, func(w http.ResponseWriter, r *http.Request, _ protocol.RedeemWorkerEnrollmentRequest) {
 		writeSetupEnrollmentResponse(w, r, workerServiceRestricted)
 	})
-	prompt := &scriptedWorkerSetup{t: t, answers: []string{"private-name\nsecond", "Worker one", "https://secret@gateway.example/tgw/enroll/#" + testWorkerEnrollmentCode, value}}
+	prompt := &scriptedWorkerSetup{t: t, answers: []string{"private-name\nsecond", "Worker one", "https://secret@gateway.example/tgw/enroll/#" + testWorkerEnrollmentCode, value, ""}}
 	err := m.setupWorker(t.Context(), l, cwd, func() (workerSetupPrompt, error) { return prompt, nil }, func(context.Context, options) error { return nil })
-	if err != nil || !reflect.DeepEqual(prompt.secrets, []bool{false, false, true, true}) || strings.Contains(out.String(), "private-name") || strings.Contains(out.String(), "secret@gateway") {
+	if err != nil || !reflect.DeepEqual(prompt.secrets, []bool{false, false, false, false, false}) || strings.Contains(out.String(), "private-name") || strings.Contains(out.String(), "secret@gateway") {
 		t.Fatal("invalid input leaked or did not recover", err)
 	}
 }
@@ -181,7 +276,7 @@ func TestSetupWorkerCancelsBeforeRedeemAndDoesNotEnrollAfterAuthFailure(t *testi
 				t.Fatal("setup consumed enrollment before prerequisites completed")
 				return nil, nil
 			})
-			prompt := &scriptedWorkerSetup{t: t, answers: []string{"", "https://gateway.example/tgw/enroll/#" + testWorkerEnrollmentCode}}
+			prompt := &scriptedWorkerSetup{t: t, answers: []string{"", "https://gateway.example/tgw/enroll/#" + testWorkerEnrollmentCode, ""}}
 			err := m.setupWorker(ctx, l, cwd, func() (workerSetupPrompt, error) {
 				if kind == "service-preflight" {
 					t.Fatal("service preflight happened after inputs opened")
@@ -236,12 +331,12 @@ func TestSetupWorkerMalformedEnrollmentStopsWithoutPromptingOrInstall(t *testing
 		calls++
 		w.Write([]byte(`{"private":"token"}`))
 	})
-	prompt := &scriptedWorkerSetup{t: t, answers: []string{"", value}, endErr: io.EOF}
+	prompt := &scriptedWorkerSetup{t: t, answers: []string{"", value, ""}, endErr: io.EOF}
 	err := m.setupWorker(t.Context(), l, cwd, func() (workerSetupPrompt, error) { return prompt, nil }, func(context.Context, options) error {
 		t.Fatal("malformed credentials reached install")
 		return nil
 	})
-	if err == nil || errors.Is(err, io.EOF) || calls != 1 || len(prompt.secrets) != 2 || FileExists(workerSetupRecoveryPath(l)) {
+	if err == nil || errors.Is(err, io.EOF) || calls != 1 || len(prompt.secrets) != 3 || FileExists(workerSetupRecoveryPath(l)) {
 		t.Fatal("malformed enrollment was retried or persisted", err)
 	}
 }

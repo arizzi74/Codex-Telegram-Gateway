@@ -15,12 +15,13 @@ import (
 type scriptedWorkerSetup struct {
 	t       *testing.T
 	answers []string
+	labels  []string
 	secrets []bool
 	closed  bool
 	endErr  error
 }
 
-func (p *scriptedWorkerSetup) Ask(_ context.Context, _ string, fallback string, secret bool) (string, error) {
+func (p *scriptedWorkerSetup) Ask(_ context.Context, label string, fallback string, secret bool) (string, error) {
 	p.t.Helper()
 	if len(p.answers) == 0 {
 		if p.endErr != nil {
@@ -30,6 +31,7 @@ func (p *scriptedWorkerSetup) Ask(_ context.Context, _ string, fallback string, 
 	}
 	answer := p.answers[0]
 	p.answers = p.answers[1:]
+	p.labels = append(p.labels, label)
 	p.secrets = append(p.secrets, secret)
 	if answer == "" {
 		answer = fallback
