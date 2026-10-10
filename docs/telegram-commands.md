@@ -375,6 +375,19 @@ request, or a switch to an idle session. Disconnecting stops it in single-sessio
 mode. Telegram can retain the last indicator for up to five seconds after
 refreshing stops. API failures do not fail the underlying command.
 
+## Reply formatting
+
+Completed Codex replies render Markdown as Telegram text formatting: bold,
+italics, strikethrough, inline code, code blocks, and web links. Headings become
+bold text. Tables become labeled rows so their contents remain readable on a
+phone. Local file links show their paths; they do not become download links.
+
+Long replies are split after formatting, keeping code and emphasis across
+message boundaries. Session names remain literal text, and changing multisession
+mode preserves the reply's formatting. Commands, user prompts, and temporary
+progress keep their existing presentation. Previously delivered messages are
+not rewritten.
+
 ## Session focus and multisession mode
 
 By default, turn progress and completion messages follow the selected session.

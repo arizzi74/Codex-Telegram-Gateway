@@ -83,9 +83,11 @@ type SendMessage struct {
 
 // TelegramEntity offsets and lengths are measured in UTF-16 code units.
 type TelegramEntity struct {
-	Type   string `json:"type"`
-	Offset int    `json:"offset"`
-	Length int    `json:"length"`
+	Type     string `json:"type"`
+	Offset   int    `json:"offset"`
+	Length   int    `json:"length"`
+	URL      string `json:"url,omitempty"`
+	Language string `json:"language,omitempty"`
 }
 type ChatAction struct {
 	ChatID  int64  `json:"chat_id"`

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
 
@@ -204,35 +205,60 @@ func (s *Sender) renderDeliveryMessages(ctx context.Context, row registry.Delive
 	}
 	renderCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
-	parts, keyboard, err := s.renderDeliveryParts(renderCtx, row)
+	var parts []string
+	var formatted []SendMessage
+	var keyboard *TelegramKeyboard
+	var err error
+	final := row.Kind == "final_agent_message" || row.Kind == "turn_completed"
+	if final {
+		var message SendMessage
+		message, keyboard, err = s.renderFinalDeliveryMessage(renderCtx, row)
+		formatted = []SendMessage{message}
+	} else {
+		parts, keyboard, err = s.renderDeliveryParts(renderCtx, row)
+	}
 	if err != nil {
 		return nil, err
 	}
-	if len(parts) == 0 {
+	if (!final && len(parts) == 0) || (final && formatted[0].Text == "") {
 		return nil, errors.New("empty Telegram delivery")
 	}
 	presentation, err := s.deliveryPresentation(renderCtx, row)
 	if err != nil {
 		return nil, err
 	}
-	parts, err = sessionDeliveryParts(parts, presentation, isProgressDelivery(row.Kind))
-	if err != nil {
-		return nil, err
-	}
-	messages := make([]json.RawMessage, 0, len(parts))
-	for index, part := range parts {
-		message := SendMessage{ChatID: row.ChatID, TopicID: row.TopicID, Text: part, DisableNotification: isProgressDelivery(row.Kind)}
-		if row.Kind == "tool_progress_message" {
-			message.Entities = []TelegramEntity{{Type: "pre", Length: telegramTextLength(part)}}
+	if final {
+		limit, err := sessionDeliveryLimit(presentation)
+		if err != nil {
+			return nil, err
 		}
+		formatted = splitTelegramFormatted(formatted[0].Text, formatted[0].Entities, limit)
+	} else {
+		parts, err = sessionDeliveryParts(parts, presentation, isProgressDelivery(row.Kind))
+		if err != nil {
+			return nil, err
+		}
+		for _, part := range parts {
+			message := SendMessage{Text: part}
+			if row.Kind == "tool_progress_message" {
+				message.Entities = []TelegramEntity{{Type: "pre", Length: telegramTextLength(part)}}
+			}
+			formatted = append(formatted, message)
+		}
+	}
+	messages := make([]json.RawMessage, 0, len(formatted))
+	for index, message := range formatted {
+		message.ChatID, message.TopicID = row.ChatID, row.TopicID
+		message.DisableNotification = isProgressDelivery(row.Kind)
 		// Put controls after their complete explanation.
-		if index == len(parts)-1 {
+		if index == len(formatted)-1 {
 			message.Keyboard = keyboard
 		}
 		checkpoint := sessionDeliveryMessage{SendMessage: message}
 		if presentation.Name != "" {
 			checkpoint.SessionName, checkpoint.SessionMarker = presentation.Name, presentation.Marker
-			checkpoint.SessionBody = part
+			checkpoint.SessionBody = message.Text
+			checkpoint.SessionBodyEntities = append([]TelegramEntity(nil), message.Entities...)
 			checkpoint.SendMessage = formatSessionDeliveryMessage(checkpoint, presentation.MultiSession, row.Kind)
 		}
 		raw, err := json.Marshal(checkpoint)
@@ -242,6 +268,71 @@ func (s *Sender) renderDeliveryMessages(ctx context.Context, row registry.Delive
 		messages = append(messages, raw)
 	}
 	return messages, nil
+}
+
+// Render the final answer as one document before splitting it. The identity
+// prefix is plain text; only the redacted Result body is interpreted as Markdown.
+func (s *Sender) renderFinalDeliveryMessage(ctx context.Context, row registry.Delivery) (SendMessage, *TelegramKeyboard, error) {
+	text, keyboard, err := s.render(ctx, row)
+	if err != nil {
+		return SendMessage{}, nil, err
+	}
+	var event protocol.Event
+	if err := json.Unmarshal(row.Payload, &event); err != nil {
+		return SendMessage{}, nil, err
+	}
+	var result protocol.Result
+	if err := json.Unmarshal(event.Data, &result); err != nil {
+		return SendMessage{}, nil, err
+	}
+	body := strings.TrimSpace(result.Text)
+	if body == "" {
+		body = "Turn completed."
+	}
+	if s.options.Redactor != nil {
+		body = s.options.Redactor.Redact(body)
+	}
+	if !strings.HasSuffix(text, body) {
+		// A redaction rule may span the identity/body boundary. Preserve that
+		// complete redaction rather than guessing where its body now begins.
+		return SendMessage{Text: text}, keyboard, nil
+	}
+	prefix := strings.TrimSuffix(text, body)
+	rendered, entities := renderTelegramMarkdown(body)
+	if s.options.Redactor != nil {
+		// Markdown can join styled text or decode character references into a
+		// secret that was absent from its raw source. Changed text invalidates
+		// entity offsets, so retain the fully redacted answer as plain text.
+		if redacted := s.options.Redactor.Redact(rendered); redacted != rendered {
+			rendered, entities = redacted, nil
+		} else {
+			var safeEntities []TelegramEntity
+			for _, entity := range entities {
+				if entity.URL != "" && s.options.Redactor.Redact(entity.URL) != entity.URL {
+					continue
+				}
+				if entity.Language != "" && s.options.Redactor.Redact(entity.Language) != entity.Language {
+					entity.Language = ""
+				}
+				safeEntities = append(safeEntities, entity)
+			}
+			entities = safeEntities
+		}
+	}
+	message := SendMessage{Text: prefix + rendered}
+	if s.options.Redactor != nil {
+		// Keep rules spanning the identity and normalized answer effective too.
+		if redacted := s.options.Redactor.Redact(message.Text); redacted != message.Text {
+			message.Text = redacted
+			return message, keyboard, nil
+		}
+	}
+	prefixLength := telegramTextLength(prefix)
+	for _, entity := range entities {
+		entity.Offset += prefixLength
+		message.Entities = append(message.Entities, entity)
+	}
+	return message, keyboard, nil
 }
 
 func oversizedProgressDelivery(row registry.Delivery, chunks []registry.DeliveryChunk) bool {

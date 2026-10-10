@@ -31,9 +31,10 @@ type telegramSessionAliasesStore interface {
 // chunks acquire their session label when the user turns multisession on.
 type sessionDeliveryMessage struct {
 	SendMessage
-	SessionName   string `json:"_session_name,omitempty"`
-	SessionMarker string `json:"_session_marker,omitempty"`
-	SessionBody   string `json:"_session_body,omitempty"`
+	SessionName         string           `json:"_session_name,omitempty"`
+	SessionMarker       string           `json:"_session_marker,omitempty"`
+	SessionBody         string           `json:"_session_body,omitempty"`
+	SessionBodyEntities []TelegramEntity `json:"_session_body_entities,omitempty"`
 }
 
 func (s *Sender) skipInvisibleDelivery(ctx context.Context, row registry.Delivery) (bool, error) {
@@ -97,9 +98,9 @@ func sessionDeliveryParts(parts []string, presentation registry.TelegramSessionP
 	if presentation.Name == "" {
 		return parts, nil
 	}
-	limit := 4000 - telegramTextLength(sessionMessageHeader(presentation.Name, presentation.Marker)) - 2
-	if limit < 128 {
-		return nil, errors.New("Telegram session name is too long for a message header")
+	limit, err := sessionDeliveryLimit(presentation)
+	if err != nil {
+		return nil, err
 	}
 	var chunks []string
 	for _, part := range parts {
@@ -112,9 +113,41 @@ func sessionDeliveryParts(parts []string, presentation registry.TelegramSessionP
 	return chunks, nil
 }
 
+func sessionDeliveryLimit(presentation registry.TelegramSessionPresentation) (int, error) {
+	if presentation.Name == "" {
+		return 4000, nil
+	}
+	limit := 4000 - telegramTextLength(sessionMessageHeader(presentation.Name, presentation.Marker)) - 2
+	if limit < 128 {
+		return 0, errors.New("Telegram session name is too long for a message header")
+	}
+	return limit, nil
+}
+
 func formatSessionDeliveryMessage(checkpoint sessionDeliveryMessage, multiSession bool, kind string) SendMessage {
 	message := checkpoint.SendMessage
 	message.Text = checkpoint.SessionBody
+	bodyEntities := checkpoint.SessionBodyEntities
+	if bodyEntities == nil {
+		// Checkpoints from older releases only stored the formatted request.
+		// Recover body-relative entities without retaining the session header.
+		bodyOffset := 0
+		if strings.HasSuffix(checkpoint.Text, checkpoint.SessionBody) {
+			bodyOffset = telegramTextLength(strings.TrimSuffix(checkpoint.Text, checkpoint.SessionBody))
+		}
+		bodyLength := telegramTextLength(checkpoint.SessionBody)
+		for _, entity := range checkpoint.Entities {
+			if entity.Offset >= bodyOffset && entity.Offset+entity.Length <= bodyOffset+bodyLength {
+				entity.Offset -= bodyOffset
+				bodyEntities = append(bodyEntities, entity)
+			}
+		}
+		if len(bodyEntities) == 0 && kind == "tool_progress_message" {
+			bodyEntities = []TelegramEntity{{Type: "pre", Length: bodyLength}}
+		}
+	}
+	// Keep the checkpoint's offsets immutable: a retry may add or remove the
+	// header, and returning entities that alias it would apply the offset twice.
 	message.Entities = nil
 	headerLength := 0
 	if multiSession {
@@ -124,8 +157,9 @@ func formatSessionDeliveryMessage(checkpoint sessionDeliveryMessage, multiSessio
 		message.Entities = append(message.Entities, TelegramEntity{Type: "bold", Length: headerLength})
 		headerLength += 2
 	}
-	if kind == "tool_progress_message" {
-		message.Entities = append(message.Entities, TelegramEntity{Type: "pre", Offset: headerLength, Length: telegramTextLength(checkpoint.SessionBody)})
+	for _, entity := range bodyEntities {
+		entity.Offset += headerLength
+		message.Entities = append(message.Entities, entity)
 	}
 	return message
 }
