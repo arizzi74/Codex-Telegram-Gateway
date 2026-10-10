@@ -773,16 +773,20 @@ A non-command text message:
 
 1. Resolve selected Telegram Binding.
 2. Reject if no selected Session.
-3. Persist a `start_turn` command targeting that Session.
+3. If that Session has an active turn, persist `steer` with its exact
+   `expected_turn_id`; otherwise persist `start_turn`.
 4. Dispatch asynchronously.
 
 Default behavior while the Session is busy:
 
 ```text
-queue for next turn
+steer the active turn
 ```
 
-Do not silently reinterpret ordinary messages as `turn/steer`.
+This is the same behavior as `/tgsteer`, including its stale-turn checks.
+Replies to pending questions and session-creation input are handled first.
+Images use the session and active turn frozen before their download; if that
+turn ends or changes, reject the steering request rather than starting a turn.
 
 Telegram reply:
 
@@ -790,11 +794,8 @@ Telegram reply:
 Queued for auth-fix.
 ```
 
-If idle:
-
-```text
-Sent to auth-fix.
-```
+If idle, no separate acknowledgement is sent; typing and temporary progress
+show that the new turn is starting.
 
 ## 10.4 Callback buttons
 
@@ -1820,7 +1821,8 @@ Different Sessions MAY run concurrently.
 
 Within one Session:
 
-- ordinary `start_turn` commands queue,
+- `start_turn` commands queue; ordinary Telegram messages use this operation
+  only when no active turn was found at routing time,
 - `steer` addresses the active turn,
 - `interrupt` addresses the active turn,
 - approval response addresses a specific pending Codex request.
@@ -3093,9 +3095,13 @@ Same stale-turn semantics as steering.
 
 ## AT-16 — Queue serialization
 
-Two ordinary messages arrive while one turn is running.
+Two explicit `start_turn` commands arrive while one turn is running.
 
 They execute FIFO after the current turn, never concurrently in the same Session.
+
+Ordinary Telegram messages instead steer the exact active turn, without joining
+the next-turn queue. Messages routed while idle still use `start_turn` and queue
+in order if a turn starts before dispatch.
 
 ## AT-17 — Cross-session concurrency
 

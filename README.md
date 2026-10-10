@@ -226,6 +226,8 @@ The bot authorizes only the numeric `WLID` in its private `.botsecrets` file.
 Changing a Telegram username does not grant access. To use the bot, send
 `/tgstart`, then `/tginstances` or `/tgsessions` and select a session.
 Use `/tgsessions` to select a session or create one with **New session**.
+Ordinary messages and images steer the session's active turn automatically;
+when the session is idle, they start a new turn.
 Gateway commands begin with `/tg`: `/tgstatus`, `/tgdeletesession`,
 `/tglastmessages`, `/tghistory`, `/tgmultisession`, `/tgdisconnect`, `/tgsteer`,
 `/tginterrupt`, `/tgquestions`, and `/tginput`. Telegram's initial
@@ -255,8 +257,9 @@ Send a photo or a JPEG, PNG, WebP or GIF image file to the selected session,
 with an optional caption. Images can be up to 10 MiB; both the gateway and
 worker must support image input (v0.5.13 or later).
 
-Ordinary messages submit turns to the selection frozen when each message is
-accepted, without a separate “Queued for…” acknowledgement. Codex's commentary
+Ordinary messages target the selection frozen when each message is accepted.
+They steer its active turn, with the same acknowledgement as `/tgsteer`, or
+start a new turn when idle without a separate acknowledgement. Codex's commentary
 and tool calls appear temporarily while the turn runs. The latest tool call
 appears in a monospace message that each subsequent tool call replaces.
 Temporary messages are removed after the final response is delivered. Switching

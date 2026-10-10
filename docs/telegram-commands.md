@@ -19,7 +19,7 @@ menu names, so `/debug_config` is the menu spelling of `/debug-config`; both wor
 | `/tgmultisession [on\|off]` | Toggle messages from all sessions, or explicitly enable/disable them. |
 | `/tgdisconnect` | Clear the selection. |
 | `/tgdeletesession [runtime]` | Choose a Codex session to delete while keeping its working directory and files. |
-| `/tgsteer TEXT` | Guide the exact active turn; also works as an image caption, with optional text. |
+| `/tgsteer TEXT` | Explicitly guide the exact active turn; ordinary messages do this automatically while a turn is active. Also works as an image caption, with optional text. |
 | `/tginterrupt` | Interrupt the exact active turn. |
 | `/tgquestions`, `/tginput` | List pending questions and approvals across all sessions; open one to answer without changing the selected session. |
 | `/tginput APPROVAL_ID QUESTION_ID ANSWER` | Answer an input request; replying to its message is easier. |
@@ -193,11 +193,13 @@ The gateway never silently redirects a failed command to a different chat.
 
 After selecting a session, send a photo or upload an image as a file. JPEG,
 PNG, WebP and GIF files up to 10 MiB are supported. A caption accompanies the
-image as prompt text; an image without a caption also starts a turn. To send an
-image to the currently running turn, use `/tgsteer` as its caption, optionally
-followed by your instructions: `/tgsteer use this screenshot instead`. Both the
-image and instructions are sent to that turn. Steering requires an active turn;
-it does not start a new one if the original turn ends during the download.
+image as prompt text; an image without a caption is also accepted. While a turn
+is active, the image and any instructions automatically steer that turn. When
+the session is idle, they start a new turn. You can also use `/tgsteer` as the
+caption, optionally followed by your instructions:
+`/tgsteer use this screenshot instead`. Steering requires an active turn;
+it does not start a new one or target a replacement turn if the original turn
+ends during the download.
 Other captions beginning with `/` remain prompt text; send those commands
 separately.
 
@@ -440,7 +442,13 @@ by forum topic; message routing still uses the current topic.
 
 ## Temporary progress messages
 
-Plain prompts are accepted without a “Queued for…” reply. The typing indicator
+Plain messages automatically steer the addressed session's active turn. When
+the session is idle, they start a new turn. This also applies to session shortcuts
+such as `/_my_project message`. Replies to pending questions and session-creation
+steps keep their usual meaning; explicit slash commands keep their own behavior.
+
+Prompts that start a new turn are accepted without a “Queued for…” reply;
+steering receives the same acknowledgement as `/tgsteer`. The typing indicator
 shows that work is pending or running. As Codex completes each commentary
 message, Telegram silently updates a temporary message with an hourglass icon.
 Each update replaces the previous commentary, so only the latest one is visible.

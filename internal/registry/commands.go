@@ -438,6 +438,12 @@ func acceptTextCommand(ctx context.Context, tx *dbTx, in IncomingUpdate, operati
 	if err != nil {
 		return AcceptResult{}, err
 	}
+	// Ordinary prompts guide the exact active turn instead of waiting in the
+	// next-turn queue. Resolve this after question replies and wizard input have
+	// been handled, and use the frozen target for downloaded images.
+	if operation == protocol.StartTurn && autoSteerTelegramAction(in.Action) && target.activeTurnID != "" {
+		operation = protocol.Steer
+	}
 	if operation == protocol.StartTurn || operation == protocol.Steer {
 		if strings.TrimSpace(in.Text) == "" && len(in.Images) == 0 {
 			return AcceptResult{}, ErrTelegramTarget
@@ -464,6 +470,15 @@ func acceptTextCommand(ctx context.Context, tx *dbTx, in IncomingUpdate, operati
 		return AcceptResult{}, err
 	}
 	return AcceptResult{View: "queued", SessionID: target.sessionID.String(), RuntimeID: target.runtimeID.String(), CommandID: command.ID}, nil
+}
+
+func autoSteerTelegramAction(action string) bool {
+	switch strings.ToLower(strings.TrimSpace(action)) {
+	case "", "text", "session_alias":
+		return true
+	default:
+		return false
+	}
 }
 
 func acceptInput(ctx context.Context, tx *dbTx, in IncomingUpdate) (AcceptResult, error) {

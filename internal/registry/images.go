@@ -66,7 +66,8 @@ func resolveImageOrCurrentRoute(ctx context.Context, tx *dbTx, in IncomingUpdate
 	if current.workerID != frozen.workerID || current.runtimeID != frozen.runtimeID || current.generation != frozen.generation || current.threadID != frozen.threadID {
 		return routeTarget{}, ErrTelegramTarget
 	}
-	if strings.EqualFold(strings.TrimSpace(in.Action), "steer") && current.activeTurnID != frozen.activeTurnID {
+	steering := strings.EqualFold(strings.TrimSpace(in.Action), "steer") || (autoSteerTelegramAction(in.Action) && frozen.activeTurnID != "")
+	if steering && current.activeTurnID != frozen.activeTurnID {
 		return routeTarget{}, ErrStaleTurn
 	}
 	return frozen, nil
