@@ -15,9 +15,10 @@
   </header>
   <div id="auth-warning"></div>
   <section id="auth" class="card">
-    <h2>Passkey access</h2>
-    <p>Use a personal passkey to administer this gateway.</p>
+    <h2 id="auth-title">Passkey access</h2>
+    <p id="auth-description">Use a personal passkey to administer this gateway.</p>
     <button id="login">Continue with passkey</button>
+    <button id="password-login" class="secondary" hidden>Use password</button>
     <details>
       <summary>First administrator?</summary>
       <label>One-time bootstrap token <input id="bootstrap-token" autocomplete="off" spellcheck="false"></label>
@@ -69,6 +70,15 @@
     <section class="card" aria-labelledby="browser-session-heading">
       <div class="row"><div><h2 id="browser-session-heading">Browser sessions</h2><p>Review signed-in browsers and end access you no longer need. Browser labels are approximate.</p></div><button id="logout-everywhere" class="danger">Sign out everywhere</button></div>
       <div id="browser-sessions"></div>
+    </section>
+    <section class="card" aria-labelledby="password-heading">
+      <h2 id="password-heading">Password sign-in</h2>
+      <p>Optionally allow a gateway username and password alongside your passkeys.</p>
+      <p id="password-settings-status" class="muted" role="status">Loading password settings…</p>
+      <div class="password-settings-actions">
+        <button id="password-edit" class="secondary" hidden>Enable password sign-in</button>
+        <button id="password-disable" class="danger" hidden>Disable password sign-in</button>
+      </div>
     </section>
   </section>
 </main>

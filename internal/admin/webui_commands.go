@@ -94,7 +94,7 @@ func (s *Server) webuiCommands(w http.ResponseWriter, r *http.Request) {
 			response.Text = strings.Join(lines, "\n")
 		}
 	} else {
-		dashboard, err := s.store.AdminDashboardSnapshot(r.Context())
+		dashboard, err := s.store.WebUIInventorySnapshot(r.Context())
 		if err != nil {
 			fail(w, err)
 			return

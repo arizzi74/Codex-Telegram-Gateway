@@ -68,8 +68,17 @@ func TestAdminSessionMetadataInventoryAndRevocationHTTP(t *testing.T) {
 	if r.Code != 204 {
 		t.Fatalf("revoke current: %d %s", r.Code, r.Body.String())
 	}
-	if len(r.Result().Cookies()) != 2 {
-		t.Fatal("current-browser revocation did not clear cookies")
+	clearedAdmin, renewedCSRF := false, ""
+	for _, c := range r.Result().Cookies() {
+		if c.Name == adminCookie && c.MaxAge < 0 {
+			clearedAdmin = true
+		}
+		if c.Name == csrfCookie {
+			renewedCSRF = c.Value
+		}
+	}
+	if !clearedAdmin || renewedCSRF == "" {
+		t.Fatal("current-browser revocation did not retire authentication and restore sign-in CSRF")
 	}
 	if call("GET", "/tgw/api/v1/admin/session", "", token).Code != 401 {
 		t.Fatal("revoked cookie accepted")
@@ -121,7 +130,7 @@ func TestSensitiveAdminEndpointsRequireFreshPasskeyHTTP(t *testing.T) {
 				Code    string `json:"code"`
 				Message string `json:"message"`
 			}
-			if r.Code != 403 || json.Unmarshal(r.Body.Bytes(), &body) != nil || body.Code != "reauthentication_required" || body.Message != "Confirm with your passkey to continue." {
+			if r.Code != 403 || json.Unmarshal(r.Body.Bytes(), &body) != nil || body.Code != "reauthentication_required" || body.Message != "Sign in again to continue." {
 				t.Fatalf("gate: %d %s", r.Code, r.Body.String())
 			}
 		})

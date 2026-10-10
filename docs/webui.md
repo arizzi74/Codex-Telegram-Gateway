@@ -1,11 +1,13 @@
 # Codex web interface
 
-Open `https://gateway.example.com/tgw/webui/` and sign in with the gateway's admin passkey. Select a worker/session in the sidebar. On a phone, use the menu button to open the session picker. Admin enrollment and worker management remain at `/tgw/admin/`.
+Open `https://gateway.example.com/tgw/webui/` and sign in with the gateway's admin passkey, or with its username/password if password access has been enabled in the [administrator console](admin.md#optional-username-and-password). Select a worker/session in the sidebar. On a phone, use the menu button to open the session picker. Admin enrollment and worker management remain at `/tgw/admin/`.
 
 The sidebar reserves its space for sessions. **Settings** at the bottom opens a dialog with draft recovery, notification controls, and **Open operations console**. Close it with its close button, Escape, or a tap outside the dialog. On phones, opening Settings closes the session drawer and keeps the keyboard closed.
 
 Workers appear in the sidebar even before they have a session. Use **＋** beside
 a worker's name to create its first session or another session on that worker.
+Revoked workers and their sessions are hidden; offline workers that are still
+enabled remain visible. Revocation updates the sidebar through the live feed.
 The dialog asks for the session name first and fills the working-directory path
 with `~/CODEX/session_name`, replacing spaces in the name with underscores.
 The path remains editable; `~` refers to the worker service user's home directory.
@@ -25,8 +27,9 @@ The existing Go gateway serves the interface and relays its authenticated connec
 
 ## Sign-in and recovery
 
-Browser logins expire eight hours after the last successful passkey sign-in.
-Five minutes before expiry, **Continue with passkey** lets you renew access in
+Browser logins expire eight hours after the last successful sign-in.
+Five minutes before expiry, **Continue with passkey**, or password sign-in when
+configured, lets you renew access in
 place. If access expires, the interface locks and removes private conversation
 data. Signing in again restores the selected conversation and reading position;
 running turns continue on the worker. On phones, returning to the foreground

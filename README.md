@@ -2,7 +2,8 @@
 
 A Go gateway and Linux/macOS worker with embedded SQLite storage for controlling local
 Codex sessions through an allowlisted Telegram bot or a responsive browser interface.
-The gateway includes a passkey-authenticated admin console. Workers supervise
+The gateway includes an admin console with passkeys and optional username/password
+sign-in. Workers supervise
 private Codex app-server processes and support local terminal attachment.
 
 The browser interface displays Markdown and Mermaid diagrams on desktop and
@@ -128,7 +129,8 @@ enrollment, and manual updates.
 ## Components
 
 - **Gateway:** receives Telegram updates, manages worker connections, and serves
-  the passkey-authenticated admin console and browser Codex interface.
+  the admin console and browser Codex interface, with passkeys and optional
+  username/password authentication.
 - **Registry:** stores routing, commands, events, approvals, and Telegram
   delivery state in a local SQLite file.
 - **Worker:** runs on a development machine, supervises Codex app servers, and
@@ -148,8 +150,12 @@ Workers with no sessions still appear in the sidebar. Use **＋** beside a worke
 to create a session: enter its name and edit the suggested
 `~/CODEX/session_name` project path if needed. Spaces in the name become
 underscores in the suggested path; existing project directories can also be used.
+Revoked workers and their sessions are hidden from the sidebar and Telegram
+session pickers, while their records remain in the admin console.
 
-Passkey sign-in can be renewed in place before its eight-hour expiry. After
+Browser sign-in can be renewed in place before its eight-hour expiry. Optional
+username/password access is configured in the [admin console](docs/admin.md#optional-username-and-password)
+and works in both browser interfaces alongside passkeys. After
 unlocking, the interface restores the selected session and reading position;
 running work continues. Optional encrypted text-draft recovery retains a copy
 for 30 minutes. The admin console lists browser logins and can revoke access.

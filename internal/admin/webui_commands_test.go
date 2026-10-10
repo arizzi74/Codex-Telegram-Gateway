@@ -130,11 +130,14 @@ func TestWebUICommandsUpdateOfflineWorkersAndExposeRedactedStatus(t *testing.T) 
 	for _, command := range []string{"tgstatus", "tginstances"} {
 		w := webUICommandRequestForTest(server, "GET", "/tgw/api/v1/webui/commands?command="+command, "", token, "", "", "")
 		var response webUICommandResponse
-		if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &response) != nil || len(response.Instances) != 2 || len(response.Workers) != 1 || response.Workers[0].State != "pending" || response.Workers[0].RequestID != requestID {
+		if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &response) != nil || len(response.Instances) != 1 || len(response.Workers) != 1 || response.Workers[0].State != "pending" || response.Workers[0].RequestID != requestID {
 			t.Fatalf("status response: %d %s", w.Code, w.Body.String())
 		}
 		if strings.Contains(w.Body.String(), "private-sentinel") || strings.Contains(w.Body.String(), "token_hash") || strings.Contains(w.Body.String(), "private-worker-token") {
 			t.Fatalf("status leaked private fields: %s", w.Body.String())
+		}
+		if strings.Contains(w.Body.String(), "Disabled") {
+			t.Fatalf("status exposed revoked worker: %s", w.Body.String())
 		}
 	}
 	w := webUICommandRequestForTest(server, "GET", "/tgw/api/v1/webui/commands", "", token, "", "", "")

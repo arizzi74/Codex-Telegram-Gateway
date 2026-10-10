@@ -77,6 +77,38 @@ func (s *Store) AdminDashboardSnapshot(ctx context.Context) (AdminDashboard, err
 	return AdminDashboard{Workers: workers, Runtimes: runtimes, Sessions: sessions, PendingApprovals: approvals, QueuedCommands: commands}, nil
 }
 
+// WebUIInventorySnapshot keeps enabled workers visible even before their first
+// session or while offline. Revoked workers and their retained records belong
+// only to the admin console's operational inventory.
+func (s *Store) WebUIInventorySnapshot(ctx context.Context) (AdminDashboard, error) {
+	dashboard, err := s.AdminDashboardSnapshot(ctx)
+	if err != nil {
+		return AdminDashboard{}, err
+	}
+	enabled := make(map[string]bool, len(dashboard.Workers))
+	workers := make([]AdminWorker, 0, len(dashboard.Workers))
+	for _, worker := range dashboard.Workers {
+		if worker.Enabled {
+			enabled[worker.ID.String()] = true
+			workers = append(workers, worker)
+		}
+	}
+	runtimes := make([]protocol.Runtime, 0, len(dashboard.Runtimes))
+	for _, runtime := range dashboard.Runtimes {
+		if enabled[runtime.WorkerID] {
+			runtimes = append(runtimes, runtime)
+		}
+	}
+	sessions := make([]AdminSession, 0, len(dashboard.Sessions))
+	for _, session := range dashboard.Sessions {
+		if enabled[session.WorkerID] {
+			sessions = append(sessions, session)
+		}
+	}
+	dashboard.Workers, dashboard.Runtimes, dashboard.Sessions = workers, runtimes, sessions
+	return dashboard, nil
+}
+
 func (s *Store) adminWorkerSnapshot(ctx context.Context) ([]AdminWorker, error) {
 	rows, err := s.pool.Query(ctx, `SELECT worker_id, name, COALESCE(hostname, ''), os, arch,
         COALESCE(worker_version, ''), enabled, connectivity, connection_id,

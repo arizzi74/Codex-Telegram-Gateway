@@ -83,4 +83,25 @@ func TestWebUIActivityRefreshesZeroSessionWorkerInventory(t *testing.T) {
 	if runtimeReady.InventoryRevision == connected.InventoryRevision {
 		t.Fatal("first runtime did not update zero-session inventory")
 	}
+	assertInventory := func(path string, workers, runtimes int) {
+		t.Helper()
+		response := webUICommandRequestForTest(console, "GET", path, "", token, "", "", "")
+		var inventory struct {
+			Workers  []registry.AdminWorker `json:"workers"`
+			Runtimes []json.RawMessage      `json:"runtimes"`
+		}
+		if response.Code != http.StatusOK || json.Unmarshal(response.Body.Bytes(), &inventory) != nil || inventory.Workers == nil || inventory.Runtimes == nil || len(inventory.Workers) != workers || len(inventory.Runtimes) != runtimes {
+			t.Fatalf("inventory %s: %d %s", path, response.Code, response.Body.String())
+		}
+	}
+	assertInventory("/tgw/api/v1/webui/sessions", 1, 1)
+	if err := store.RevokeWorker(ctx, worker.ID); err != nil {
+		t.Fatal(err)
+	}
+	revoked := read()
+	if revoked.InventoryRevision == runtimeReady.InventoryRevision || revoked.InventoryRevision != initial.InventoryRevision {
+		t.Fatal("revocation did not remove the worker and runtime from live inventory")
+	}
+	assertInventory("/tgw/api/v1/webui/sessions", 0, 0)
+	assertInventory("/tgw/api/v1/admin/dashboard", 1, 1)
 }

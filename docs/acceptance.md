@@ -10,6 +10,28 @@ Database integration tests now run automatically against fresh temporary SQLite
 files. Historical entries below describe the release and backend tested on their
 recorded date; PostgreSQL outage evidence applies to the retired backend.
 
+## Optional password access and worker visibility (2026-10-10)
+
+Isolated SQLite, HTTP and Playwright checks verify:
+
+- Revoked workers and their sessions disappear from Web UI and Telegram
+  pickers. Live inventory revisions update connected browsers; enabled empty
+  and offline workers stay visible, and admin records remain available.
+- Password access starts disabled and can be configured only by an existing,
+  recently authenticated owner. Existing passkeys and browser sessions survive
+  the database upgrade, and at least one recovery passkey must remain.
+- Both authentication methods share browser-session expiry, revocation and
+  push/draft ownership. Password replacement and disable invalidate old password
+  sessions; transaction checks fence concurrent credential or session changes.
+- Password APIs enforce origin, CSRF, input and hash-cost bounds, per-client and
+  global login budgets, and hashing admission limits without exposing secrets.
+- Desktop/mobile password dialogs support renewal, cancellation, current CSRF
+  cookies, confirmation, input clearing and keyboard-aware sizing. Ambiguous
+  failed mutations are not automatically replayed.
+
+Credentials and worker records used by these tests are synthetic. Password
+access is not automatically enabled on a deployed gateway.
+
 ## One-use worker enrollment (2026-10-02)
 
 Isolated SQLite, HTTPS installer/gateway integration and Playwright checks verify:
@@ -170,7 +192,7 @@ of the verification turn remains gated on delivery of that turn's final answer.
 | Telegram authorization, secret and body bound | `Webhook.ServeHTTP` checks the webhook secret before JSON parsing, caps the body at 1 MiB, enforces numeric user/chat allowlists, and writes through the transactional registry acceptance path. Gateway/auth tests cover rejection and parsing. | Verified |
 | Worker credentials and WSS identity | Enrollment tokens are 32 random bytes with only SHA-256 hashes stored; verification is constant-time. Worker configuration accepts only an absolute `wss://` gateway URL; Hub validates the bearer token before hello, binds it to one worker ID, disables compression, caps frames, and rate-limits failed authentication. | Verified |
 | Local worker confinement | Worker requires a private token file and state file, only dials an absolute `wss://` endpoint, has no listener, and canonicalizes allowed workspace roots before `/new` or resumed work. Auth/config/runtime tests cover traversal, symlink escape, public listener rejection, and rejected workspace. | Verified |
-| Passkey-only administrator | `internal/admin` requires the exact configured HTTPS origin, derives its RP ID from that origin's hostname, and requires discoverable resident credentials and user verification. Bootstrap and ceremony/session secrets are random, hashed at rest, short-lived, one-use, and bound to Strict secure cookies. Mutations use exact Origin plus double-submit CSRF; CSP permits self assets only. `TestAdminBootstrapCeremonyReplayAndExpiryIntegration` and `TestP256PasskeyAssertionRequiresUserVerification` cover durable replay/expiry and cryptographic UV enforcement. | Verified by the full HTTP registration/login test with a synthetic P-256 authenticator; personal enrollment remains an operator setup step. |
+| Administrator authentication | `internal/admin` requires the exact configured HTTPS origin and user-verified resident passkeys for initial owner setup. Optional username/password access is configured by a recently authenticated owner and uses salted Argon2id hashes, bounded hashing concurrency and separate login budgets. Both methods share secure, revocable, eight-hour browser sessions. Mutations use exact Origin plus double-submit CSRF; CSP permits self assets only. | Verified by HTTP passkey registration/login and password login/configuration tests; personal enrollment remains an operator setup step. |
 | Process and proxy controls | Config rejects non-loopback gateway listeners. The systemd gateway unit runs a dedicated unprivileged account; worker units run as the local user. Nginx is the TLS reverse-proxy boundary. | Verified on the Linux deployment; macOS service template/installer is supplied and cross-built, without a live macOS host. |
 | Release integrity | Release script uses `CGO_ENABLED=0`, `-trimpath`, archives README/LICENSE/examples/deploy, and writes archive checksums. The 2026-09-13 local CI job verified all ten archives and their inner/outer checksums. | Verified locally; hosted workflow untriggered because no remote is configured. |
 

@@ -19,7 +19,8 @@ func (s *Server) session(w http.ResponseWriter, r *http.Request) {
 		method(w)
 		return
 	}
-	if _, ok := s.requireAuth(w, r, false); !ok {
+	credential, ok := s.requireAuth(w, r, false)
+	if !ok {
 		return
 	}
 	cookie, _ := r.Cookie(adminCookie)
@@ -33,6 +34,7 @@ func (s *Server) session(w http.ResponseWriter, r *http.Request) {
 		"owner_id":      base64.RawURLEncoding.EncodeToString(ownerID[:]),
 		"authenticated": true, "session_id": info.ID, "server_time": time.Now().UTC(),
 		"expires_at": info.ExpiresAt, "reauthenticated_at": info.ReauthenticatedAt,
+		"authentication_method": credential.Kind,
 	})
 }
 
@@ -48,7 +50,7 @@ func (s *Server) requireFreshAuth(w http.ResponseWriter, r *http.Request) (regis
 		return registry.AdminCredential{}, false
 	}
 	if !freshAuthentication(info.ReauthenticatedAt, time.Now()) {
-		writeJSON(w, http.StatusForbidden, map[string]string{"code": "reauthentication_required", "message": "Confirm with your passkey to continue."})
+		writeJSON(w, http.StatusForbidden, map[string]string{"code": "reauthentication_required", "message": "Sign in again to continue."})
 		return registry.AdminCredential{}, false
 	}
 	return credential, true
@@ -119,6 +121,9 @@ func (s *Server) browserSession(w http.ResponseWriter, r *http.Request) {
 	}
 	if target == nil || *target == info.ID {
 		s.clearSession(w)
+		// This screen offers sign-in without a navigation after revocation.
+		// Issue a fresh CSRF cookie for either authentication method.
+		s.setCSRF(w)
 	}
 	writeJSON(w, http.StatusNoContent, nil)
 }

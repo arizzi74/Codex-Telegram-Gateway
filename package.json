@@ -3,7 +3,7 @@
   "private": true,
   "scripts": {
     "build:mermaid": "node scripts/build-mermaid.mjs",
-    "test:browser": "npm run build:mermaid -- --check && node scripts/test-admin-ui.cjs && node scripts/test-webui.cjs && node scripts/test-webui-mermaid.cjs && node scripts/test-webui-auth.cjs && node scripts/test-webui-drafts.cjs && node scripts/test-webui-notifications.cjs && node scripts/test-site.cjs",
+    "test:browser": "npm run build:mermaid -- --check && node scripts/test-admin-ui.cjs && node scripts/test-password-auth.cjs && node scripts/test-webui.cjs && node scripts/test-webui-mermaid.cjs && node scripts/test-webui-auth.cjs && node scripts/test-webui-drafts.cjs && node scripts/test-webui-notifications.cjs && node scripts/test-site.cjs",
     "screenshots": "node scripts/capture-site-screenshots.cjs"
   },
   "devDependencies": {

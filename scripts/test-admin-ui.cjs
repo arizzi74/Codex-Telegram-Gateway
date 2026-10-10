@@ -68,6 +68,8 @@ const data = {
       let status = 200;
       if (request.method() !== 'GET') mutations.push({ path: url.pathname, method: request.method(), body: request.postData(), csrf: request.headers()['x-csrf-token'] });
       if (url.pathname.endsWith('/dashboard')) { body = data; status = dashboardStatus; dashboardReads++; }
+      else if (url.pathname.endsWith('/login/options')) body = { passkey: true, password: false };
+      else if (url.pathname.endsWith('/admin/password')) body = { enabled: false, username: '' };
       else if (url.pathname.endsWith('/admin/session')) {
         status = loginStatus;
         const now = await page.evaluate(() => Date.now());
@@ -365,7 +367,7 @@ const data = {
       await page.evaluate(() => sessionAuth.verify('test-warning'));
       const finishStarted = new Promise(resolve => { markFinishStarted = resolve; });
       const finishesBefore = loginFinishCalls;
-      await page.locator('.session-auth-banner button').click();
+      await page.locator('.session-auth-banner button:not(.session-auth-password)').click();
       await finishStarted;
       const beforePoll = dashboardReads;
       dashboardStatus = 401;

@@ -536,7 +536,7 @@
   async function fetchJSON(path, signal = AbortSignal.timeout(15000)) {
     const authGeneration = state.authGeneration;
     const response = await fetch(path, { credentials: 'same-origin', cache: 'no-store', signal });
-    if (response.status === 401) { if (authGeneration === state.authGeneration) expire(); throw new Error('Sign in with your passkey to continue.'); }
+    if (response.status === 401) { if (authGeneration === state.authGeneration) expire(); throw new Error('Sign in to continue.'); }
     if (!response.ok) throw new Error('Gateway request failed (' + response.status + '). Try again shortly.');
     return response.json();
   }
@@ -602,11 +602,17 @@
     for (const id of ['transcript', 'composer', 'empty', 'disconnect', 'jump-latest']) $(id).hidden = true;
     $('auth').hidden = false;
     $('auth-title').textContent = authRestore ? 'Unlock your sessions' : 'Sign in to Codex';
-    $('auth-description').textContent = authRestore ? 'Your running work continues. Use your passkey to return to the same conversation.' : 'Use your gateway passkey to open your sessions.';
+    updateAuthDescription();
     showSessions(false);
     notice();
     connection('disconnected', 'Sign in required');
     updateControls();
+  }
+  function updateAuthDescription() {
+    const password = sessionAuth?.hasPassword();
+    $('auth-description').textContent = authRestore
+      ? password ? 'Your running work continues. Sign in to return to the same conversation.' : 'Your running work continues. Use your passkey to return to the same conversation.'
+      : password ? 'Use your gateway passkey or password to open your sessions.' : 'Use your gateway passkey to open your sessions.';
   }
   function renderSessions() {
     const query = $('session-search').value.toLocaleLowerCase().trim();
@@ -2119,8 +2125,9 @@
   sessionAuth = window.CodexSessionAuth.create({
     mount: $('workspace'), isLocked: () => !state.authenticated && !$('auth').hidden,
     onExpired: lockAuthentication,
-    onRenewing: busy => {
-      $('auth-login').disabled = busy; $('auth-login').textContent = busy ? 'Waiting for passkey…' : 'Continue with passkey';
+    onRenewing: (busy, method) => {
+      $('auth-login').disabled = busy; $('auth-login').textContent = busy && method !== 'password' ? 'Waiting for passkey…' : 'Continue with passkey';
+      $('auth-password').disabled = busy;
       if (!busy && authRotationPending) {
         authRotationPending = false;
         // A failed finish can leave either the old or new cookie in place.
@@ -2132,6 +2139,11 @@
           if (state.selected && !state.connected && !state.loading && !state.stopped) reconnect();
         }).catch(error => notice(error.message, 'connection'));
       }
+    },
+    onOptions: options => {
+      $('auth-password').hidden = !options.password;
+      $('auth-manage').textContent = options.password ? 'Manage sign-in' : 'Manage passkeys';
+      updateAuthDescription();
     },
     onBeforeRotate: () => {
       if (!state.authenticated) return;
@@ -2214,5 +2226,6 @@
   });
   $('discard-drafts').addEventListener('click', () => { recoveredDrafts = null; $('draft-recovery-offer').hidden = true; draftRecovery.clear(); });
   $('auth-login').addEventListener('click', () => sessionAuth.login().catch(() => {}));
+  $('auth-password').addEventListener('click', () => sessionAuth.login('password').catch(() => {}));
   sessionAuth.verify('initial').catch(error => { lockAuthentication('unavailable'); $('auth-status').textContent = error.message; });
 })();

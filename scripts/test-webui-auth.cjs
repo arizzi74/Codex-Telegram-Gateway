@@ -17,6 +17,7 @@ const selected = { session_id: sessionID, codex_thread_id: 'thread', worker_name
   await context.route('https://auth.test/**', async route => {
     const url = new URL(route.request().url());
     const json = (value, status = 200, headers = {}) => route.fulfill({ status, headers, contentType: 'application/json', body: JSON.stringify(value) });
+    if (url.pathname === '/tgw/api/v1/admin/login/options') return json({ passkey: true, password: false });
     if (url.pathname === '/tgw/api/v1/admin/session') {
       sessionChecks++;
       return json({ authenticated: true, owner_id: 'owner', session_id: 'login-' + loginID, server_time: new Date(now).toISOString(), expires_at: new Date(expiry).toISOString(), reauthenticated_at: new Date(now).toISOString() }, auth && now < expiry ? 200 : 401);
@@ -92,7 +93,7 @@ const selected = { session_id: sessionID, codex_thread_id: 'thread', worker_name
     now += 300050; await page.clock.fastForward(300050);
     await page.waitForSelector('.session-auth-banner:not([hidden])');
     await page.evaluate(() => { window.passkeyMode = 'cancel'; });
-    await page.locator('.session-auth-banner button').click();
+    await page.locator('.session-auth-banner button:not(.session-auth-password)').click();
     await page.waitForFunction(() => document.querySelector('.session-auth-status').textContent.includes('cancelled'));
     assert.equal(finishCount, 0, 'Cancelling a passkey does not renew authentication');
     assert.equal(await page.locator('#prompt').inputValue(), 'An unsent private draft');
@@ -103,14 +104,14 @@ const selected = { session_id: sessionID, codex_thread_id: 'thread', worker_name
     finishFails = true;
     const socketsBeforeFailure = await viewerCount();
     await page.evaluate(() => { window.passkeyMode = 'success'; });
-    await page.locator('.session-auth-banner button').click();
+    await page.locator('.session-auth-banner button:not(.session-auth-password)').click();
     await page.waitForFunction(count => window.authSockets.filter(socket => !socket.activity).length > count, socketsBeforeFailure); await ready(page);
     assert.equal(finishCount, 0, 'A failed finish does not create a login');
     assert.equal(await page.locator('#prompt').inputValue(), 'An unsent private draft', 'Finish failure reconnects the still-authorized view without losing its draft');
     assert.equal(await page.locator('.session-auth-banner').isVisible(), true);
     const socketsBefore = await viewerCount();
     await page.evaluate(() => { window.passkeyMode = 'success'; });
-    await page.locator('.session-auth-banner button').click();
+    await page.locator('.session-auth-banner button:not(.session-auth-password)').click();
     await page.waitForFunction(count => window.authSockets.filter(socket => !socket.activity).length > count, socketsBefore); await ready(page);
     await page.waitForFunction(() => document.querySelectorAll('#messages article').length === 40);
     assert.equal(await viewerCount(), socketsBefore + 1, 'Renewal reconnects the selected session using the rotated cookie');

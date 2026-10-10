@@ -1,4 +1,4 @@
-// Package auth provides small, dependency-free authentication and local path
+// Package auth provides authentication and local path
 // authorization helpers for the gateway and worker.
 package auth
 

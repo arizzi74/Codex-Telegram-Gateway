@@ -91,7 +91,8 @@ func (s *Store) TelegramSessionStatus(ctx context.Context, sessionID uuid.UUID) 
         (SELECT count(*) FROM commands command WHERE command.session_id=session.session_id
             AND command.status IN ('pending','dispatched','acknowledged')),
         (SELECT max(event.occurred_at) FROM events event WHERE event.session_id=session.session_id)
-        FROM sessions session WHERE session.session_id=$1 AND session.archived=FALSE`, sessionID).
+        FROM sessions session JOIN workers worker ON worker.worker_id=session.worker_id
+        WHERE session.session_id=$1 AND session.archived=FALSE AND worker.enabled=TRUE`, sessionID).
 		Scan(&status.SessionID, &status.RuntimeID, &status.PendingApprovals, &status.QueuedCommands, &status.LastEventAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return SessionStatus{}, ErrTelegramTarget
@@ -720,7 +721,8 @@ func sessionRoute(ctx context.Context, tx *dbTx, sessionID uuid.UUID) (routeTarg
 	err := tx.QueryRow(ctx, `SELECT session.worker_id, session.runtime_id, runtime.generation,
         session.codex_thread_id, COALESCE(session.active_turn_id, '')
         FROM sessions AS session JOIN runtimes AS runtime ON runtime.runtime_id=session.runtime_id
-        WHERE session.session_id=$1 AND session.archived=FALSE`, sessionID).
+        JOIN workers worker ON worker.worker_id=session.worker_id
+        WHERE session.session_id=$1 AND session.archived=FALSE AND worker.enabled=TRUE`, sessionID).
 		Scan(&target.workerID, &target.runtimeID, &target.generation, &target.threadID, &target.activeTurnID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return routeTarget{}, ErrTelegramTarget
@@ -738,7 +740,8 @@ func resolveRuntime(ctx context.Context, tx *dbTx, raw string) (routeTarget, err
 		return routeTarget{}, ErrTelegramTarget
 	}
 	rows, err := tx.Query(ctx, `SELECT runtime_id, worker_id, generation FROM runtimes
-        WHERE runtime_id=$1 OR profile_id=$1 OR name=$1`, raw)
+        WHERE worker_id IN (SELECT worker_id FROM workers WHERE enabled=TRUE)
+          AND (runtime_id=$1 OR profile_id=$1 OR name=$1)`, raw)
 	if err != nil {
 		return routeTarget{}, fmt.Errorf("registry: resolve runtime: %w", err)
 	}
@@ -765,7 +768,8 @@ func resolveOptionalRuntime(ctx context.Context, tx *dbTx, raw string) (routeTar
 		runtime, err := resolveRuntime(ctx, tx, raw)
 		return runtime, false, err
 	}
-	rows, err := tx.Query(ctx, `SELECT runtime_id, worker_id, generation FROM runtimes ORDER BY worker_id, profile_id`)
+	rows, err := tx.Query(ctx, `SELECT runtime_id, worker_id, generation FROM runtimes
+        WHERE worker_id IN (SELECT worker_id FROM workers WHERE enabled=TRUE) ORDER BY worker_id, profile_id`)
 	if err != nil {
 		return routeTarget{}, false, fmt.Errorf("registry: list runtimes: %w", err)
 	}
@@ -798,7 +802,9 @@ func resolveSessionLookup(ctx context.Context, tx *dbTx, raw string) (routeTarge
 	rows, err := tx.Query(ctx, `SELECT session.session_id, session.worker_id, session.runtime_id,
         runtime.generation, session.codex_thread_id, COALESCE(session.active_turn_id,'')
         FROM sessions AS session JOIN runtimes AS runtime ON runtime.runtime_id=session.runtime_id
-        WHERE session.archived=FALSE AND (session.session_id=$1 OR session.codex_thread_id=$1 OR session.name=$1)`, raw)
+        JOIN workers worker ON worker.worker_id=session.worker_id
+        WHERE session.archived=FALSE AND worker.enabled=TRUE
+          AND (session.session_id=$1 OR session.codex_thread_id=$1 OR session.name=$1)`, raw)
 	if err != nil {
 		return routeTarget{}, fmt.Errorf("registry: look up session: %w", err)
 	}

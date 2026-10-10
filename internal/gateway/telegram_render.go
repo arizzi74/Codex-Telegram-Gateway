@@ -745,15 +745,27 @@ func (s *Sender) inventory(ctx context.Context) (renderInventory, error) {
 	if err != nil {
 		return renderInventory{}, fmt.Errorf("render session snapshot: %w", err)
 	}
-	inv := renderInventory{workers: workers, runtimes: runtimes, workerByID: map[string]registry.Worker{}, runtimeByID: map[string]protocol.Runtime{}, sessionByID: map[string]protocol.Session{}, sessionsByRun: map[string][]protocol.Session{}}
+	inv := renderInventory{workerByID: map[string]registry.Worker{}, runtimeByID: map[string]protocol.Runtime{}, sessionByID: map[string]protocol.Session{}, sessionsByRun: map[string][]protocol.Session{}}
 	for _, worker := range workers {
+		if !worker.Enabled {
+			continue
+		}
+		inv.workers = append(inv.workers, worker)
 		inv.workerByID[worker.ID.String()] = worker
 	}
 	for _, runtime := range runtimes {
+		if _, visible := inv.workerByID[runtime.WorkerID]; !visible {
+			continue
+		}
+		inv.runtimes = append(inv.runtimes, runtime)
 		inv.runtimeByID[runtime.ID] = runtime
 	}
 	for _, session := range sessions {
 		if session.Archived {
+			continue
+		}
+		runtime, visible := inv.runtimeByID[session.RuntimeID]
+		if !visible || runtime.WorkerID != session.WorkerID {
 			continue
 		}
 		inv.sessionByID[session.ID] = session

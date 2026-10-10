@@ -1,6 +1,8 @@
 # Administrator console
 
-The passkey-only console is served at `/tgw/admin/`. The gateway enables it with
+The administrator console is served at `/tgw/admin/`. Passkeys are available by
+default; an administrator can also enable username/password sign-in for both
+this console and the Codex Web UI. The gateway enables the console with
 the configured public origin and read-only Telegram bot status checks.
 `PublicBaseURL` must be the gateway's exact public HTTPS origin, such as
 `https://gateway.example.com`. WebAuthn derives its relying-party ID from that
@@ -14,7 +16,37 @@ bound to the same hostname when URL routes change.
 Run `codex-gateway admin bootstrap` locally to create a bootstrap token. It is
 shown once, stored only as a SHA-256 hash, expires after 15 minutes, and is
 atomically consumed when the first resident, user-verified passkey is saved.
-There is no open signup path and no password fallback.
+There is no open signup path. Password sign-in stays disabled until the
+administrator configures it after signing in.
+
+## Optional username and password
+
+Sign in at `/tgw/admin/` and find **Password sign-in**. Enter a username, a
+password and its confirmation, then save. Both login screens will offer
+**Use password** alongside the passkey button. This is another way
+to access the same administrator account, rather than a separate user account.
+
+Usernames contain 1–64 UTF-8 bytes after trimming surrounding whitespace and
+cannot contain control characters. Passwords contain 12–256 UTF-8 bytes;
+spaces are preserved. Use a unique password or passphrase. The gateway stores
+only a salted Argon2id hash in its SQLite database, using 64 MiB of memory and
+three iterations. Passwords are never returned by an API or saved in browser
+storage.
+
+Saving, changing or disabling password access requires authentication within
+the previous five minutes. Changing or disabling it revokes all existing
+password-authenticated browser sessions and their notification subscriptions
+and recovered drafts; passkey sessions remain valid. If the current browser
+used the old password, it must sign in again. At least one passkey is kept as a
+recovery method. Password access does not alter Telegram user/chat allowlists
+or worker tokens.
+
+Password login allows five attempts per client per minute and 30 globally,
+independently of the passkey budgets. At most two password hashes run at once;
+additional concurrent attempts receive HTTP 429. Failed username/password
+combinations and disabled password access return the same generic response.
+Password login and configuration use the same exact-origin and CSRF checks as
+the existing browser authentication.
 
 The browser uses these endpoints:
 
@@ -23,7 +55,10 @@ The browser uses these endpoints:
 | `POST /tgw/api/v1/admin/passkeys/register/begin` | Begins bootstrap or an authenticated additional-passkey ceremony. |
 | `POST /tgw/api/v1/admin/passkeys/register/finish` | Verifies and persists a registration response. |
 | `POST /tgw/api/v1/admin/login/begin` / `finish` | Begins and completes a discoverable passkey login. |
-| `GET /tgw/api/v1/admin/session` | Returns the current login's identity, server time, expiry and last passkey verification time. |
+| `GET /tgw/api/v1/admin/login/options` | Reports whether password sign-in is enabled, without disclosing the username. |
+| `POST /tgw/api/v1/admin/login/password` | Verifies the configured username/password and creates or renews a browser session. |
+| `GET, PUT, DELETE /tgw/api/v1/admin/password` | Reads, configures or disables optional password access for an authenticated administrator. Writes require recent authentication. |
+| `GET /tgw/api/v1/admin/session` | Returns the current login's identity, authentication method, server time, expiry and last verification time. |
 | `GET /tgw/api/v1/admin/sessions` | Lists this account's active browser logins, approximate browser labels and last-seen times. |
 | `DELETE /tgw/api/v1/admin/sessions/{id}` | Revokes one browser login and its notification subscriptions. |
 | `POST /tgw/api/v1/admin/sessions/revoke-all` | Signs out every browser belonging to the account. |
@@ -44,16 +79,18 @@ create/rotate response and are never logged or returned later.
 
 The eight-hour lifetime is absolute: requests, WebSocket traffic and ongoing
 Codex turns do not extend it. Five minutes before expiry, both interfaces show
-**Continue with passkey**. Successful verification creates a new eight-hour
+**Continue with passkey**, with password renewal also available when enabled.
+Successful verification with either method creates a new eight-hour
 session, invalidates the previous token and transfers that browser's notification
 subscriptions. Cancellation leaves the existing login valid until its original
 expiry. Registration of a passkey itself has no automatic expiry.
 
 Adding or removing passkeys and enrolling, revoking or rotating a worker require
-passkey verification within the previous five minutes. The console asks for a
-passkey when needed; a rejected or cancelled verification performs no mutation.
+authentication within the previous five minutes. The console asks for a
+passkey or the configured password when needed; a rejected or cancelled
+verification performs no mutation.
 Both stages of additional-passkey registration enforce this check. Browser
-session revocation remains available without another passkey prompt.
+session revocation remains available without another authentication prompt.
 
 ## Worker enrollment
 
@@ -62,7 +99,7 @@ Choose **Enroll worker** to obtain a URL such as
 uses letters and digits without ambiguous `I`, `O`, `0`, or `1`; lowercase
 letters also work. Copy the URL or type it on the worker machine. The dialog
 includes the installer command and a countdown. Creation requires a passkey
-verification within the last five minutes.
+or password verification within the last five minutes.
 
 Run the worker installer as the project account, without sudo:
 
@@ -133,9 +170,16 @@ rows are drained gradually, without a large blocking cleanup transaction.
 
 ## Session and bot information
 
-The session count and searchable list use the same non-archived inventory as
-`/tgsessions`. Retired subagent/helper records remain stored for reconciliation
-but do not appear in the console. Session names wrap fully on narrow screens.
+The session count and searchable list include non-archived sessions retained
+for administration. Retired subagent/helper records remain stored for
+reconciliation but do not appear in the console. Session names wrap fully on
+narrow screens.
+
+Revoked workers and their sessions disappear from the Codex Web UI sidebar and
+Telegram session pickers, including after a live inventory update. Their saved
+records remain available in this administrator console for inspection; revoking
+a worker does not delete its sessions or files. Enabled workers without any
+sessions still appear in the Web UI so a first session can be created.
 
 Each session shows its state, worker, directory, prompt and final-reply counts,
 token usage, active-turn duration, and latest user or assistant message. Expand

@@ -12,6 +12,8 @@ let rotationPending = false;
 let sessionAuth = null;
 let dashboard = null;
 let sessionPage = 0;
+let passwordSettings = null;
+let passwordSettingsBusy = false;
 // Enrollment URLs exist only in this open dialog, never in browser storage.
 let workerEnrollment = null;
 let enrollmentBusy = false;
@@ -53,7 +55,7 @@ async function sensitiveCall(path, opts) {
     // Only this explicit server rejection proves that the mutation did not run.
     // Network failures and ambiguous responses must never replay a mutation.
     if (error.status !== 403 || error.code !== 'reauthentication_required') throw error;
-    await sessionAuth.login();
+    await sessionAuth.reauthenticate();
     return call(path, opts);
   }
 }
@@ -152,7 +154,7 @@ function button(label, className, action) {
 }
 function showError(error) {
   if (error.status === 401) {
-    sessionAuth.expire('Your session expired. Continue with your passkey.');
+    sessionAuth.expire('expired');
     return;
   }
   $('dashboard-error').textContent = error.message || 'Unable to refresh. Please try again.';
@@ -164,11 +166,14 @@ function lockConsole(reason) {
   dashboard = null;
   reloadPending = false;
   closeWorkerEnrollment();
+  passwordSettings = null;
+  renderPasswordSettings();
   $('console').hidden = true;
   $('logout').hidden = true;
   $('auth').hidden = false;
   for (const id of ['session-list', 'bot-info', 'worker-list', 'keys', 'browser-sessions']) $(id).replaceChildren();
-  msg(reason === 'expired' ? 'Your session expired. Continue with your passkey.' : reason?.startsWith('Signed out') ? reason : 'Continue with your passkey.');
+  const instruction = sessionAuth.hasPassword() ? 'Choose a sign-in method to continue.' : 'Continue with your passkey.';
+  msg(reason === 'expired' ? 'Your session expired. ' + instruction : reason?.startsWith('Signed out') ? reason : instruction);
 }
 function signedOut(message) {
   // The same tab may have navigated here from the web UI. Its optional draft
@@ -381,6 +386,7 @@ function renderBrowserSessions(sessions) {
       el('div', 'muted', 'Signed in ' + timestamp(session.created_at)),
       el('div', 'muted', 'Last seen ' + timestamp(session.last_seen_at || session.created_at)),
       el('div', 'muted', 'Expires ' + timestamp(session.expires_at)));
+    if (['password', 'passkey'].includes(session.authentication_method)) info.append(el('div', 'muted', 'Sign-in method: ' + (session.authentication_method === 'password' ? 'Password' : 'Passkey')));
     row.append(info, button('Sign out', 'danger', async () => {
       if (!confirm(session.current ? 'Sign out of this browser?' : 'End access for this browser session?')) return;
       await call('/sessions/' + encodeURIComponent(session.session_id), { method: 'DELETE', body: '{}' });
@@ -389,6 +395,71 @@ function renderBrowserSessions(sessions) {
     }));
     $('browser-sessions').append(row);
   }
+}
+function renderPasswordSettings() {
+  $('password-edit').hidden = !passwordSettings;
+  $('password-disable').hidden = !passwordSettings?.enabled;
+  $('password-edit').textContent = passwordSettings?.enabled ? 'Change username or password' : 'Enable password sign-in';
+  $('password-edit').disabled = passwordSettingsBusy;
+  $('password-disable').disabled = passwordSettingsBusy;
+  $('password-settings-status').textContent = passwordSettings
+    ? passwordSettings.enabled ? 'Enabled for ' + passwordSettings.username + '. Changing or disabling this password signs out browsers using it.' : 'Password sign-in is disabled.'
+    : 'Password settings are unavailable. Refresh to try again.';
+}
+async function loadPasswordSettings(epoch) {
+  try {
+    const settings = await call('/password', { cache: 'no-store' });
+    if (epoch !== authEpoch) return;
+    passwordSettings = typeof settings?.enabled === 'boolean' && typeof settings.username === 'string' ? settings : null;
+  } catch (error) {
+    if (epoch !== authEpoch) return;
+    if (error.status === 401) throw error;
+    passwordSettings = null;
+  }
+  renderPasswordSettings();
+}
+async function passwordSettingsChanged(message) {
+  // Password changes revoke password sessions, including this browser when it
+  // signed in that way. Check the cookie before refreshing protected data.
+  await sessionAuth.refreshLoginOptions();
+  sessionAuth.broadcast('revoked');
+  const value = await sessionAuth.verify('password-settings');
+  if (!value) { msg(message + ' Sign in again to continue.'); return; }
+  await load();
+  $('password-settings-status').textContent += ' ' + message;
+}
+async function editPassword() {
+  if (passwordSettingsBusy || !passwordSettings) return;
+  const settings = passwordSettings;
+  passwordSettingsBusy = true; renderPasswordSettings();
+  try {
+    await sessionAuth.ensureFresh();
+    const changed = await window.CodexSessionAuth.passwordDialog({
+      title: settings.enabled ? 'Change password sign-in' : 'Enable password sign-in',
+      description: settings.enabled ? 'Enter a username and new password. Browsers signed in with the previous password will be signed out.' : 'Choose a gateway username and password. Your passkeys can still sign you in.',
+      username: settings.username, newPassword: true,
+      submitLabel: settings.enabled ? 'Save password' : 'Enable password sign-in',
+      onSubmit: async credentials => {
+        if (!confirm(settings.enabled ? 'Change password sign-in and sign out all browsers using the current password?' : 'Enable username and password sign-in for this gateway?')) return false;
+        await sensitiveCall('/password', { method: 'PUT', body: JSON.stringify(credentials), cache: 'no-store' });
+        return true;
+      },
+    });
+    if (changed) await passwordSettingsChanged(settings.enabled ? 'Password sign-in updated.' : 'Password sign-in enabled.');
+  } catch (error) {
+    if (error.name !== 'NotAllowedError' && error.name !== 'AbortError') showError(error);
+  } finally { passwordSettingsBusy = false; if (authenticated) renderPasswordSettings(); }
+}
+async function disablePassword() {
+  if (passwordSettingsBusy || !passwordSettings?.enabled) return;
+  if (!confirm('Disable password sign-in and sign out all browsers using it? Your passkeys will still work.')) return;
+  passwordSettingsBusy = true; renderPasswordSettings();
+  try {
+    await sensitiveCall('/password', { method: 'DELETE', body: '{}', cache: 'no-store' });
+    await passwordSettingsChanged('Password sign-in disabled.');
+  } catch (error) {
+    if (error.name !== 'NotAllowedError' && error.name !== 'AbortError') showError(error);
+  } finally { passwordSettingsBusy = false; if (authenticated) renderPasswordSettings(); }
 }
 async function load(includeKeys = true) {
   // A request issued between cookie revocation and login/finish response can
@@ -424,6 +495,7 @@ async function load(includeKeys = true) {
     const browsers = await call('/sessions');
     if (epoch !== authEpoch) return;
     renderBrowserSessions(browsers.sessions);
+    if (includeKeys) await loadPasswordSettings(epoch);
   } catch (error) {
     if (epoch !== authEpoch) return;
     if (!authenticated && error.status !== 401) msg(error.message);
@@ -479,8 +551,8 @@ async function enrollmentCall(path, opts, current) {
     // Even a confirmed fresh-auth rejection requires a deliberate new action.
     // A network error can mean the mutation succeeded: never replay it here.
     if (error.status === 403 && error.code === 'reauthentication_required') {
-      await sessionAuth.login();
-      throw new Error('Passkey confirmed. Choose Create new URL or Cancel and revoke to try again.');
+      await sessionAuth.reauthenticate();
+      throw new Error('Sign-in confirmed. Choose Create new URL or Cancel and revoke to try again.');
     }
     throw error;
   }
@@ -495,7 +567,7 @@ async function runEnrollment(action) {
   updateEnrollment();
   try { await action(current); } catch (error) {
     if (current()) {
-      if (error.status === 401) { sessionAuth.expire('Your session expired. Continue with your passkey.'); return; }
+      if (error.status === 401) { sessionAuth.expire('expired'); return; }
       $('enrollment-error').textContent = error.status === 403 && error.code !== 'reauthentication_required'
         ? 'Access denied. Sign in again before retrying.' : error.message || 'The request failed. Choose an action to try again.';
       $('enrollment-error').hidden = false;
@@ -569,6 +641,9 @@ async function copyEnrollmentURL() {
   }
 }
 $('login').addEventListener('click', () => login().catch(error => msg(error.message)));
+$('password-login').addEventListener('click', () => sessionAuth.login('password').catch(() => {}));
+$('password-edit').addEventListener('click', editPassword);
+$('password-disable').addEventListener('click', disablePassword);
 $('enroll').addEventListener('click', () => enroll($('bootstrap-token').value).catch(error => msg(error.message)));
 $('add-passkey').addEventListener('click', () => perform(async () => { await enroll(); await load(); }));
 $('new-worker').addEventListener('click', openWorkerEnrollment);
@@ -626,6 +701,7 @@ sessionAuth = window.CodexSessionAuth.create({
   onExpired: lockConsole,
   onRenewing: busy => {
     $('login').disabled = busy;
+    $('password-login').disabled = busy;
     if (!busy && rotationPending) {
       // A failed finish may have left either the old or new cookie valid.
       // Check once before resuming reads; never replay the login mutation.
@@ -637,6 +713,11 @@ sessionAuth = window.CodexSessionAuth.create({
         $('worker-enrollment').inert = false;
       });
     }
+  },
+  onOptions: options => {
+    $('password-login').hidden = !options.password;
+    $('auth-title').textContent = options.password ? 'Gateway access' : 'Passkey access';
+    $('auth-description').textContent = options.password ? 'Use a personal passkey or your gateway password to administer this gateway.' : 'Use a personal passkey to administer this gateway.';
   },
   onStatus: msg,
 });

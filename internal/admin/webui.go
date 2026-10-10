@@ -106,7 +106,7 @@ func (s *Server) webuiSessions(w http.ResponseWriter, r *http.Request) {
 	if _, ok := s.requireAuth(w, r, false); !ok {
 		return
 	}
-	d, err := s.store.AdminDashboardSnapshot(r.Context())
+	d, err := s.store.WebUIInventorySnapshot(r.Context())
 	if err != nil {
 		fail(w, err)
 		return
@@ -137,7 +137,7 @@ func (s *Server) webuiConnect(w http.ResponseWriter, r *http.Request) {
 		bad(w)
 		return
 	}
-	d, err := s.store.AdminDashboardSnapshot(r.Context())
+	d, err := s.store.WebUIInventorySnapshot(r.Context())
 	if err != nil {
 		fail(w, err)
 		return

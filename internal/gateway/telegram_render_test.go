@@ -82,7 +82,7 @@ func (f *renderStoreFake) CreateCallback(_ context.Context, callback registry.Ca
 func renderFixture() *renderStoreFake {
 	lastEvent := time.Date(2026, 9, 13, 10, 11, 12, 0, time.UTC)
 	return &renderStoreFake{
-		workers: []registry.Worker{{ID: testWorkerID, Name: "MacBook", Connectivity: "online"}},
+		workers: []registry.Worker{{ID: testWorkerID, Name: "MacBook", Enabled: true, Connectivity: "online"}},
 		runtimes: []protocol.Runtime{
 			{ID: testRuntimeID.String(), WorkerID: testWorkerID.String(), Name: "Primary", Generation: 7, State: "running"},
 			{ID: testOtherRun.String(), WorkerID: testWorkerID.String(), Name: "Secondary", Generation: 2, State: "stopped"},
@@ -182,6 +182,66 @@ func TestRenderRuntimePickerPreservesRequestedAction(t *testing.T) {
 				t.Fatalf("action = %q, want %q", callback.Action, action)
 			}
 		}
+	}
+}
+
+func TestTelegramSharedInventoryHidesRevokedWorkersAndTheirTargets(t *testing.T) {
+	revokedWorker, revokedRuntime, revokedSession := uuid.New(), uuid.New(), uuid.New()
+	emptyWorker, emptyRuntime, freshWorker := uuid.New(), uuid.New(), uuid.New()
+	for _, response := range []registry.AcceptResult{
+		{View: "instances"},
+		{View: "runtime_picker", Action: "sessions"},
+		{View: "runtime_picker", Action: "new"},
+		{View: "runtime_picker", Action: "new", WizardID: uuid.NewString(), WizardRevision: 1},
+		{View: "runtime_picker", Action: "delete_session", WizardID: uuid.NewString(), WizardRevision: 1},
+		{View: "sessions", RuntimeID: testRuntimeID.String()},
+		{View: "delete_sessions", RuntimeID: testRuntimeID.String(), WizardID: uuid.NewString(), WizardRevision: 1},
+	} {
+		t.Run(response.View+response.Action+response.WizardID, func(t *testing.T) {
+			store := renderFixture()
+			store.workers[0].Connectivity = "offline"
+			store.workers = append(store.workers,
+				registry.Worker{ID: revokedWorker, Name: "REVOKED worker", Connectivity: "disabled"},
+				registry.Worker{ID: emptyWorker, Name: "Empty worker", Enabled: true, Connectivity: "online"},
+				registry.Worker{ID: freshWorker, Name: "Fresh worker", Enabled: true, Connectivity: "offline"})
+			store.runtimes = append(store.runtimes,
+				protocol.Runtime{ID: revokedRuntime.String(), WorkerID: revokedWorker.String(), Name: "REVOKED runtime", Generation: 1, State: "running"},
+				protocol.Runtime{ID: emptyRuntime.String(), WorkerID: emptyWorker.String(), Name: "Empty runtime", Generation: 1, State: "running"})
+			store.sessions = append(store.sessions, protocol.Session{ID: revokedSession.String(), WorkerID: revokedWorker.String(), RuntimeID: revokedRuntime.String(), Name: "REVOKED session", State: "idle"})
+			sender := testSender(store, nil)
+			inventory, err := sender.inventory(t.Context())
+			if err != nil || len(inventory.workers) != 3 || len(inventory.runtimes) != 3 || len(inventory.sessionByID) != 2 {
+				t.Fatalf("visible inventory: %+v %v", inventory, err)
+			}
+			text, keyboard, err := sender.render(t.Context(), uiRow(t, response))
+			if err != nil || keyboard == nil || strings.Contains(text, "REVOKED") {
+				t.Fatalf("visible picker: %q %+v %v", text, keyboard, err)
+			}
+			for _, row := range keyboard.Rows {
+				for _, button := range row {
+					if strings.Contains(button.Text, "REVOKED") {
+						t.Fatalf("revoked worker button: %+v", button)
+					}
+				}
+			}
+			for _, callback := range store.callbacks {
+				if callback.RuntimeID == revokedRuntime || callback.SessionID == revokedSession {
+					t.Fatalf("revoked callback target: %+v", callback)
+				}
+			}
+			if response.View == "instances" && (!strings.Contains(text, "Fresh worker") || !strings.Contains(text, "Empty worker") || !strings.Contains(text, "MacBook · offline")) {
+				t.Fatalf("enabled empty/offline worker disappeared: %q", text)
+			}
+			if response.View == "runtime_picker" {
+				found := false
+				for _, callback := range store.callbacks {
+					found = found || callback.RuntimeID == emptyRuntime
+				}
+				if !found {
+					t.Fatal("worker without sessions lost its runtime choice")
+				}
+			}
+		})
 	}
 }
 

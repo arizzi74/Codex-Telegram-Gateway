@@ -147,7 +147,7 @@ func (s *Store) ListTelegramSessionAliases(ctx context.Context, bot string, user
 	if err := ensureSessionAliases(ctx, tx); err != nil {
 		return nil, err
 	}
-	rows, err := tx.Query(ctx, `SELECT session.session_id,COALESCE(session.name,''),COALESCE(session.preview,''),COALESCE(session.cwd,''),alias.alias FROM telegram_session_aliases alias JOIN sessions session ON session.session_id=alias.session_id WHERE session.archived=FALSE ORDER BY alias.alias`)
+	rows, err := tx.Query(ctx, `SELECT session.session_id,COALESCE(session.name,''),COALESCE(session.preview,''),COALESCE(session.cwd,''),alias.alias FROM telegram_session_aliases alias JOIN sessions session ON session.session_id=alias.session_id JOIN workers worker ON worker.worker_id=session.worker_id WHERE session.archived=FALSE AND worker.enabled=TRUE ORDER BY alias.alias`)
 	if err != nil {
 		return nil, err
 	}

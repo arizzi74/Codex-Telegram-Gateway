@@ -30,11 +30,13 @@ const (
 	adminCeremonyPruneBatch = 256
 )
 
-// AdminCredential is the non-secret record needed to verify a WebAuthn
-// assertion. CredentialJSON is the library's complete durable credential.
+// AdminCredential is a non-secret authentication record. Passkey records keep
+// the library's complete durable credential in CredentialJSON; password
+// records use an empty object and keep their hash in a separate table.
 type AdminCredential struct {
 	ID             []byte
 	UserHandle     []byte
+	Kind           string
 	CredentialJSON json.RawMessage
 	CreatedAt      time.Time
 	LastUsedAt     *time.Time
@@ -327,7 +329,7 @@ func (s *Store) AdminUser(ctx context.Context) ([]byte, []AdminCredential, error
 
 func (s *Store) AdminCredentials(ctx context.Context) ([]AdminCredential, error) {
 	rows, err := s.pool.Query(ctx, `SELECT credential_id,user_handle,credential_json,created_at,last_used_at,revoked_at
-        FROM admin_credentials ORDER BY created_at`)
+		FROM admin_credentials WHERE kind='passkey' ORDER BY created_at`)
 	if err != nil {
 		return nil, fmt.Errorf("registry: list admin credentials: %w", err)
 	}
@@ -338,6 +340,7 @@ func (s *Store) AdminCredentials(ctx context.Context) ([]AdminCredential, error)
 		if err = rows.Scan(&c.ID, &c.UserHandle, &c.CredentialJSON, &c.CreatedAt, &c.LastUsedAt, &c.RevokedAt); err != nil {
 			return nil, fmt.Errorf("registry: scan admin credential: %w", err)
 		}
+		c.Kind = "passkey"
 		result = append(result, c)
 	}
 	if err = rows.Err(); err != nil {
@@ -348,13 +351,14 @@ func (s *Store) AdminCredentials(ctx context.Context) ([]AdminCredential, error)
 
 func (s *Store) ActiveAdminCredential(ctx context.Context, id []byte) (AdminCredential, error) {
 	var c AdminCredential
-	err := s.pool.QueryRow(ctx, `SELECT credential_id,user_handle,credential_json,created_at,last_used_at,revoked_at FROM admin_credentials WHERE credential_id=$1 AND revoked_at IS NULL`, id).Scan(&c.ID, &c.UserHandle, &c.CredentialJSON, &c.CreatedAt, &c.LastUsedAt, &c.RevokedAt)
+	err := s.pool.QueryRow(ctx, `SELECT credential_id,user_handle,credential_json,created_at,last_used_at,revoked_at FROM admin_credentials WHERE credential_id=$1 AND kind='passkey' AND revoked_at IS NULL`, id).Scan(&c.ID, &c.UserHandle, &c.CredentialJSON, &c.CreatedAt, &c.LastUsedAt, &c.RevokedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return AdminCredential{}, ErrAdminCredentialGone
 	}
 	if err != nil {
 		return AdminCredential{}, fmt.Errorf("registry: read admin credential: %w", err)
 	}
+	c.Kind = "passkey"
 	return c, nil
 }
 
@@ -367,7 +371,7 @@ func (s *Store) TouchAdminCredential(ctx context.Context, credential AdminCreden
 	if json.Unmarshal(credential.CredentialJSON, &record) != nil {
 		return ErrAdminCredentialGone
 	}
-	ct, err := s.pool.Exec(ctx, `UPDATE admin_credentials SET credential_json=$2,sign_count=$3,last_used_at=(strftime('%Y-%m-%dT%H:%M:%f','now') || '000000Z') WHERE credential_id=$1 AND revoked_at IS NULL`, credential.ID, credential.CredentialJSON, record.Authenticator.SignCount)
+	ct, err := s.pool.Exec(ctx, `UPDATE admin_credentials SET credential_json=$2,sign_count=$3,last_used_at=(strftime('%Y-%m-%dT%H:%M:%f','now') || '000000Z') WHERE credential_id=$1 AND kind='passkey' AND revoked_at IS NULL`, credential.ID, credential.CredentialJSON, record.Authenticator.SignCount)
 	if err != nil {
 		return fmt.Errorf("registry: update admin credential: %w", err)
 	}
@@ -379,13 +383,13 @@ func (s *Store) TouchAdminCredential(ctx context.Context, credential AdminCreden
 
 func (s *Store) RevokeAdminCredential(ctx context.Context, id []byte) error {
 	// Keep at least one active credential so an authenticated operator cannot
-	// accidentally make the passkey-only console permanently inaccessible.
+	// accidentally lose the recovery method for password authentication.
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback(ctx)
-	rows, err := tx.Query(ctx, `SELECT credential_id FROM admin_credentials WHERE revoked_at IS NULL`)
+	rows, err := tx.Query(ctx, `SELECT credential_id FROM admin_credentials WHERE kind='passkey' AND revoked_at IS NULL`)
 	if err != nil {
 		return err
 	}
@@ -401,7 +405,7 @@ func (s *Store) RevokeAdminCredential(ctx context.Context, id []byte) error {
 	if n <= 1 {
 		return errors.New("registry: cannot revoke the final admin credential")
 	}
-	ct, err := tx.Exec(ctx, `UPDATE admin_credentials SET revoked_at=(strftime('%Y-%m-%dT%H:%M:%f','now') || '000000Z') WHERE credential_id=$1 AND revoked_at IS NULL`, id)
+	ct, err := tx.Exec(ctx, `UPDATE admin_credentials SET revoked_at=(strftime('%Y-%m-%dT%H:%M:%f','now') || '000000Z') WHERE credential_id=$1 AND kind='passkey' AND revoked_at IS NULL`, id)
 	if err != nil {
 		return err
 	}
@@ -438,9 +442,9 @@ func (s *Store) CreateAdminSession(ctx context.Context, credentialID []byte) (st
 
 func (s *Store) ValidateAdminSession(ctx context.Context, token string) (AdminCredential, error) {
 	var c AdminCredential
-	err := s.pool.QueryRow(ctx, `SELECT c.credential_id,c.user_handle,c.credential_json,c.created_at,c.last_used_at,c.revoked_at
+	err := s.pool.QueryRow(ctx, `SELECT c.credential_id,c.user_handle,c.credential_json,c.created_at,c.last_used_at,c.revoked_at,c.kind
       FROM admin_sessions s JOIN admin_credentials c ON c.credential_id=s.credential_id
-      WHERE s.token_hash=$1 AND s.expires_at>(strftime('%Y-%m-%dT%H:%M:%f','now') || '000000Z') AND s.revoked_at IS NULL AND c.revoked_at IS NULL`, hashSecret(token)).Scan(&c.ID, &c.UserHandle, &c.CredentialJSON, &c.CreatedAt, &c.LastUsedAt, &c.RevokedAt)
+      WHERE s.token_hash=$1 AND s.expires_at>(strftime('%Y-%m-%dT%H:%M:%f','now') || '000000Z') AND s.revoked_at IS NULL AND c.revoked_at IS NULL`, hashSecret(token)).Scan(&c.ID, &c.UserHandle, &c.CredentialJSON, &c.CreatedAt, &c.LastUsedAt, &c.RevokedAt, &c.Kind)
 	if errors.Is(err, sql.ErrNoRows) {
 		return AdminCredential{}, ErrAdminSessionInvalid
 	}

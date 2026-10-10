@@ -292,7 +292,7 @@ const sessionActivityColumns = `SELECT session.session_id,session.state,COALESCE
     JOIN runtimes runtime ON runtime.runtime_id=session.runtime_id AND runtime.worker_id=session.worker_id
     LEFT JOIN session_settings settings ON settings.session_id=session.session_id AND settings.worker_id=session.worker_id
       AND settings.runtime_id=session.runtime_id AND settings.runtime_generation=runtime.generation
-    WHERE session.archived=FALSE`
+    WHERE session.archived=FALSE AND worker.enabled=TRUE`
 
 const sessionActivityQuery = sessionActivityColumns + ` ORDER BY session.session_id`
 
@@ -367,10 +367,11 @@ func (s *Store) sessionInventoryRevision(ctx context.Context) (string, error) {
 	rows, err := s.pool.Query(ctx, `SELECT json_object('kind','worker','id',worker_id,'name',name,
         'hostname',COALESCE(hostname,''),'enabled',enabled,'connectivity',connectivity,'version',COALESCE(worker_version,''),
         'workspaces',COALESCE(json_extract(heartbeat_metadata,'$.supports_session_workspaces'),0),
-        'creation',COALESCE(json_extract(heartbeat_metadata,'$.supports_webui_session_creation'),0)) AS entry FROM workers
+        'creation',COALESCE(json_extract(heartbeat_metadata,'$.supports_webui_session_creation'),0)) AS entry FROM workers WHERE enabled=TRUE
       UNION ALL SELECT json_object('kind','runtime','id',runtime_id,'worker_id',worker_id,'name',name,
         'profile',profile_id,'generation',generation,'state',state,'codex',COALESCE(codex_version,''),
-        'cwd',COALESCE(default_cwd,'')) AS entry FROM runtimes ORDER BY entry`)
+        'cwd',COALESCE(default_cwd,'')) AS entry FROM runtimes
+        WHERE worker_id IN (SELECT worker_id FROM workers WHERE enabled=TRUE) ORDER BY entry`)
 	if err != nil {
 		return "", fmt.Errorf("registry: read sidebar inventory revision: %w", err)
 	}

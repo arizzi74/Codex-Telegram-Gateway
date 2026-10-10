@@ -179,6 +179,7 @@ itemTimes['timestamp-older-completed'] = { startedAtMs: null, completedAtMs: tim
       if (holdSessionInventory) { heldSessionInventories.push(route); notifySessionInventoryHeld(); return; }
       return route.fulfill({ status: authStatus, contentType: 'application/json', body: JSON.stringify({ sessions: listedSessions, workers, runtimes }) });
     }
+    if (url.pathname === '/tgw/api/v1/admin/login/options') return route.fulfill({ contentType: 'application/json', body: JSON.stringify({ passkey: true, password: false }) });
     if (url.pathname === '/tgw/api/v1/admin/session') return route.fulfill({ status: authStatus, contentType: 'application/json', body: JSON.stringify({ authenticated: true, owner_id: 'browser-test-owner', session_id: browserLoginID, server_time: new Date().toISOString(), expires_at: new Date(browserExpiry).toISOString(), reauthenticated_at: new Date().toISOString() }) });
     if (url.pathname === '/tgw/api/v1/admin/login/begin') return route.fulfill({ contentType: 'application/json', body: JSON.stringify({ ceremony_id: 'browser-test-ceremony', publicKey: { challenge: 'AQID', rpId: 'webui.test', allowCredentials: [] } }) });
     if (url.pathname === '/tgw/api/v1/admin/login/finish') {
@@ -613,7 +614,7 @@ itemTimes['timestamp-older-completed'] = { startedAtMs: null, completedAtMs: tim
     await page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')));
     await page.locator('.session-auth-banner:not([hidden])').waitFor();
     rejectNextLoginFinish = true;
-    await page.locator('.session-auth-banner button').click();
+    await page.locator('.session-auth-banner button:not(.session-auth-password)').click();
     await page.waitForFunction(() => document.querySelector('.session-auth-status').textContent.includes('failed'));
     await page.waitForFunction(() => document.querySelector('#connection').dataset.state === 'connected' && !document.querySelector('#composer').hidden);
     await createOn('fresh').click();
@@ -623,7 +624,7 @@ itemTimes['timestamp-older-completed'] = { startedAtMs: null, completedAtMs: tim
     assert.equal(workerSessionRequests.at(-1).request_id, lostCreation.request_id, 'A failed sign-in renewal restores GET checks for the same creation');
     assert.equal(creationPosts().length, postsAfterLostCreation);
     await page.locator('#new-session-cancel').click();
-    await page.locator('.session-auth-banner button').click();
+    await page.locator('.session-auth-banner button:not(.session-auth-password)').click();
     await page.waitForFunction(() => document.querySelector('.session-auth-banner').hidden && !document.querySelector('#composer').hidden && document.querySelector('#connection').dataset.state === 'connected');
     await createOn('fresh').click();
     await waitCreationCheck();

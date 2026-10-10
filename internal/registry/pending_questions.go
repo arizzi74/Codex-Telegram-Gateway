@@ -32,8 +32,9 @@ const pendingRequestFrom = ` FROM approvals approval
       AND session.codex_thread_id=approval.codex_thread_id
     JOIN runtimes runtime ON runtime.runtime_id=approval.runtime_id
       AND runtime.worker_id=approval.worker_id AND runtime.generation=approval.runtime_generation
+    JOIN workers worker ON worker.worker_id=approval.worker_id
     WHERE approval.state='pending' AND approval.response_command_id IS NULL
-      AND session.archived=FALSE
+      AND session.archived=FALSE AND worker.enabled=TRUE
       AND (json_extract(approval.request_payload,'$.async')=1
         OR COALESCE(approval.codex_turn_id,'')=''
         OR approval.codex_turn_id=COALESCE(session.active_turn_id,''))`
