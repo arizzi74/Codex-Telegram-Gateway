@@ -20,8 +20,17 @@ import (
 	"github.com/iaia/telegramgw/internal/protocol"
 )
 
+func canonicalWebUIFileTempDir(t *testing.T) string {
+	t.Helper()
+	path, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
 func TestWebUIFileOpenConfinesWorkspace(t *testing.T) {
-	allowed, outside := t.TempDir(), t.TempDir()
+	allowed, outside := canonicalWebUIFileTempDir(t), canonicalWebUIFileTempDir(t)
 	cwd := filepath.Join(allowed, "project")
 	if err := os.Mkdir(cwd, 0o700); err != nil {
 		t.Fatal(err)
@@ -51,7 +60,7 @@ func TestWebUIFileOpenConfinesWorkspace(t *testing.T) {
 }
 
 func TestWebUIFileOpenRejectsSymlinksCredentialsAndSpecialFiles(t *testing.T) {
-	cwd, outside := t.TempDir(), t.TempDir()
+	cwd, outside := canonicalWebUIFileTempDir(t), canonicalWebUIFileTempDir(t)
 	for _, directory := range []string{"regular", ".ssh", ".codex"} {
 		if err := os.Mkdir(filepath.Join(cwd, directory), 0o700); err != nil {
 			t.Fatal(err)
@@ -97,7 +106,7 @@ func TestWebUIFileOpenRejectsSymlinksCredentialsAndSpecialFiles(t *testing.T) {
 }
 
 func TestWebUIFileOpenRejectsConcurrentSymlinkReplacement(t *testing.T) {
-	cwd, outside := t.TempDir(), t.TempDir()
+	cwd, outside := canonicalWebUIFileTempDir(t), canonicalWebUIFileTempDir(t)
 	parent := filepath.Join(cwd, "parent")
 	backup := filepath.Join(cwd, "backup")
 	if err := os.Mkdir(parent, 0o700); err != nil {
@@ -141,7 +150,7 @@ func TestWebUIFileOpenRejectsConcurrentSymlinkReplacement(t *testing.T) {
 }
 
 func TestWebUIFileOpenRejectsReplacedWorkspaceRoot(t *testing.T) {
-	allowed := t.TempDir()
+	allowed := canonicalWebUIFileTempDir(t)
 	cwd := filepath.Join(allowed, "project")
 	credentialDirectory := filepath.Join(allowed, ".codex")
 	if err := os.Mkdir(cwd, 0o700); err != nil {
@@ -168,7 +177,7 @@ func TestWebUIFileOpenRejectsReplacedWorkspaceRoot(t *testing.T) {
 }
 
 func TestWebUIFileOpenRejectsHardLinkAliases(t *testing.T) {
-	home := t.TempDir()
+	home := canonicalWebUIFileTempDir(t)
 	cwd := filepath.Join(home, "project")
 	if err := os.Mkdir(cwd, 0o700); err != nil {
 		t.Fatal(err)
@@ -210,7 +219,7 @@ func newWebUIFileFixture(t *testing.T) *webUIFileFixture {
 	t.Helper()
 	workerID := uuid.NewString()
 	store, cfg := testConnectionStore(t, workerID)
-	cfg.AllowedWorkspaceRoots = []string{t.TempDir()}
+	cfg.AllowedWorkspaceRoots = []string{canonicalWebUIFileTempDir(t)}
 	fixture := &webUIFileFixture{frames: make(chan protocol.WebUIFrame, 32), runtime: protocol.Runtime{ID: uuid.NewString(), WorkerID: workerID, Generation: 1, State: "running"}}
 	var err error
 	fixture.session, err = store.UpsertSession(protocol.Session{RuntimeID: fixture.runtime.ID, ThreadID: "artifact-thread", CWD: cfg.AllowedWorkspaceRoots[0]})
