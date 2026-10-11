@@ -234,9 +234,14 @@ sudo codex-telegramgw setup voice
 ```
 
 The installer verifies and installs the release's Whisper helper and a pinned
-multilingual **base** model, enables the gateway configuration and restarts the
+multilingual model (**base** by default), enables the gateway configuration and restarts the
 gateway. Workers do not need an audio decoder or a model. No OpenAI transcription
 API key, Python, FFmpeg, or separately installed audio libraries are needed.
+
+For the multilingual **small** model and three CPU threads, use
+`sudo codex-telegramgw setup voice --model small --threads 3`. Setup supports
+base and small models and 1–32 threads. Re-running setup without model/thread
+options preserves the existing supported selection.
 
 Select a session and send a Telegram voice note. The gateway shows a temporary
 transcribing message, then the recognized text. That text is submitted to the
@@ -259,6 +264,8 @@ One recording is processed at a time. The model stays in memory and the helper
 sleeps between recordings. The default is two inference threads. Allow roughly
 0.5–1 GB of RAM for the multilingual base model and inference, plus about
 150 MB of model storage. Processing time depends on recording length and CPU.
+The small model uses 488 MB of disk storage and needs a larger memory budget;
+allow roughly 1–2 GB for its model and inference buffers.
 There is no per-minute API charge; the resulting Codex prompt uses the session's
 normal account and usage allowance.
 
@@ -272,8 +279,9 @@ job waiting until its lease expires. Interrupting a session cancels its pending
 voice submissions.
 
 Audio downloads use Telegram's authenticated file API. Decoding runs in Go and
-Whisper inference stays on the gateway. Audio is held in memory, never saved in
-the database or sent to a transcription service. The recognized prompt is
+Whisper inference stays on the gateway. Audio is held in memory and passed to
+the helper through a pipe; recordings and converted WAV/PCM files are never
+written to disk, saved in the database, or sent to a transcription service. The recognized prompt is
 retained like ordinary text. Telegram still holds the original recording under
 its own chat storage policy. Model/helper downloads happen only during setup
 or software updates.

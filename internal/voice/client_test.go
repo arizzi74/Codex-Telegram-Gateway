@@ -182,7 +182,7 @@ func TestClientStructuredJobErrorKeepsHelper(t *testing.T) {
 }
 
 func TestClientInputBounds(t *testing.T) {
-	for _, cfg := range []Config{{}, {BinaryPath: "helper"}, {BinaryPath: "helper", ModelPath: "model", Threads: 3}} {
+	for _, cfg := range []Config{{}, {BinaryPath: "helper"}, {BinaryPath: "helper", ModelPath: "model", Threads: -1}, {BinaryPath: "helper", ModelPath: "model", Threads: 33}} {
 		if _, err := New(cfg); err == nil {
 			t.Fatalf("accepted bad configuration: %+v", cfg)
 		}
@@ -198,21 +198,47 @@ func TestClientInputBounds(t *testing.T) {
 	}
 }
 
+func TestClientForwardsThreadCount(t *testing.T) {
+	for _, tc := range []struct {
+		threads int
+		want    int
+	}{{0, 2}, {1, 1}, {2, 2}, {3, 3}, {32, 32}} {
+		t.Run(strconv.Itoa(tc.threads), func(t *testing.T) {
+			c, marker := testClientWithThreads(t, "normal", tc.threads)
+			result, err := c.Transcribe(context.Background(), []float32{.25, -.5, 1})
+			if err != nil || result.Text == "" {
+				t.Fatalf("transcription failed: %+v, %v", result, err)
+			}
+			data, err := os.ReadFile(marker + ".threads")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := string(data); got != strconv.Itoa(tc.want) {
+				t.Fatalf("helper received --threads %q, want %d", got, tc.want)
+			}
+		})
+	}
+}
+
 // A test subprocess exercises real pipes/process lifecycle, without needing a
 // native Whisper build or model in unit tests. Test production helper/model
 // compatibility separately using the native helper's smoke test.
 func TestVoiceHelperProcess(t *testing.T) {
-	var model string
+	var model, threadArg string
 	for i, arg := range os.Args {
 		if arg == "--model" && i+1 < len(os.Args) {
 			model = os.Args[i+1]
 		}
-		if arg == "--threads" && i+1 < len(os.Args) && os.Args[i+1] != "2" {
-			os.Exit(70)
+		if arg == "--threads" && i+1 < len(os.Args) {
+			threadArg = os.Args[i+1]
 		}
 	}
 	if model == "" {
 		return
+	}
+	threads, err := strconv.Atoi(threadArg)
+	if err != nil || threads < 1 || threads > 32 {
+		os.Exit(70)
 	}
 	if os.Getenv("TELEGRAM_BOT_TOKEN") != "" {
 		os.Exit(77)
@@ -222,6 +248,9 @@ func TestVoiceHelperProcess(t *testing.T) {
 		os.Exit(71)
 	}
 	mode, marker := parts[0], parts[1]
+	if err := os.WriteFile(marker+".threads", []byte(threadArg), 0600); err != nil {
+		os.Exit(72)
+	}
 	file, err := os.OpenFile(marker, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
 	if err != nil {
 		os.Exit(72)
@@ -300,6 +329,11 @@ func TestVoiceHelperProcess(t *testing.T) {
 
 func testClient(t *testing.T, mode string) (*Client, string) {
 	t.Helper()
+	return testClientWithThreads(t, mode, 0)
+}
+
+func testClientWithThreads(t *testing.T, mode string, threads int) (*Client, string) {
+	t.Helper()
 	binary, err := os.Executable()
 	if err != nil {
 		t.Fatal(err)
@@ -311,7 +345,7 @@ func testClient(t *testing.T, mode string) (*Client, string) {
 		t.Fatal(err)
 	}
 	marker := filepath.Join(dir, "starts")
-	c, err := New(Config{BinaryPath: wrapper, ModelPath: mode + "|" + marker})
+	c, err := New(Config{BinaryPath: wrapper, ModelPath: mode + "|" + marker, Threads: threads})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -69,8 +69,8 @@ func (v VoiceConfig) withDefaults() (VoiceConfig, error) {
 	if v.Threads == 0 {
 		v.Threads = 2
 	}
-	if v.Threads < 1 || v.Threads > 2 {
-		return v, errors.New("gateway config: voice.threads must be 1 or 2")
+	if v.Threads < 1 || v.Threads > 32 {
+		return v, errors.New("gateway config: voice.threads must be between 1 and 32")
 	}
 	if !filepath.IsAbs(v.HelperPath) || !filepath.IsAbs(v.ModelPath) || strings.ContainsRune(v.HelperPath, '\x00') || strings.ContainsRune(v.ModelPath, '\x00') {
 		return v, errors.New("gateway config: voice helper_path and model_path must be absolute local paths")

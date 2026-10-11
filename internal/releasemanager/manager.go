@@ -72,7 +72,7 @@ const usage = `Install and update Codex Telegram Gateway from verified GitHub Re
 
 Usage:
   codex-telegramgw setup [gateway|worker]
-  codex-telegramgw setup voice
+  codex-telegramgw setup voice [--model base|small] [--threads 1..32]
   codex-telegramgw finish gateway
   codex-telegramgw https refresh
   codex-telegramgw install gateway --config PATH --secrets-env PATH [--auto-update]
@@ -88,8 +88,10 @@ Install and update accept --version vMAJOR.MINOR.PATCH and --repo OWNER/REPOSITO
 Run gateway administration with sudo and worker administration as its user.
 Setup defaults to gateway under sudo/root and worker otherwise.
 Gateway setup reuses ./gateway.json and ./secrets.env or prompts for settings.
-Voice setup downloads a verified helper and multilingual base model, enables voice,
-and restarts only the gateway. Gateway updates keep its helper at the same version.
+Voice setup downloads a verified helper and pinned multilingual base or small model,
+enables voice, and restarts only the gateway. Fresh setup uses base and two threads;
+omitted voice options preserve supported installed settings.
+Gateway updates keep its helper at the same version.
 It guides HTTPS, Telegram activation, and administrator enrollment.
 Worker setup installs Codex and starts device sign-in when needed.
 Worker setup reuses ./worker.json or asks for a name and one-use enrollment URL.
@@ -201,8 +203,12 @@ func Execute(ctx context.Context, args []string, out, errOut io.Writer) int {
 	}
 	var err error
 	if args[0] == "setup" {
-		if len(args) == 2 && args[1] == "voice" {
-			err = New(out).SetupVoice(ctx)
+		if len(args) >= 2 && args[1] == "voice" {
+			var opts VoiceSetupOptions
+			opts, err = parseVoiceSetupOptions(args[2:])
+			if err == nil {
+				err = New(out).SetupVoiceWithOptions(ctx, opts)
+			}
 		} else {
 			var component string
 			component, err = setupComponent(args[1:], os.Geteuid())

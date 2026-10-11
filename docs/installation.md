@@ -722,14 +722,26 @@ transcription, and restarts the gateway. The model is kept at
 `/usr/local/share/codex-whisper/ggml-base.bin`. The helper is part of subsequent
 gateway updates and their backup/rollback handling; the model is reused.
 
-The gateway JSON contains:
+To select the larger multilingual small model and three CPU inference threads:
+
+```sh
+sudo codex-telegramgw setup voice --model small --threads 3
+```
+
+Supported setup models are `base` (148 MB) and `small` (488 MB). Both downloads
+use pinned checksums. Threads can be set from 1 to 32; choose a value appropriate
+for the gateway host. Fresh installations default to base and two threads.
+Running setup again without these options preserves the configured supported
+model and thread count. Ordinary gateway updates also preserve this selection.
+
+For small with three threads, the gateway JSON contains:
 
 ```json
 "voice": {
   "enabled": true,
   "helper_path": "/usr/local/lib/codex-telegramgw/codex-whisper",
-  "model_path": "/usr/local/share/codex-whisper/ggml-base.bin",
-  "threads": 2
+  "model_path": "/usr/local/share/codex-whisper/ggml-small.bin",
+  "threads": 3
 }
 ```
 
@@ -737,6 +749,11 @@ Voice transcription is disabled until setup is run. To disable it again, set
 `voice.enabled` to `false` and restart the gateway. Pending voice jobs are then
 cancelled. The feature does not require changing worker sandbox settings or
 installing anything on worker hosts.
+
+Received voice recordings are downloaded and decoded in memory and passed to
+Whisper through its input pipe. No recording, WAV, or PCM file is written to
+disk. The transcript is retained as normal session text; the reusable model
+file remains installed.
 
 Redistributable helper archives cover Linux amd64/arm64 and macOS amd64/arm64.
 Linux helpers are static musl executables. macOS helpers use system libraries

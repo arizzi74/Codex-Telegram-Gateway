@@ -192,7 +192,7 @@ func TestPruneUpdateBackupsDoesNotFollowSymlinks(t *testing.T) {
 
 func TestPruneUpdateBackupsValidatesTimestampNames(t *testing.T) {
 	l := retentionFixture(t, "worker")
-	want := []string{"20260230T120000Z-1", "notes", "20260901T120000Z-not-a-random-suffix"}
+	want := []string{"20260230T120000Z-1", "notes", "20260901T120000Z-not-a-random-suffix", "voice-123"}
 	for _, name := range want {
 		if err := os.Mkdir(filepath.Join(l.Backups, name), 0o700); err != nil {
 			t.Fatal(err)
@@ -221,6 +221,65 @@ func TestPruneUpdateBackupsGatewayRequiresDatabaseSnapshot(t *testing.T) {
 	}
 	if got := retentionNames(t, l); !reflect.DeepEqual(got, []string{complete}) {
 		t.Fatalf("remaining entries = %v; want complete gateway backup", got)
+	}
+}
+
+func TestPruneUpdateBackupsGatewayOptionalWhisperSnapshot(t *testing.T) {
+	l := retentionFixture(t, "gateway")
+	withoutHelper := retentionSnapshot(t, l, 1, "v1.0.0")
+	withHelper := retentionSnapshot(t, l, 2, "v1.1.0")
+	current := retentionSnapshot(t, l, 3, "v2.0.0")
+	for _, name := range []string{withHelper, current} {
+		retentionWrite(t, filepath.Join(l.Backups, name, "04-codex-whisper"), "verified helper snapshot")
+	}
+	if removed, err := pruneUpdateBackups(l, "v2.0.0"); removed != 1 || err != nil {
+		t.Fatalf("prune = %d, %v; expected current-version snapshot removed", removed, err)
+	}
+	if got := retentionNames(t, l); !reflect.DeepEqual(got, []string{withoutHelper, withHelper}) {
+		t.Fatalf("remaining snapshots = %v; want previous versions with and without helper", got)
+	}
+	if got := updateRead(t, filepath.Join(l.Backups, withHelper, "04-codex-whisper")); got != "verified helper snapshot" {
+		t.Fatalf("retained helper snapshot changed: %q", got)
+	}
+}
+
+func TestPruneUpdateBackupsPreservesUnexpectedWhisperSnapshots(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		component string
+	}{
+		{"worker", "worker"},
+		{"symlink", "gateway"},
+		{"directory", "gateway"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			l := retentionFixture(t, test.component)
+			name := retentionSnapshot(t, l, 1, "v2.0.0")
+			path := filepath.Join(l.Backups, name, "04-codex-whisper")
+			sentinel := filepath.Join(t.TempDir(), "keep")
+			retentionWrite(t, sentinel, "untouched")
+			switch test.name {
+			case "symlink":
+				if err := os.Symlink(sentinel, path); err != nil {
+					t.Fatal(err)
+				}
+			case "directory":
+				if err := os.Mkdir(path, 0o700); err != nil {
+					t.Fatal(err)
+				}
+			default:
+				retentionWrite(t, path, "unexpected helper")
+			}
+			if removed, err := pruneUpdateBackups(l, "v2.0.0"); removed != 0 || err == nil {
+				t.Fatalf("prune = %d, %v; expected unsafe or unexpected helper snapshot preserved", removed, err)
+			}
+			if got := retentionNames(t, l); !reflect.DeepEqual(got, []string{name}) {
+				t.Fatalf("unexpected snapshot removed: %v", got)
+			}
+			if got := updateRead(t, sentinel); got != "untouched" {
+				t.Fatalf("external sentinel changed: %q", got)
+			}
+		})
 	}
 }
 

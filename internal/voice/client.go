@@ -60,8 +60,8 @@ func New(config Config) (*Client, error) {
 	if config.Threads == 0 {
 		config.Threads = 2
 	}
-	if config.Threads < 1 || config.Threads > 2 {
-		return nil, errors.New("voice: Whisper threads must be 1 or 2")
+	if config.Threads < 1 || config.Threads > 32 {
+		return nil, errors.New("voice: Whisper threads must be between 1 and 32")
 	}
 	c := &Client{config: config, gate: make(chan struct{}, 1), done: make(chan struct{}), startupTimeout: helperStartupLimit}
 	c.gate <- struct{}{}

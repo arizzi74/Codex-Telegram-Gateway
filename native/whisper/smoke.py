@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Verify real multilingual-base inference and warm protocol on a native host."""
+"""Verify real multilingual Whisper inference and warm protocol on a native host."""
 import array
 import hashlib
 import json
@@ -32,10 +32,18 @@ def download(url, target, digest):
 
 def main():
     helper = Path(sys.argv[1]).resolve()
+    model_name = os.environ.get("WHISPER_TEST_MODEL_NAME", "base")
+    if model_name not in ("base", "small"):
+        raise ValueError("WHISPER_TEST_MODEL_NAME must be base or small")
+    threads = int(os.environ.get("WHISPER_TEST_THREADS", "2"))
+    if not 1 <= threads <= 32:
+        raise ValueError("WHISPER_TEST_THREADS must be between 1 and 32")
+    pin_prefix = "WHISPER_MODEL_" if model_name == "base" else "WHISPER_SMALL_MODEL_"
+    model_filename = "ggml-" + model_name + ".bin"
     with tempfile.TemporaryDirectory(prefix="codex-whisper-smoke-") as directory:
         tmp = Path(directory)
-        model = Path(os.environ.get("WHISPER_TEST_MODEL", str(tmp / "ggml-base.bin")))
-        download("https://huggingface.co/ggerganov/whisper.cpp/resolve/" + PIN["WHISPER_MODEL_COMMIT"] + "/ggml-base.bin?download=true", model, PIN["WHISPER_MODEL_SHA256"])
+        model = Path(os.environ.get("WHISPER_TEST_MODEL", str(tmp / model_filename)))
+        download("https://huggingface.co/ggerganov/whisper.cpp/resolve/" + PIN[pin_prefix + "COMMIT"] + "/" + model_filename + "?download=true", model, PIN[pin_prefix + "SHA256"])
         speech = tmp / "jfk.wav"
         download("https://raw.githubusercontent.com/ggml-org/whisper.cpp/" + PIN["WHISPER_COMMIT"] + "/samples/jfk.wav", speech, "59dfb9a4acb36fe2a2affc14bacbee2920ff435cb13cc314a08c13f66ba7860e")
         with wave.open(str(speech)) as source:
@@ -43,7 +51,7 @@ def main():
             pcm = [sample[0] / 32768.0 for sample in struct.iter_unpack("<h", source.readframes(source.getnframes()))]
         with (tmp / "native.log").open("wb") as log:
             started = time.monotonic()
-            process = subprocess.Popen([str(helper), "--model", str(model), "--threads", "2"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=log)
+            process = subprocess.Popen([str(helper), "--model", str(model), "--threads", str(threads)], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=log)
             try:
                 assert json.loads(process.stdout.readline()) == {"type": "ready", "protocol": 1}
                 print("Cold model load: %.3fs" % (time.monotonic() - started), flush=True)

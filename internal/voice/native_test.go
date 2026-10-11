@@ -3,6 +3,7 @@ package voice
 import (
 	"context"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -15,6 +16,14 @@ func TestNativeHelperWarmTranscription(t *testing.T) {
 	if binary == "" || model == "" || audio == "" {
 		t.Skip("set TELEGRAMGW_VOICE_TEST_HELPER, TELEGRAMGW_VOICE_TEST_MODEL, and TELEGRAMGW_VOICE_TEST_AUDIO for native integration")
 	}
+	threads := 0
+	if value := os.Getenv("TELEGRAMGW_VOICE_TEST_THREADS"); value != "" {
+		var err error
+		threads, err = strconv.Atoi(value)
+		if err != nil {
+			t.Fatalf("invalid TELEGRAMGW_VOICE_TEST_THREADS: %v", err)
+		}
+	}
 	file, err := os.Open(audio)
 	if err != nil {
 		t.Fatal(err)
@@ -26,7 +35,7 @@ func TestNativeHelperWarmTranscription(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	c, err := New(Config{BinaryPath: binary, ModelPath: model, Threads: 2})
+	c, err := New(Config{BinaryPath: binary, ModelPath: model, Threads: threads})
 	if err != nil {
 		t.Fatal(err)
 	}

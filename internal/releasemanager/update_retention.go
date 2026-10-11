@@ -144,6 +144,8 @@ func inspectUpdateBackup(root *os.Root, name, component string) (updateBackup, e
 		allowed["04-codex-local"] = true
 		required = append(required, "04-codex-local")
 	} else {
+		// Whisper is optional and absent from older gateway snapshots.
+		allowed["04-codex-whisper"] = true
 		allowed["gateway.db"] = true
 		// SQLite's backup integrity check can leave WAL/shared-memory files.
 		// They belong to the snapshot and must be retained or removed with it.

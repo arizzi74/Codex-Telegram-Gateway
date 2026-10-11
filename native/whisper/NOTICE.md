@@ -9,13 +9,14 @@ The archive SHA256 is recorded in `source.env` and verified before compilation.
 whisper.cpp and its included ggml CPU implementation use the MIT license;
 see `licenses/whisper.cpp-MIT.txt`.
 
-The optional `ggml-base.bin` model contains OpenAI's multilingual Whisper base
-weights, converted by the whisper.cpp project. Model weights and code use the
+The optional `ggml-base.bin` and `ggml-small.bin` models contain OpenAI's
+multilingual Whisper base and small weights, converted by the whisper.cpp
+project. Model weights and code use the
 MIT license; see `licenses/Whisper-model-MIT.txt` and
 https://github.com/openai/whisper/blob/main/LICENSE.
-The converted model comes from the immutable Hugging Face revision
+The converted models come from the immutable Hugging Face revision
 `5359861c739e955e79d9a303bcbc70fb988958b1` of `ggerganov/whisper.cpp`.
-Its exact size and SHA256 are pinned in `source.env` and the native Go manager.
+Their exact sizes and SHA256 hashes are pinned in `source.env` and the native Go manager.
 No model weights are bundled in release archives.
 
 The Go gateway decodes Opus using Pion Opus, pinned to source commit
