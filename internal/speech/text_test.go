@@ -60,16 +60,21 @@ func TestSpeechPreparationHandlesPunctuationAndLiterals(t *testing.T) {
 		{"The gateway(worker) handles audio[locally].", "english", "The gateway worker handles audio locally."},
 		{"Impostazioni:\n- Apri /var/lib/audio.\n• Voce pronta:", "italian", "Impostazioni. Apri barra var barra lib barra audio. Voce pronta."},
 		{"Una frase.\n•\nAltra frase.", "italian", "Una frase. Altra frase."},
+		{"Worker nodo00 è pronto. La voce legge frasi complete.", "italian", "Worker nodo zero zero è pronto. La voce legge frasi complete."},
 		{"Prima frase. Seconda frase! Terza frase?", "italian", "Prima frase. Seconda frase! Terza frase?"},
 	} {
 		segments, err := speechSegments(tc.input, tc.language, count)
-		if err != nil || len(segments) != 1 || segments[0] != tc.want {
+		if err != nil || strings.Join(segments, " ") != tc.want {
 			t.Fatalf("speechSegments(%q) = %q, %v, want %q", tc.input, segments, err, tc.want)
 		}
 	}
 	parts := splitSpeechText("First sentence. Second sentence.\nThird sentence!", ".!?…\n")
 	if len(parts) != 3 {
 		t.Fatalf("punctuation followed by whitespace did not split: %q", parts)
+	}
+	segments, err := speechSegments("First sentence. Second sentence.\nThird sentence!", "english", count)
+	if err != nil || len(segments) != 3 {
+		t.Fatalf("individual sentences were merged into a model prompt: %q, %v", segments, err)
 	}
 }
 

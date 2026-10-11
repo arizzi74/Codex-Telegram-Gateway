@@ -58,18 +58,11 @@ func speechSegments(text, language string, count func(string) int) ([]string, er
 		}
 	}
 	var segments []string
-	current := ""
 	for _, unit := range units {
-		candidate := prepareSpeechChunk(strings.TrimSpace(current + " " + unit))
-		if current != "" && count(candidate) > maxSpeechTokens {
-			segments = append(segments, prepareSpeechChunk(current))
-			current = unit
-		} else {
-			current = candidate
-		}
-	}
-	if current != "" {
-		segments = append(segments, prepareSpeechChunk(current))
+		// The model is trained on individual sentences. Even under fifty
+		// tokens, merging a status sentence with a technical label can cause
+		// an early EOS or filler in the label. Preserve each natural boundary.
+		segments = append(segments, prepareSpeechChunk(unit))
 	}
 	if len(segments) == 0 {
 		return nil, errors.New("speech: empty prepared text")
@@ -94,6 +87,7 @@ func normalizeSpeechText(text, language string) string {
 	text = strings.NewReplacer("\"", "", "“", "", "”", "", "„", "", "«", "", "»", "", "’", "'", "‘", "'", "(", " ", ")", " ", "[", " ", "]", " ").Replace(text)
 	if language == "italian" {
 		text = expandItalianDottedNumbers(text)
+		text = expandItalianIdentifierDigits(text)
 	}
 	runes := []rune(text)
 	var out strings.Builder
@@ -123,6 +117,36 @@ func normalizeSpeechText(text, language string) string {
 		if strings.ContainsRune(".!?…,;:", r) && i+1 < len(runes) && !unicode.IsSpace(runes[i+1]) && !strings.ContainsRune(".!?…,;:", runes[i+1]) {
 			out.WriteByte(' ')
 		}
+	}
+	return out.String()
+}
+
+func expandItalianIdentifierDigits(text string) string {
+	runes := []rune(text)
+	var out strings.Builder
+	for i := 0; i < len(runes); {
+		if runes[i] < '0' || runes[i] > '9' {
+			out.WriteRune(runes[i])
+			i++
+			continue
+		}
+		end := i + 1
+		for end < len(runes) && runes[end] >= '0' && runes[end] <= '9' {
+			end++
+		}
+		if i > 0 && unicode.IsLetter(runes[i-1]) || end < len(runes) && unicode.IsLetter(runes[end]) {
+			out.WriteByte(' ')
+			for j, digit := range runes[i:end] {
+				if j > 0 {
+					out.WriteByte(' ')
+				}
+				out.WriteString(italianNumber(string(digit)))
+			}
+			out.WriteByte(' ')
+		} else {
+			out.WriteString(string(runes[i:end]))
+		}
+		i = end
 	}
 	return out.String()
 }
