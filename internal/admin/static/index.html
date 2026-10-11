@@ -43,22 +43,23 @@
       <h2 id="bot-heading">Telegram bot</h2>
       <div id="bot-info"><p class="muted">Bot information is not available.</p></div>
     </section>
-    <section class="card sessions-card" aria-labelledby="session-heading">
-      <div class="row section-heading">
-        <div><h2 id="session-heading">Sessions</h2><p class="muted">Your sessions across all workers. Internal subagent sessions are excluded.</p></div>
+    <details id="session-section" class="card sessions-card" aria-labelledby="session-heading">
+      <summary><h2 id="session-heading">Sessions</h2></summary>
+      <div class="sessions-content">
+        <p class="muted">Your sessions across all workers. Internal subagent sessions are excluded.</p>
+        <div class="session-filters">
+          <label>Find a session<input id="session-search" type="search" placeholder="Name, directory, or worker" autocomplete="off"></label>
+          <label>State<select id="session-state"><option value="">All states</option></select></label>
+        </div>
+        <p id="session-count" class="muted" role="status"></p>
+        <div id="session-list"></div>
+        <nav id="session-pagination" class="pagination" aria-label="Session pages" hidden>
+          <button id="session-prev" class="secondary">Previous</button>
+          <span id="session-page" class="muted"></span>
+          <button id="session-next" class="secondary">Next</button>
+        </nav>
       </div>
-      <div class="session-filters">
-        <label>Find a session<input id="session-search" type="search" placeholder="Name, directory, or worker" autocomplete="off"></label>
-        <label>State<select id="session-state"><option value="">All states</option></select></label>
-      </div>
-      <p id="session-count" class="muted" role="status"></p>
-      <div id="session-list"></div>
-      <nav id="session-pagination" class="pagination" aria-label="Session pages" hidden>
-        <button id="session-prev" class="secondary">Previous</button>
-        <span id="session-page" class="muted"></span>
-        <button id="session-next" class="secondary">Next</button>
-      </nav>
-    </section>
+    </details>
     <section class="card" aria-labelledby="worker-heading">
       <div class="row"><div><h2 id="worker-heading">Workers</h2><p>Create a one-use URL and paste it into the worker installer within 10 minutes.</p></div><button id="new-worker">Enroll worker</button></div>
       <div id="worker-list"></div>

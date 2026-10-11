@@ -27,7 +27,7 @@ const data = {
 
 (async () => {
   const browser = await chromium.launch({ headless: true });
-  const page = await browser.newPage({ viewport: { width: 390, height: 844 } });
+  const page = await browser.newPage({ viewport: { width: 390, height: 844 }, hasTouch: true });
   const errors = [];
   const consoleMessages = [];
   page.on('pageerror', error => errors.push(error.message));
@@ -133,6 +133,12 @@ const data = {
     if (page.clock) await page.clock.install();
     await page.goto('https://admin.test/tgw/admin');
     await page.waitForSelector('#console:not([hidden])');
+    const sessionSection = page.locator('#session-section');
+    const sessionToggle = sessionSection.locator(':scope > summary');
+    assert.equal(await sessionSection.evaluate(section => section.open), false, 'Sessions start collapsed');
+    assert.equal(await page.locator('#session-search').isVisible(), false, 'Collapsed sessions hide their controls');
+    await sessionToggle.tap();
+    assert.equal(await sessionSection.evaluate(section => section.open), true, 'Touch opens sessions');
     assert.equal(await page.locator('#sessions').textContent(), '12');
     assert.equal(await page.locator('.session-card').count(), 10);
     assert.equal(await page.locator('.session-card h3').first().textContent(), fullName);
@@ -154,6 +160,7 @@ const data = {
     await page.locator('.session-card summary').first().click();
     await page.locator('#refresh').click();
     await page.waitForFunction(() => !document.getElementById('refresh').disabled);
+    assert.equal(await sessionSection.evaluate(section => section.open), true, 'Refresh preserves the expanded sessions section');
     assert.equal(await page.locator('.session-card details').first().getAttribute('open'), '', 'Refresh preserves expanded details');
     assert.match(await page.locator('.session-card').first().innerText(), /6,000 \/ 200,000 \(3%\)/);
     if (process.env.ADMIN_UI_SCREENSHOTS) {
@@ -342,6 +349,13 @@ const data = {
     assert.ok(mutations.some(entry => entry.path.endsWith('/sessions/' + otherBrowserID) && entry.method === 'DELETE'));
     await page.setViewportSize({ width: 1440, height: 1000 });
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
+    await sessionToggle.focus();
+    await page.keyboard.press('Space');
+    assert.equal(await sessionSection.evaluate(section => section.open), false, 'Keyboard collapses sessions');
+    assert.equal(await page.locator('#session-search').isVisible(), false);
+    await page.keyboard.press('Enter');
+    assert.equal(await sessionSection.evaluate(section => section.open), true, 'Keyboard opens sessions');
+    assert.equal(await page.locator('#session-search').isVisible(), true);
     await page.locator('#new-worker').click();
     await waitForEnrollment();
     assert.equal(await page.locator('#worker-enrollment').evaluate(dialog => dialog.scrollWidth <= dialog.clientWidth && dialog.getBoundingClientRect().width <= innerWidth), true, 'Desktop enrollment dialog fits');
@@ -407,6 +421,7 @@ const data = {
       await page.goto('https://admin.test/tgw/admin/?next=' + encodeURIComponent(destination));
       await page.waitForSelector('#console:not([hidden])');
       assert.equal(new URL(page.url()).pathname, '/tgw/admin/', 'Unsafe or unsupported return targets stay in admin');
+      assert.equal(await sessionSection.evaluate(section => section.open), false, 'Sessions start collapsed on desktop too');
     }
     // Explicit sign-out cleans up the browser device even after a fresh login.
     const device = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee';
@@ -418,6 +433,6 @@ const data = {
     assert.ok(logoutCalls.some(entry => entry.path.endsWith('/webui/push/unsubscribe') && JSON.parse(entry.body).subscription_id === device), 'Sign-out disables the current device');
     assert.ok(logoutCalls.findIndex(entry => entry.path.endsWith('/webui/push/unsubscribe')) < logoutCalls.findIndex(entry => entry.path.endsWith('/admin/logout')), 'Device cleanup starts while the login is still valid');
     assert.deepEqual(errors, []);
-    console.log('Admin browser checks passed: mobile/desktop layout, keyboard access, stats, filters, safe rendering, one-use enrollment URL/copy/expiry/revocation/error recovery, no secret persistence, renewal/poll races, failed-finish recovery, session expiry.');
+    console.log('Admin browser checks passed: mobile/desktop layout, collapsed sessions with touch/keyboard access, stats, filters, safe rendering, one-use enrollment URL/copy/expiry/revocation/error recovery, no secret persistence, renewal/poll races, failed-finish recovery, session expiry.');
   } finally { await browser.close(); }
 })().catch(error => { console.error(error); process.exitCode = 1; });
