@@ -95,6 +95,37 @@ func (s *Store) CreateCallback(ctx context.Context, callback Callback) (string, 
 	if err != nil {
 		return "", err
 	}
+	// Rendering runs outside the delivery transaction. A worker purge may remove
+	// its runtime, wizard, or origin delivery after the renderer takes a snapshot;
+	// those references live in JSON and have no foreign keys. Hold the writer
+	// reservation from validation through insertion so a stale render cannot
+	// recreate a callback after its related records have been deleted.
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return "", fmt.Errorf("registry: begin callback creation: %w", err)
+	}
+	defer tx.Rollback(ctx)
+	var referencesValid bool
+	err = tx.QueryRow(ctx, `SELECT
+        ($1='' OR EXISTS(SELECT 1 FROM runtimes runtime JOIN workers worker USING(worker_id)
+            WHERE runtime.runtime_id=$1 AND worker.enabled=TRUE))
+        AND ($2='' OR EXISTS(SELECT 1 FROM telegram_session_wizards wizard
+            LEFT JOIN runtimes runtime ON runtime.runtime_id=wizard.runtime_id
+            LEFT JOIN workers worker ON worker.worker_id=runtime.worker_id
+            WHERE wizard.wizard_id=$2 AND (wizard.runtime_id IS NULL OR worker.enabled=TRUE)))
+        AND ($3='' OR EXISTS(SELECT 1 FROM telegram_deliveries WHERE delivery_id=$3))
+        AND ($4='' OR EXISTS(SELECT 1 FROM sessions session JOIN workers worker USING(worker_id)
+            WHERE session.session_id=$4 AND worker.enabled=TRUE))
+        AND ($5='' OR EXISTS(SELECT 1 FROM approvals approval JOIN workers worker USING(worker_id)
+            WHERE approval.approval_id=$5 AND worker.enabled=TRUE))`,
+		uuidText(callback.RuntimeID), callback.WizardID, callback.OriginDeliveryID,
+		uuidText(callback.SessionID), uuidText(callback.ApprovalID)).Scan(&referencesValid)
+	if err != nil {
+		return "", fmt.Errorf("registry: validate callback references: %w", err)
+	}
+	if !referencesValid {
+		return "", ErrCallbackInvalid
+	}
 	for range 3 {
 		token, err := callbackToken()
 		if err != nil {
@@ -107,13 +138,16 @@ func (s *Store) CreateCallback(ctx context.Context, callback Callback) (string, 
 		if callback.ApprovalID != uuid.Nil {
 			approvalID = callback.ApprovalID
 		}
-		ct, err := s.pool.Exec(ctx, `INSERT INTO telegram_callbacks
+		ct, err := tx.Exec(ctx, `INSERT INTO telegram_callbacks
             (token, action, telegram_user_id, session_id, approval_id, payload, expires_at)
             VALUES ($1,$2,$3,$4,$5,$6,$7) ON CONFLICT (token) DO NOTHING`, token, callback.Action, callback.UserID, sessionID, approvalID, string(payload), callback.ExpiresAt)
 		if err != nil {
 			return "", fmt.Errorf("registry: create callback: %w", err)
 		}
 		if ct.RowsAffected() == 1 {
+			if err := tx.Commit(ctx); err != nil {
+				return "", fmt.Errorf("registry: commit callback creation: %w", err)
+			}
 			return token, nil
 		}
 	}

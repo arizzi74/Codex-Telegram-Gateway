@@ -498,6 +498,10 @@ func (s *Server) worker(w http.ResponseWriter, r *http.Request) {
 		bad(w)
 		return
 	}
+	if r.Method == http.MethodDelete && len(parts) == 2 && parts[1] == "purge" {
+		s.purgeWorker(w, r, id)
+		return
+	}
 	if r.Method == "DELETE" && len(parts) == 1 {
 		if err = s.store.RevokeWorker(r.Context(), id); err != nil {
 			if errors.Is(err, registry.ErrWorkerNotFound) {

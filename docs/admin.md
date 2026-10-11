@@ -68,6 +68,7 @@ The browser uses these endpoints:
 | `DELETE /tgw/api/v1/admin/worker-enrollments/{id}` | Revokes an unused enrollment URL. |
 | `POST /tgw/api/v1/admin/workers` | Legacy direct worker creation; returns its authentication token once. |
 | `DELETE /tgw/api/v1/admin/workers/{id}` | Revokes a worker. |
+| `DELETE /tgw/api/v1/admin/workers/{id}/purge` | Permanently deletes a revoked worker and its related gateway database records; requires `{"confirmed":true}`. |
 | `POST /tgw/api/v1/admin/workers/{id}/rotate-token` | Returns a replacement worker authentication token. |
 
 All state-changing admin requests require the exact configured `Origin`, the strict
@@ -85,8 +86,8 @@ session, invalidates the previous token and transfers that browser's notificatio
 subscriptions. Cancellation leaves the existing login valid until its original
 expiry. Registration of a passkey itself has no automatic expiry.
 
-Adding or removing passkeys and enrolling, revoking or rotating a worker require
-authentication within the previous five minutes. The console asks for a
+Adding or removing passkeys and enrolling, revoking, deleting or rotating a
+worker require authentication within the previous five minutes. The console asks for a
 passkey or the configured password when needed; a rejected or cancelled
 verification performs no mutation.
 Both stages of additional-passkey registration enforce this check. Browser
@@ -155,6 +156,24 @@ question. A lost redemption response is not automatically replayed: inspect the
 worker inventory, revoke any incomplete
 worker created by that attempt, and generate a fresh URL. Worker credentials
 remain valid after the enrollment URL expires, until rotated or revoked.
+
+## Removing a worker
+
+**Revoke** disables the worker's credentials and connection, while retaining its
+records for inspection. A revoked worker has a **Delete** button in the Workers
+panel. The confirmation identifies the worker and explains that deletion
+permanently purges all related gateway database records, including runtimes,
+sessions, synchronized history, commands, questions, enrollment records, and
+Telegram routing and delivery records. Cancellation leaves those records intact.
+
+Deletion requires authentication within the previous five minutes and an
+already revoked worker. The purge runs in one database transaction; any failure
+leaves the records intact. Other workers and administrator access are preserved.
+Shared chat settings and anonymous Telegram update receipts are retained; the
+receipts contain no worker content or linkage and prevent old webhook retries
+from executing again after deletion.
+Project files and native Codex session history on the worker are untouched;
+the worker service is not uninstalled. Existing database backups are not rewritten.
 
 ## Browser sessions
 

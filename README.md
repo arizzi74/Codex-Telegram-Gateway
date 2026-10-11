@@ -156,7 +156,9 @@ to create a session: enter its name and edit the suggested
 `~/CODEX/session_name` project path if needed. Spaces in the name become
 underscores in the suggested path; existing project directories can also be used.
 Revoked workers and their sessions are hidden from the sidebar and Telegram
-session pickers, while their records remain in the admin console.
+session pickers, while their records remain in the admin console. Use **Delete**
+beside a revoked worker to permanently purge its gateway database records after
+confirmation; its project files and native Codex sessions stay on the worker.
 
 Browser sign-in can be renewed in place before its eight-hour expiry. Optional
 username/password access is configured in the [admin console](docs/admin.md#optional-username-and-password)

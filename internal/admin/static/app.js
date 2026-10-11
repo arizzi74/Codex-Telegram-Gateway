@@ -355,7 +355,15 @@ function renderWorkers(workers) {
           await load(false);
         }
       }));
-    } else actions.append(badge('revoked'));
+    } else {
+      actions.append(badge('revoked'));
+      actions.append(button('Delete', 'danger', async () => {
+        if (confirm(`Permanently delete revoked worker "${worker.Name || worker.ID}"?\n\nThis irreversibly removes the worker and all related gateway database records, including sessions, history, and routing. Project files and native Codex sessions are untouched.\n\nThis cannot be undone.`)) {
+          await sensitiveCall('/workers/' + encodeURIComponent(worker.ID) + '/purge', { method: 'DELETE', body: JSON.stringify({ confirmed: true }) });
+          await load(false);
+        }
+      }));
+    }
     row.append(info, actions);
     $('worker-list').append(row);
   }

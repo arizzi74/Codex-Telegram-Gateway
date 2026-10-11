@@ -11,6 +11,7 @@ const assets = path.resolve(__dirname, '../internal/admin/static');
 const malicious = '<img src=x onerror="window.injected=true">';
 const time = '2026-01-20T12:00:00Z';
 const fullName = 'A complete session title that stays readable on a narrow screen and is never truncated ' + malicious;
+const revokedWorkerName = 'Revoked worker ' + malicious;
 const sessions = Array.from({ length: 12 }, (_, i) => ({
   session_id: 'session-' + i, worker_id: 'worker-1', runtime_id: 'runtime-1', codex_thread_id: 'thread-' + i,
   name: i === 0 ? fullName : 'Session ' + i, cwd: i === 0 ? '/projects/a-very-long-directory-name-that-must-wrap-without-horizontal-scroll/' + 'z'.repeat(150) : '/projects/sample',
@@ -19,7 +20,10 @@ const sessions = Array.from({ length: 12 }, (_, i) => ({
   stats: i === 1 ? { history_complete: false } : { created_at: time, active_since: i === 0 ? time : undefined, last_message_at: time, prompt_count: i === 0 ? 0 : 12, assistant_message_count: 11, total_tokens: 42000, input_tokens: 40000, cached_input_tokens: 5000, output_tokens: 2000, reasoning_output_tokens: 1000, context_tokens: 6000, context_window: 200000, last_message_role: 'user', last_message: malicious, model: 'test-model', reasoning_effort: 'high', observed_at: time, history_complete: i !== 2 },
 }));
 const data = {
-  workers: [{ ID: 'worker-1', Name: 'Linux worker ' + malicious, OS: 'linux', Arch: 'amd64', Connectivity: 'connected', Version: '1.2.3', Enabled: true }],
+  workers: [
+    { ID: 'worker-1', Name: 'Linux worker ' + malicious, OS: 'linux', Arch: 'amd64', Connectivity: 'connected', Version: '1.2.3', Enabled: true },
+    { ID: 'worker-revoked', Name: revokedWorkerName, OS: 'linux', Arch: 'amd64', Connectivity: 'disconnected', Version: '1.2.3', Enabled: false },
+  ],
   runtimes: [{ runtime_id: 'runtime-1' }],
   sessions: [...sessions, { session_id: 'hidden', name: 'Archived subagent', state: 'idle', archived: true }], pending_approvals: 1, queued_commands: 0,
   bot: { username: 'example_bot', display_name: 'Example bot ' + malicious, id: 12345, status: 'connected', webhook_status: 'active', webhook_url: 'https://gateway.example.com/tgw/api/v1/telegram/webhook', pending_updates: 0, allowed_user_count: 1, allowed_chat_count: 0, checked_at: time },
@@ -50,6 +54,7 @@ const data = {
   let enrollmentInvalidID = false;
   let enrollmentURLOrigin = 'https://ADMIN.TEST:443';
   let enrollmentNumber = 0;
+  const workerPurgeStatuses = [];
   const enrollmentResponses = [];
   const otherBrowserID = 'bbbbbbbb-2222-4222-8222-bbbbbbbbbbbb';
   let otherBrowserRevoked = false;
@@ -91,6 +96,11 @@ const data = {
       else if (url.pathname.endsWith('/admin/logout')) { loginStatus = 401; status = 204; }
       else if (url.pathname.endsWith('/passkeys')) body = [{ id: 'test-passkey', created_at: time }];
       else if (url.pathname.endsWith('/rotate-token')) body = { token: 'one-time-secret' };
+      else if (url.pathname.endsWith('/workers/worker-revoked/purge') && request.method() === 'DELETE') {
+        status = workerPurgeStatuses.shift() ?? 204;
+        if (status === 204) data.workers = data.workers.filter(worker => worker.ID !== 'worker-revoked');
+        else body = status === 403 ? { code: 'reauthentication_required' } : { message: 'Unable to delete revoked worker.' };
+      }
       else if (url.pathname.endsWith('/worker-enrollments') && request.method() === 'POST') {
         if (enrollmentNetworkFailure === 'POST') return route.abort('failed');
         status = enrollmentPostStatus;
@@ -191,7 +201,12 @@ const data = {
     await page.waitForFunction(() => document.getElementById('dashboard-error').hidden && !document.getElementById('refresh').disabled);
     // Existing worker token rotation still reveals its secret only once.
     const dialogs = [];
-    page.on('dialog', async dialog => { dialogs.push({ message: dialog.message(), value: dialog.defaultValue() }); await dialog.accept(''); });
+    let confirmWorkerDeletion = false;
+    page.on('dialog', async dialog => {
+      dialogs.push({ message: dialog.message(), value: dialog.defaultValue() });
+      if (dialog.message().startsWith('Permanently delete revoked worker') && !confirmWorkerDeletion) await dialog.dismiss();
+      else await dialog.accept('');
+    });
     // The POST and token dialog finish before load() disables Refresh. An
     // already-enabled button does not prove that the resulting refresh ran.
     await Promise.all([
@@ -202,6 +217,54 @@ const data = {
     assert.ok(mutations.some(entry => entry.path.endsWith('/worker-1/rotate-token') && entry.method === 'POST'));
     assert.ok(dialogs.some(dialog => dialog.value === 'one-time-secret'));
     assert.equal((await page.locator('body').innerText()).includes('one-time-secret'), false);
+    const activeWorker = page.locator('#worker-list .worker').filter({ hasText: 'Worker ID: worker-1' });
+    const revokedWorker = page.locator('#worker-list .worker').filter({ hasText: 'Worker ID: worker-revoked' });
+    const deleteWorker = revokedWorker.getByRole('button', { name: 'Delete', exact: true });
+    const purgeCalls = () => mutations.filter(entry => entry.path.endsWith('/workers/worker-revoked/purge'));
+    assert.equal(await activeWorker.getByRole('button', { name: 'Delete', exact: true }).count(), 0, 'Enabled workers cannot be deleted');
+    assert.equal(await deleteWorker.count(), 1, 'Revoked workers can be deleted');
+    assert.equal(await revokedWorker.locator('.badge').textContent(), 'revoked', 'Delete retains the revoked badge');
+    const beforeCancelledDelete = mutations.length;
+    const beforeCancelledDeleteReads = dashboardReads;
+    await deleteWorker.click();
+    await page.waitForFunction(control => !control.disabled, await deleteWorker.elementHandle());
+    const deleteConfirmation = dialogs.at(-1).message;
+    assert.ok(deleteConfirmation.includes(revokedWorkerName), 'Deletion confirmation identifies the worker as plain text');
+    assert.match(deleteConfirmation, /all related gateway database records, including sessions, history, and routing/);
+    assert.match(deleteConfirmation, /Project files and native Codex sessions are untouched/);
+    assert.match(deleteConfirmation, /cannot be undone/);
+    assert.equal(mutations.length, beforeCancelledDelete, 'Cancelling deletion sends no mutation');
+    assert.equal(dashboardReads, beforeCancelledDeleteReads, 'Cancelling deletion does not refresh');
+    confirmWorkerDeletion = true;
+    // Cancelling fresh authentication preserves the worker without a delete request.
+    staleFreshAuth = true;
+    await page.evaluate(() => { window.failCredentials = true; });
+    await deleteWorker.click();
+    await page.waitForSelector('#dashboard-error:not([hidden])');
+    assert.equal(purgeCalls().length, 0, 'Cancelled fresh authentication sends no deletion');
+    assert.equal(await revokedWorker.count(), 1);
+    await page.evaluate(() => { window.failCredentials = false; });
+    staleFreshAuth = false;
+    // A failed purge retains the record and reports its error without refreshing.
+    workerPurgeStatuses.push(503);
+    const beforeFailedDeleteReads = dashboardReads;
+    await deleteWorker.click();
+    await page.waitForFunction(() => document.getElementById('dashboard-error').textContent === 'Unable to delete revoked worker.');
+    assert.equal(purgeCalls().length, 1);
+    assert.equal(dashboardReads, beforeFailedDeleteReads, 'Failed deletion does not refresh');
+    assert.equal(await revokedWorker.count(), 1, 'Failed deletion preserves the worker');
+    // An explicit fresh-auth rejection reauthenticates once, then refreshes on success.
+    workerPurgeStatuses.push(403, 204);
+    const beforeDeleteLogin = loginFinishCalls;
+    await deleteWorker.click();
+    await page.waitForFunction(() => ![...document.querySelectorAll('#worker-list .worker')].some(worker => worker.textContent.includes('Worker ID: worker-revoked')));
+    await page.waitForFunction(() => !document.getElementById('refresh').disabled);
+    assert.equal(loginFinishCalls, beforeDeleteLogin + 1);
+    assert.equal(purgeCalls().length, 3);
+    assert.ok(purgeCalls().every(entry => entry.method === 'DELETE' && entry.csrf === 'test-csrf'));
+    assert.ok(purgeCalls().every(entry => JSON.parse(entry.body).confirmed === true));
+    assert.equal(await page.locator('#workers').textContent(), '1', 'Successful deletion removes the worker from the dashboard');
+    assert.equal(await activeWorker.count(), 1);
     const enrollmentCalls = () => mutations.filter(entry => entry.path.includes('/worker-enrollments'));
     const waitForEnrollment = () => page.waitForFunction(() => !enrollmentBusy && !document.getElementById('enrollment-link').hidden);
     // Keyboard activation opens a modal and immediately creates a restricted URL.
@@ -433,6 +496,6 @@ const data = {
     assert.ok(logoutCalls.some(entry => entry.path.endsWith('/webui/push/unsubscribe') && JSON.parse(entry.body).subscription_id === device), 'Sign-out disables the current device');
     assert.ok(logoutCalls.findIndex(entry => entry.path.endsWith('/webui/push/unsubscribe')) < logoutCalls.findIndex(entry => entry.path.endsWith('/admin/logout')), 'Device cleanup starts while the login is still valid');
     assert.deepEqual(errors, []);
-    console.log('Admin browser checks passed: mobile/desktop layout, collapsed sessions with touch/keyboard access, stats, filters, safe rendering, one-use enrollment URL/copy/expiry/revocation/error recovery, no secret persistence, renewal/poll races, failed-finish recovery, session expiry.');
+    console.log('Admin browser checks passed: mobile/desktop layout, collapsed sessions with touch/keyboard access, stats, filters, safe rendering, revoked-worker deletion/confirmation/auth/error recovery, one-use enrollment URL/copy/expiry/revocation/error recovery, no secret persistence, renewal/poll races, failed-finish recovery, session expiry.');
   } finally { await browser.close(); }
 })().catch(error => { console.error(error); process.exitCode = 1; });
