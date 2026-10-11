@@ -228,7 +228,7 @@ worker or outdated worker produces a message in the dialog instead of navigating
 away. Switching sessions, disconnecting, or signing out cancels the dialog's
 pending request.
 
-Both the gateway and worker need v0.5.87 or later. The gateway uses the existing
+Both the gateway and worker need v0.5.89 or later. The gateway uses the existing
 authenticated worker connection and sends one bounded chunk at a time. Downloads
 require the administrator session, exact Origin and CSRF token. Authorization,
 worker connection and session/runtime identity are rechecked during transfer.

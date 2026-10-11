@@ -89,7 +89,16 @@ const contents = Buffer.from('# Complete artifact matrix\n\nPerformance results:
   const ready = () => page.waitForFunction(() => document.querySelector('#connection').dataset.state === 'connected');
   const link = label => page.locator('#messages').getByRole('link', { name: label, exact: true });
   const detailsReady = () => page.waitForFunction(() => document.querySelector('#file-message').textContent === 'Ready to download.');
-  const close = async () => { await page.getByRole('button', { name: 'Close file details', exact: true }).click(); await page.waitForFunction(() => !document.querySelector('#file-dialog').open); };
+  const close = async () => {
+    await page.locator('#file-dialog').evaluate(dialog => {
+      dialog.dataset.testCloseComplete = 'false';
+      // Removing `open` is synchronous; the native close event runs later,
+      // after the application's handler restores focus and aborts requests.
+      dialog.addEventListener('close', () => { dialog.dataset.testCloseComplete = 'true'; }, { once: true });
+    });
+    await page.getByRole('button', { name: 'Close file details', exact: true }).click();
+    await page.waitForFunction(() => { const dialog = document.querySelector('#file-dialog'); return !dialog.open && dialog.dataset.testCloseComplete === 'true'; });
+  };
   const release = async (value = { name: 'STALE.md', path: '/stale/path.md', size: 2 }) => {
     const pending = held.splice(0);
     for (const { route, body } of pending) await route.fulfill(body.download ? { contentType: 'application/octet-stream', body: contents } : { contentType: 'application/json', body: JSON.stringify(value) }).catch(() => {});
