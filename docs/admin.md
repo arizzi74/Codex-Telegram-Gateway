@@ -125,9 +125,11 @@ encoder. No Python, FFmpeg, hosted speech API key or subscription is required.
 Automatic language matching downloads both stock language models, using about
 430 MiB of disk in addition to the Whisper model; one language uses about
 215 MiB. The speech helper added about 321 MiB of resident RAM in the observed
-test; memory and processing time vary by machine and reply length. Text is sent
-first, and long audio replies are split into voice notes without summarizing the
-final answer. A speech failure leaves the text reply available.
+test; memory and processing time vary by machine and reply length. The typing
+indicator remains active while all reply audio is prepared. Once ready, the bot
+sends the complete final text first, then the audio. Long audio replies are split
+into voice notes without summarizing the final answer. If speech generation
+ultimately fails, the text is released on its own rather than being withheld.
 
 ## Worker enrollment
 

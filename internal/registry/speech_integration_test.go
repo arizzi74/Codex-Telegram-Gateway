@@ -31,17 +31,12 @@ func finalSpeechDelivery(t *testing.T, env eventTestEnv, reply bool) (TelegramVo
 	voice, result := completeSpeechVoice(t, env, reply, "it")
 	progressEvent(t, env, 2, "turn_started", "voice-turn", result.CommandID)
 	progressEvent(t, env, 3, "turn_completed", "voice-turn", "")
-	rows, err := env.store.ClaimDeliveries(t.Context(), 100)
-	if err != nil {
+	var delivery Delivery
+	if err := env.store.pool.QueryRow(t.Context(), `SELECT delivery_id,bot_id,chat_id,message_thread_id,kind,payload,attempt_count
+        FROM telegram_deliveries WHERE kind='turn_completed' ORDER BY created_at DESC LIMIT 1`).Scan(&delivery.ID, &delivery.BotID, &delivery.ChatID, &delivery.TopicID, &delivery.Kind, &delivery.Payload, &delivery.Attempt); err != nil {
 		t.Fatal(err)
 	}
-	for _, delivery := range rows {
-		if delivery.Kind == "turn_completed" {
-			return voice, delivery
-		}
-	}
-	t.Fatal("missing final text delivery")
-	return voice, Delivery{}
+	return voice, delivery
 }
 
 func claimSpeechTest(t *testing.T, store *Store) TelegramSpeechJob {
@@ -53,12 +48,65 @@ func claimSpeechTest(t *testing.T, store *Store) TelegramSpeechJob {
 	return job
 }
 
+func claimSpeechFinalText(t *testing.T, store *Store, final Delivery) {
+	t.Helper()
+	rows, err := store.ClaimDeliveries(t.Context(), 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, row := range rows {
+		if row.ID == final.ID {
+			return
+		}
+	}
+	t.Fatal("prepared final text was not claimable")
+}
+
+func prepareAndSendSpeechFinal(t *testing.T, store *Store, final Delivery) TelegramSpeechJob {
+	t.Helper()
+	job := claimSpeechTest(t, store)
+	if err := store.PrepareTelegramSpeech(t.Context(), job.ID, job.LeaseID); err != nil {
+		t.Fatal(err)
+	}
+	claimSpeechFinalText(t, store, final)
+	if err := store.MarkDeliverySent(t.Context(), final.ID, 100, "", "", ""); err != nil {
+		t.Fatal(err)
+	}
+	return job
+}
+
 func TestTelegramSpeechWaitsForAllFinalTextAndCorrelatesVoiceTurn(t *testing.T) {
 	env := newHistoryTestEnv(t)
 	_, final := finalSpeechDelivery(t, env, true)
-	if _, ok, err := env.store.ClaimTelegramSpeech(t.Context(), time.Minute); err != nil || ok {
-		t.Fatalf("speech preceded text: %v %v", ok, err)
+	for _, delivery := range claimProgress(t, env.store, 2) {
+		if delivery.ID == final.ID {
+			t.Fatal("final text preceded audio preparation")
+		}
 	}
+	if suppress, err := env.store.SuppressTelegramDelivery(t.Context(), final.ID); suppress || !errors.Is(err, ErrTelegramSpeechPending) {
+		t.Fatalf("send boundary did not hold final text: %v %v", suppress, err)
+	}
+	job := claimSpeechTest(t, env.store)
+	if allowed, err := env.store.CheckTelegramSpeech(t.Context(), job.ID, job.LeaseID); err != nil || !allowed {
+		t.Fatalf("preparation was denied before text delivery: %v %v", allowed, err)
+	}
+	assertTypingTargets(t, env.store, TelegramTypingTarget{BotID: "bot", ChatID: 20})
+	if sent, err := env.store.TelegramSpeechTextSent(t.Context(), job.ID, job.LeaseID); err != nil || sent {
+		t.Fatalf("speech upload preceded preparation: %v %v", sent, err)
+	}
+	if err := env.store.CheckpointTelegramSpeech(t.Context(), job.ID, job.LeaseID, 0, 200, false); !errors.Is(err, ErrTelegramSpeechPending) {
+		t.Fatalf("checkpoint preceded text: %v", err)
+	}
+	wake := env.store.TelegramVoiceJobsChanged()
+	if err := env.store.PrepareTelegramSpeech(t.Context(), job.ID, job.LeaseID); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-wake:
+	default:
+		t.Fatal("preparation did not wake text sender")
+	}
+	claimSpeechFinalText(t, env.store, final)
 	chunks := []json.RawMessage{json.RawMessage(`{"text":"first"}`), json.RawMessage(`{"text":"last"}`)}
 	if _, err := env.store.PrepareDeliveryChunks(t.Context(), final.ID, chunks); err != nil {
 		t.Fatal(err)
@@ -66,10 +114,10 @@ func TestTelegramSpeechWaitsForAllFinalTextAndCorrelatesVoiceTurn(t *testing.T) 
 	if err := env.store.MarkDeliveryChunkSent(t.Context(), final.ID, 0, 100, env.session.String(), "voice-turn", ""); err != nil {
 		t.Fatal(err)
 	}
-	if _, ok, err := env.store.ClaimTelegramSpeech(t.Context(), time.Minute); err != nil || ok {
-		t.Fatalf("speech preceded last text chunk: %v %v", ok, err)
+	if sent, err := env.store.TelegramSpeechTextSent(t.Context(), job.ID, job.LeaseID); err != nil || sent {
+		t.Fatalf("speech upload preceded last text chunk: %v %v", sent, err)
 	}
-	wake := env.store.TelegramVoiceJobsChanged()
+	wake = env.store.TelegramVoiceJobsChanged()
 	if err := env.store.MarkDeliveryChunkSent(t.Context(), final.ID, 1, 101, env.session.String(), "voice-turn", ""); err != nil {
 		t.Fatal(err)
 	}
@@ -78,7 +126,9 @@ func TestTelegramSpeechWaitsForAllFinalTextAndCorrelatesVoiceTurn(t *testing.T) 
 	default:
 		t.Fatal("last text chunk did not wake speech processor")
 	}
-	job := claimSpeechTest(t, env.store)
+	if sent, err := env.store.TelegramSpeechTextSent(t.Context(), job.ID, job.LeaseID); err != nil || !sent {
+		t.Fatalf("speech upload did not follow final text: %v %v", sent, err)
+	}
 	if job.DeliveryID != final.ID || job.SessionID != env.session.String() || job.TurnID != "voice-turn" || job.BotID != "bot" || job.ChatID != 20 || job.TopicID != 0 || job.UserID != 10 || job.Language != "it" || job.Text != "turn_completed text" || job.NextChunk != 0 || job.Attempts != 1 {
 		t.Fatalf("voice correlation lost: %+v", job)
 	}
@@ -107,6 +157,7 @@ func TestTelegramSpeechWaitsForAllFinalTextAndCorrelatesVoiceTurn(t *testing.T) 
 	if _, pending, err := env.store.NextTelegramSpeechAttempt(t.Context()); err != nil || pending {
 		t.Fatalf("completed speech still queued: %v %v", pending, err)
 	}
+	assertTypingTargets(t, env.store)
 }
 
 func TestTelegramSpeechDoesNotSpeakUnrelatedOrUnrequestedFinals(t *testing.T) {
@@ -170,15 +221,137 @@ func TestTelegramSpeechDeduplicatesFinalEvents(t *testing.T) {
 	if jobs != 1 || deliveries != 2 {
 		t.Fatalf("duplicate speech created: jobs=%d deliveries=%d", jobs, deliveries)
 	}
+	rows, err := env.store.ClaimDeliveries(t.Context(), 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, delivery := range rows {
+		if delivery.Kind == "turn_completed" {
+			t.Fatal("duplicate final bypassed speech preparation")
+		}
+	}
+}
+
+func TestTelegramSpeechPreparationFailureReleasesFinalText(t *testing.T) {
+	for _, scenario := range []string{"failure", "disabled", "expired", "exhausted lease"} {
+		t.Run(scenario, func(t *testing.T) {
+			env := newHistoryTestEnv(t)
+			_, final := finalSpeechDelivery(t, env, true)
+			job := claimSpeechTest(t, env.store)
+			var err error
+			switch scenario {
+			case "failure":
+				err = env.store.FailTelegramSpeech(t.Context(), job.ID, job.LeaseID, "speech_encoding_failed", false)
+			case "disabled":
+				err = env.store.CancelTelegramSpeechJobs(t.Context(), "bot")
+			case "expired":
+				_, err = env.store.pool.Exec(t.Context(), `UPDATE telegram_speech_jobs SET expires_at=$2 WHERE job_id=$1`, job.ID, time.Now().Add(-time.Second))
+			case "exhausted lease":
+				_, err = env.store.pool.Exec(t.Context(), `UPDATE telegram_speech_jobs SET attempts=$2,lease_until=$3 WHERE job_id=$1`, job.ID, MaxTelegramSpeechAttempts, time.Now().Add(-time.Second))
+				if err == nil {
+					_, _, err = env.store.ClaimTelegramSpeech(t.Context(), time.Minute)
+				}
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			claimSpeechFinalText(t, env.store, final)
+			if suppress, err := env.store.SuppressTelegramDelivery(t.Context(), final.ID); err != nil || suppress {
+				t.Fatalf("fallback final remains blocked: %v %v", suppress, err)
+			}
+			assertTypingTargets(t, env.store)
+		})
+	}
+}
+
+func TestTelegramSpeechRecoveryDropsReadinessAndFencesPriorLease(t *testing.T) {
+	env := newHistoryTestEnv(t)
+	_, final := finalSpeechDelivery(t, env, true)
+	first := claimSpeechTest(t, env.store)
+	if err := env.store.PrepareTelegramSpeech(t.Context(), first.ID, first.LeaseID); err != nil {
+		t.Fatal(err)
+	}
+	// A concurrent administrative open/migration must preserve the live lease.
+	reopened, err := Open(t.Context(), env.store.pool.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	if err := reopened.Migrate(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if suppress, err := reopened.SuppressTelegramDelivery(t.Context(), final.ID); err != nil || suppress {
+		t.Fatalf("administrative open reset readiness: %v %v", suppress, err)
+	}
+	if err := reopened.RecoverTelegramSpeech(t.Context(), "other-bot"); err != nil {
+		t.Fatal(err)
+	}
+	if allowed, err := env.store.CheckTelegramSpeech(t.Context(), first.ID, first.LeaseID); err != nil || !allowed {
+		t.Fatalf("another bot's recovery stole the lease: %v %v", allowed, err)
+	}
+	if err := reopened.RecoverTelegramSpeech(t.Context(), "bot"); err != nil {
+		t.Fatal(err)
+	}
+	if suppress, err := reopened.SuppressTelegramDelivery(t.Context(), final.ID); suppress || !errors.Is(err, ErrTelegramSpeechPending) {
+		t.Fatalf("lost in-memory audio released text: %v %v", suppress, err)
+	}
+	for _, update := range []func(context.Context, uuid.UUID, uuid.UUID) error{env.store.PrepareTelegramSpeech, env.store.RenewTelegramSpeech} {
+		if err := update(t.Context(), first.ID, first.LeaseID); !errors.Is(err, ErrTelegramSpeechLease) {
+			t.Fatalf("old lease changed readiness: %v", err)
+		}
+	}
+	second := claimSpeechTest(t, reopened)
+	if second.ID != first.ID || second.LeaseID == first.LeaseID || second.NextChunk != 0 || second.Attempts != 2 {
+		t.Fatalf("recovery changed job identity or lost attempt fencing: %+v", second)
+	}
+	if err := reopened.PrepareTelegramSpeech(t.Context(), second.ID, second.LeaseID); err != nil {
+		t.Fatal(err)
+	}
+	claimSpeechFinalText(t, reopened, final)
+}
+
+func TestTelegramSpeechRetryKeepsFinalHeldAndRenewalPreservesReadiness(t *testing.T) {
+	env := newHistoryTestEnv(t)
+	_, final := finalSpeechDelivery(t, env, true)
+	first := claimSpeechTest(t, env.store)
+	if err := env.store.FailTelegramSpeech(t.Context(), first.ID, first.LeaseID, "speech_synthesis_failed", true); err != nil {
+		t.Fatal(err)
+	}
+	if suppress, err := env.store.SuppressTelegramDelivery(t.Context(), final.ID); suppress || !errors.Is(err, ErrTelegramSpeechPending) {
+		t.Fatalf("retry released final text early: %v %v", suppress, err)
+	}
+	if _, err := env.store.pool.Exec(t.Context(), `UPDATE telegram_speech_jobs SET next_attempt_at=$1`, time.Now().Add(-time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	job, ok, err := env.store.ClaimTelegramSpeech(t.Context(), time.Minute)
+	if err != nil || !ok {
+		t.Fatalf("retry did not claim: %+v %v %v", job, ok, err)
+	}
+	before := time.Now()
+	if err := env.store.RenewTelegramSpeech(t.Context(), job.ID, job.LeaseID); err != nil {
+		t.Fatal(err)
+	}
+	if suppress, err := env.store.SuppressTelegramDelivery(t.Context(), final.ID); suppress || !errors.Is(err, ErrTelegramSpeechPending) {
+		t.Fatalf("renewal released unprepared text: %v %v", suppress, err)
+	}
+	if err := env.store.PrepareTelegramSpeech(t.Context(), job.ID, job.LeaseID); err != nil {
+		t.Fatal(err)
+	}
+	if err := env.store.RenewTelegramSpeech(t.Context(), job.ID, job.LeaseID); err != nil {
+		t.Fatal(err)
+	}
+	var prepared bool
+	var until time.Time
+	if err := env.store.pool.QueryRow(t.Context(), `SELECT prepared,lease_until FROM telegram_speech_jobs WHERE job_id=$1`, job.ID).Scan(&prepared, &until); err != nil || !prepared || until.Before(before.Add(11*time.Minute)) {
+		t.Fatalf("readiness or renewed lease lost: %v %v %v", prepared, until, err)
+	}
+	claimSpeechFinalText(t, env.store, final)
 }
 
 func TestTelegramSpeechResumesConfirmedChunkAfterRestart(t *testing.T) {
 	env := newHistoryTestEnv(t)
 	_, final := finalSpeechDelivery(t, env, true)
-	if err := env.store.MarkDeliverySent(t.Context(), final.ID, 100, "", "", ""); err != nil {
-		t.Fatal(err)
-	}
-	first := claimSpeechTest(t, env.store)
+	first := prepareAndSendSpeechFinal(t, env.store, final)
 	if err := env.store.CheckpointTelegramSpeech(t.Context(), first.ID, first.LeaseID, 0, 200, false); err != nil {
 		t.Fatal(err)
 	}
@@ -195,7 +368,7 @@ func TestTelegramSpeechResumesConfirmedChunkAfterRestart(t *testing.T) {
 	if _, ok, err := restarted.ClaimTelegramSpeech(t.Context(), time.Minute); err != nil || ok {
 		t.Fatalf("live speech lease stolen: %v %v", ok, err)
 	}
-	if _, err := restarted.pool.Exec(t.Context(), `UPDATE telegram_speech_jobs SET lease_until=$2 WHERE job_id=$1`, first.ID, time.Now().Add(-time.Second)); err != nil {
+	if err := restarted.RecoverTelegramSpeech(t.Context(), "bot"); err != nil {
 		t.Fatal(err)
 	}
 	second := claimSpeechTest(t, restarted)
@@ -207,6 +380,9 @@ func TestTelegramSpeechResumesConfirmedChunkAfterRestart(t *testing.T) {
 	}
 	if err := restarted.CheckpointTelegramSpeech(t.Context(), first.ID, first.LeaseID, 1, 201, true); !errors.Is(err, ErrTelegramSpeechLease) {
 		t.Fatalf("stale checkpoint accepted: %v", err)
+	}
+	if err := restarted.PrepareTelegramSpeech(t.Context(), second.ID, second.LeaseID); err != nil {
+		t.Fatal(err)
 	}
 	if err := restarted.CheckpointTelegramSpeech(t.Context(), second.ID, second.LeaseID, 1, 201, true); err != nil {
 		t.Fatal(err)
@@ -222,10 +398,7 @@ func TestTelegramSpeechRechecksAuthorizationAndRetiresRevokedJobs(t *testing.T) 
 		t.Run(scenario, func(t *testing.T) {
 			env := newHistoryTestEnv(t)
 			_, final := finalSpeechDelivery(t, env, true)
-			if err := env.store.MarkDeliverySent(t.Context(), final.ID, 100, "", "", ""); err != nil {
-				t.Fatal(err)
-			}
-			job := claimSpeechTest(t, env.store)
+			job := prepareAndSendSpeechFinal(t, env.store, final)
 			var err error
 			switch scenario {
 			case "chat":
@@ -263,10 +436,7 @@ func TestTelegramSpeechRechecksAuthorizationAndRetiresRevokedJobs(t *testing.T) 
 
 func TestTelegramSpeechRetriesAreBoundedAndRespectTelegramBackoff(t *testing.T) {
 	env := newHistoryTestEnv(t)
-	_, final := finalSpeechDelivery(t, env, true)
-	if err := env.store.MarkDeliverySent(t.Context(), final.ID, 100, "", "", ""); err != nil {
-		t.Fatal(err)
-	}
+	finalSpeechDelivery(t, env, true)
 	for attempt := 1; attempt <= MaxTelegramSpeechAttempts; attempt++ {
 		job := claimSpeechTest(t, env.store)
 		if job.Attempts != attempt {
@@ -298,10 +468,7 @@ func TestTelegramSpeechRetriesAreBoundedAndRespectTelegramBackoff(t *testing.T) 
 func TestTelegramSpeechWorkerPurgeCascadesCheckpoints(t *testing.T) {
 	env := newHistoryTestEnv(t)
 	_, final := finalSpeechDelivery(t, env, true)
-	if err := env.store.MarkDeliverySent(t.Context(), final.ID, 100, "", "", ""); err != nil {
-		t.Fatal(err)
-	}
-	job := claimSpeechTest(t, env.store)
+	job := prepareAndSendSpeechFinal(t, env.store, final)
 	if err := env.store.CheckpointTelegramSpeech(t.Context(), job.ID, job.LeaseID, 0, 200, false); err != nil {
 		t.Fatal(err)
 	}
@@ -396,10 +563,7 @@ func TestTelegramSpeechEmptyCancellationDoesNotWakeIdleProcessors(t *testing.T) 
 		t.Fatal("empty cancellation wakes its own disabled processor")
 	default:
 	}
-	_, final := finalSpeechDelivery(t, env, true)
-	if err := env.store.MarkDeliverySent(t.Context(), final.ID, 100, "", "", ""); err != nil {
-		t.Fatal(err)
-	}
+	finalSpeechDelivery(t, env, true)
 	wake = env.store.TelegramVoiceJobsChanged()
 	if err := env.store.CancelTelegramSpeechJobs(t.Context(), "bot"); err != nil {
 		t.Fatal(err)

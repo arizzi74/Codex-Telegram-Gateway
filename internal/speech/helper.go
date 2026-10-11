@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/ThiraSoft/golem/pockettts"
+	"github.com/ThiraSoft/golem/token/sentencepiece"
 )
 
 // RunHelper is called before loading gateway configuration when argv[1] is
@@ -46,6 +47,10 @@ func RunHelper(args []string, stdin io.Reader, stdout io.Writer) error {
 		return errors.New("speech: model loading failed")
 	}
 	defer engine.Close()
+	tokenizer, err := sentencepiece.Load(filepath.Join(path, "tokenizer.model"))
+	if err != nil {
+		return errors.New("speech: tokenizer loading failed")
+	}
 	voice, err := engine.LoadVoice(filepath.Join(path, "voice.safetensors"))
 	if err != nil {
 		return errors.New("speech: voice loading failed")
@@ -55,9 +60,9 @@ func RunHelper(args []string, stdin io.Reader, stdout io.Writer) error {
 		defer cancel()
 		settings := pockettts.DefaultSettings(engine.Language())
 		settings.Ctx = ctx
-		if lang == "english" {
-			settings.Temperature = 0.3
-		}
+		// Kyutai recommends 0.3 for both shipped six-layer models. Golem's
+		// older default of 0.7 makes technical Italian text less reliable.
+		settings.Temperature = 0.3
 		count := 0
 		settings.Frame = func(frame []float32) {
 			count += len(frame)
@@ -65,8 +70,47 @@ func RunHelper(args []string, stdin io.Reader, stdout io.Writer) error {
 				cancel()
 			}
 		}
-		return engine.Synthesize(text, voice, &settings)
+		return synthesizeSpeechSegments(ctx, text, lang, func(text string) int { return len(tokenizer.Encode(text)) }, func(segment string) ([]float32, error) {
+			return engine.Synthesize(segment, voice, &settings)
+		})
 	})
+}
+
+func synthesizeSpeechSegments(ctx context.Context, text, language string, count func(string) int, generate func(string) ([]float32, error)) (sound []float32, err error) {
+	segments, err := speechSegments(text, language, count)
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		if err != nil {
+			clear(sound)
+			sound = nil
+		}
+	}()
+	for _, segment := range segments {
+		if err := ctx.Err(); err != nil {
+			return sound, err
+		}
+		samples, generateErr := generate(segment)
+		// Golem silently returns audio when its duration bound is exhausted.
+		// That means EOS did not finish the utterance; never deliver that
+		// potentially repeated or truncated speech as a successful reply.
+		frames := int((float64(count(segment))/3 + 2) * pockettts.FramesPerSecond)
+		limit := frames * (SampleRate * 2 / 25)
+		if generateErr != nil || ctx.Err() != nil || len(samples) == 0 || len(samples) >= limit || len(sound)+len(samples) > maxSamples {
+			clear(samples)
+			if generateErr != nil {
+				return sound, generateErr
+			}
+			if ctx.Err() != nil {
+				return sound, ctx.Err()
+			}
+			return sound, errors.New("speech: generation did not finish within its model bound")
+		}
+		sound = append(sound, samples...)
+		clear(samples)
+	}
+	return sound, nil
 }
 
 func serve(stdin io.Reader, stdout io.Writer, synthesize func(context.Context, string) ([]float32, error)) error {

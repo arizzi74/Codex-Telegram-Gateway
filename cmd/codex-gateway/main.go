@@ -176,6 +176,14 @@ func run(args []string, logger *slog.Logger) error {
 		defer speechService.Close()
 		audioSettings.SetSpeechSupport(speechService)
 		speechService.SetInferenceLimiter(audioSettings)
+		// Prepared reply audio exists only in memory. Rebuild unfinished replies
+		// after a restart before the text sender can release their final text.
+		recoverCtx, cancelRecovery := context.WithTimeout(ctx, 10*time.Second)
+		err = store.RecoverTelegramSpeech(recoverCtx, cfg.Secrets.BotName)
+		cancelRecovery()
+		if err != nil {
+			return errors.New("could not recover pending Telegram audio replies")
+		}
 		mux.Handle("/tgw/api/v1/telegram/webhook", gateway.NewWebhook(store, cfg, secret, api, logger, audioSettings))
 		redactor, err := auth.NewRedactor([]string{regexp.QuoteMeta(cfg.Secrets.BotToken), regexp.QuoteMeta(secret), `cwk_[a-f0-9]+`, `sk-[A-Za-z0-9_-]{16,}`}, "[REDACTED]")
 		if err != nil {

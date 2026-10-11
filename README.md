@@ -274,8 +274,9 @@ the multilingual **base** model and one fewer thread than available cores
 alternative remains `sudo codex-telegramgw setup voice`.
 
 Optional spoken replies use a local, entirely Go Pocket TTS engine with English
-and Italian voices. A voice-note turn receives its normal final text followed
-by audio with the same content. No paid speech API, Python, or FFmpeg is needed;
+and Italian voices. The bot keeps showing typing while preparing the complete
+audio reply, then sends the final text followed by audio with the same content.
+No paid speech API, Python, or FFmpeg is needed;
 recordings stay in memory. See [voice notes](docs/telegram-commands.md#voice-notes)
 for limits, routing and resource use.
 

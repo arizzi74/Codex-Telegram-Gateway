@@ -81,7 +81,7 @@ func (s *Sender) Run(ctx context.Context) error {
 	ticker := time.NewTicker(200 * time.Millisecond)
 	defer ticker.Stop()
 	for {
-		if err := s.flush(ctx); err != nil {
+		if err := s.flush(ctx); err != nil && !errors.Is(err, registry.ErrTelegramSpeechPending) {
 			s.log.Warn("telegram delivery flush", "error", err)
 		}
 		select {
@@ -386,6 +386,9 @@ func oversizedSessionDelivery(row registry.Delivery, chunks []registry.DeliveryC
 }
 
 func telegramRetryDelay(attempt int, err error) time.Duration {
+	if errors.Is(err, registry.ErrTelegramSpeechPending) {
+		return time.Second
+	}
 	delay := min(time.Second<<min(max(attempt-1, 0), 6), time.Minute)
 	var telegram *TelegramError
 	if errors.As(err, &telegram) && telegram.RetryAfter > 0 {

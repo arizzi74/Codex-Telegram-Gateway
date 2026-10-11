@@ -37,6 +37,29 @@ type speechTestStore struct {
 	code     string
 	retry    bool
 	delay    time.Duration
+	prepared bool
+	prepare  func()
+	textSent func() bool
+	changed  chan struct{}
+}
+
+func (s *speechTestStore) TelegramVoiceJobsChanged() <-chan struct{}              { return s.changed }
+func (s *speechTestStore) CancelTelegramSpeechJobs(context.Context, string) error { return nil }
+func (s *speechTestStore) RenewTelegramSpeech(context.Context, uuid.UUID, uuid.UUID) error {
+	return nil
+}
+func (s *speechTestStore) PrepareTelegramSpeech(context.Context, uuid.UUID, uuid.UUID) error {
+	s.prepared = true
+	if s.prepare != nil {
+		s.prepare()
+	}
+	return nil
+}
+func (s *speechTestStore) TelegramSpeechTextSent(context.Context, uuid.UUID, uuid.UUID) (bool, error) {
+	if s.textSent != nil {
+		return s.textSent(), nil
+	}
+	return true, nil
 }
 
 func (s *speechTestStore) CheckTelegramSpeech(context.Context, uuid.UUID, uuid.UUID) (bool, error) {
@@ -62,6 +85,7 @@ type speechTestEngine struct {
 	threads        int
 	pcm            []float32
 	err            error
+	errAt          int
 	after          func()
 }
 
@@ -72,7 +96,10 @@ func (e *speechTestEngine) Synthesize(_ context.Context, text, lang string, thre
 	if e.after != nil {
 		e.after()
 	}
-	return e.pcm, e.err
+	if e.errAt == 0 || e.errAt == e.calls {
+		return e.pcm, e.err
+	}
+	return e.pcm, nil
 }
 
 type speechTestAPI struct {
@@ -80,12 +107,105 @@ type speechTestAPI struct {
 	chat, topic int64
 	data        []byte
 	err         error
+	before      func()
 }
 
 func (a *speechTestAPI) SendVoice(_ context.Context, chat, topic int64, data []byte, _ int) (int64, error) {
+	if a.before != nil {
+		a.before()
+	}
 	a.calls++
 	a.chat, a.topic, a.data = chat, topic, data
 	return 42, a.err
+}
+
+func TestSpeechPreparesEveryPartBeforeTextAndWaitsForTextBeforeAudio(t *testing.T) {
+	p, s, engine, api, _, job := newSpeechProcessorTest()
+	job.Text = strings.Repeat("This is a complete sentence with useful information. ", 50)
+	partCount := len(telegramSpeechParts(job.Text))
+	var encoded [][]byte
+	p.encode = func(context.Context, []float32, int) ([]byte, error) {
+		data := []byte("OggSsynthetic")
+		encoded = append(encoded, data)
+		return data, nil
+	}
+	s.prepare = func() {
+		if engine.calls != partCount || len(encoded) != partCount || api.calls != 0 {
+			t.Fatal("text released before every audio part was ready")
+		}
+	}
+	s.changed = make(chan struct{})
+	textChecks := 0
+	textConfirmed := false
+	s.textSent = func() bool {
+		textChecks++
+		if !s.prepared || api.calls != 0 {
+			t.Fatal("text wait violated prepared/text/audio order")
+		}
+		if textChecks == 1 {
+			close(s.changed)
+			s.changed = make(chan struct{})
+			return false
+		}
+		textConfirmed = true
+		return true
+	}
+	api.before = func() {
+		if !textConfirmed {
+			t.Fatal("audio sent before final text was confirmed")
+		}
+	}
+	p.process(t.Context(), job)
+	if api.calls != partCount || textChecks != 2 || !s.last || s.code != "" {
+		t.Fatalf("incomplete ordered reply: calls=%d checks=%d store=%+v", api.calls, textChecks, s)
+	}
+	for _, data := range encoded {
+		for _, b := range data {
+			if b != 0 {
+				t.Fatal("prepared audio retained after delivery")
+			}
+		}
+	}
+}
+
+func TestSpeechLaterPartFailureDoesNotReleaseTextEarlyOrSendPartialAudio(t *testing.T) {
+	p, s, engine, api, _, job := newSpeechProcessorTest()
+	job.Text = strings.Repeat("This is a complete sentence with useful information. ", 50)
+	engine.errAt, engine.err = 2, errors.New("synthesis failed")
+	var encoded []byte
+	p.encode = func(context.Context, []float32, int) ([]byte, error) {
+		encoded = []byte("OggSsynthetic")
+		return encoded, nil
+	}
+	p.process(t.Context(), job)
+	if s.prepared || api.calls != 0 || s.code != "speech_synthesis_failed" {
+		t.Fatalf("partial audio escaped preparation: %+v %+v", s, api)
+	}
+	for _, b := range encoded {
+		if b != 0 {
+			t.Fatal("prepared audio retained after synthesis failure")
+		}
+	}
+}
+
+func TestSpeechTextWaitEndsWithoutSendingAudioOnTimeoutOrDisable(t *testing.T) {
+	for _, disable := range []bool{false, true} {
+		p, s, _, api, settings, job := newSpeechProcessorTest()
+		p.textWait = 5 * time.Millisecond
+		s.changed = make(chan struct{})
+		s.textSent = func() bool {
+			if disable {
+				settings.value.ReplyWithAudio = false
+				close(s.changed)
+				s.changed = make(chan struct{})
+			}
+			return false
+		}
+		p.process(t.Context(), job)
+		if !s.prepared || api.calls != 0 || s.code != "speech_cancelled" {
+			t.Fatalf("audio sent after text wait stopped (disable=%t): %+v", disable, s)
+		}
+	}
 }
 func newSpeechProcessorTest() (*TelegramSpeechProcessor, *speechTestStore, *speechTestEngine, *speechTestAPI, *speechTestSettings, registry.TelegramSpeechJob) {
 	s := &speechTestStore{}

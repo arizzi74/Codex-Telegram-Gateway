@@ -283,8 +283,10 @@ normal account and usage allowance.
 With **Reply to voice notes with audio** enabled in the Audio panel, the bot
 sends the final text reply to a voice prompt and an audio version of the same
 content. This option is disabled by default and does not add audio to replies
-to typed prompts. Text arrives first; long answers can produce several voice
-notes. Audio failure does not remove the final text.
+to typed prompts. The bot keeps showing typing until the complete audio is ready,
+then sends the final text followed by its voice notes. Long answers can produce
+several voice notes; all are prepared before the text is released. If speech
+generation ultimately fails, the text is sent on its own.
 
 The local speech engine supports Italian and English; choose a language or let
 it match the voice note. Required speech models download when the settings are

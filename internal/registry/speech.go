@@ -17,8 +17,23 @@ const telegramSpeechLifetime = time.Hour
 
 var ErrTelegramSpeechLease = errors.New("registry: Telegram speech lease is no longer current")
 
-// TelegramSpeechJob references an already delivered final answer. NextChunk
-// resumes after confirmed messages; audio bytes never enter the database.
+// ErrTelegramSpeechPending defers a final answer until every audio chunk is ready.
+var ErrTelegramSpeechPending = errors.New("registry: Telegram speech preparation is pending")
+
+// A readiness flag is useful only while its owner still holds a live lease.
+// Expired jobs release the ordinary text path even if no speech processor runs.
+const pendingSpeechPreparationSQL = `EXISTS (
+    SELECT 1 FROM telegram_speech_jobs speech
+    WHERE delivery.kind='turn_completed'
+      AND speech.bot_id=delivery.bot_id AND speech.chat_id=delivery.chat_id AND speech.message_thread_id=delivery.message_thread_id
+      AND speech.session_id=json_extract(delivery.payload,'$.session_id') AND speech.turn_id=json_extract(delivery.payload,'$.data.turn_id')
+      AND speech.status IN ('pending','processing')
+      AND speech.expires_at>` + sqliteNow + `
+      AND (speech.prepared=0 OR speech.status='pending' OR speech.lease_until<=` + sqliteNow + `)
+)`
+
+// TelegramSpeechJob references a final answer held until its audio is prepared.
+// NextChunk resumes after confirmed messages; audio bytes never enter the database.
 type TelegramSpeechJob struct {
 	ID, LeaseID                          uuid.UUID
 	DeliveryID, SessionID, TurnID, BotID string
@@ -82,8 +97,26 @@ func scanSpeech(row *dbRow) (telegramSpeechRecord, error) {
 	return job, err
 }
 
-// ClaimTelegramSpeech recovers expired leases, preserves conversation order,
-// and requires every chunk of the ordinary final text to have been sent first.
+// RecoverTelegramSpeech fences the previous gateway's leases before outbound
+// services start. Audio is only in memory, so every surviving job must prepare
+// its unsent chunks again. Opening the database alone must not perform recovery:
+// administrative commands can open it alongside the running gateway.
+func (s *Store) RecoverTelegramSpeech(ctx context.Context, botID string) error {
+	if strings.TrimSpace(botID) == "" {
+		return errors.New("registry: Telegram bot ID is required")
+	}
+	result, err := s.pool.Exec(ctx, `UPDATE telegram_speech_jobs
+        SET status='pending',prepared=0,lease_id=NULL,lease_until=NULL,
+            next_attempt_at=CASE WHEN status='processing' THEN `+sqliteNow+` ELSE next_attempt_at END
+        WHERE bot_id=$1 AND status IN ('pending','processing') AND (status='processing' OR prepared<>0)`, botID)
+	if err == nil && result.RowsAffected() > 0 {
+		s.notifyTelegramVoiceJobs()
+	}
+	return err
+}
+
+// ClaimTelegramSpeech prepares audio before releasing the ordinary final text.
+// Expired leases lose readiness because the prior owner's in-memory audio is gone.
 func (s *Store) ClaimTelegramSpeech(ctx context.Context, leaseDuration time.Duration) (TelegramSpeechJob, bool, error) {
 	if leaseDuration <= 0 || leaseDuration > 15*time.Minute {
 		return TelegramSpeechJob{}, false, errors.New("registry: invalid speech lease duration")
@@ -101,41 +134,51 @@ func (s *Store) ClaimTelegramSpeech(ctx context.Context, leaseDuration time.Dura
 	}
 	defer tx.Rollback(ctx)
 	now := time.Now().UTC()
-	if _, err := tx.Exec(ctx, `UPDATE telegram_speech_jobs AS job SET status='cancelled',lease_id=NULL,lease_until=NULL,error_code='speech_unauthorized',completed_at=`+sqliteNow+`
-        WHERE job.status IN ('pending','processing') AND NOT `+speechAllowedSQL("job")); err != nil {
+	cancelled, err := tx.Exec(ctx, `UPDATE telegram_speech_jobs AS job SET status='cancelled',prepared=0,lease_id=NULL,lease_until=NULL,error_code='speech_unauthorized',completed_at=`+sqliteNow+`
+        WHERE job.status IN ('pending','processing') AND NOT `+speechAllowedSQL("job"))
+	if err != nil {
 		return TelegramSpeechJob{}, false, err
 	}
-	if _, err := tx.Exec(ctx, `UPDATE telegram_speech_jobs SET status='failed',lease_id=NULL,lease_until=NULL,error_code='speech_failed',completed_at=`+sqliteNow+`
-        WHERE status IN ('pending','processing') AND (expires_at<=$1 OR (attempts>=$2 AND (status='pending' OR lease_until<=$1)))`, now, MaxTelegramSpeechAttempts); err != nil {
+	failed, err := tx.Exec(ctx, `UPDATE telegram_speech_jobs SET status='failed',prepared=0,lease_id=NULL,lease_until=NULL,error_code='speech_failed',completed_at=`+sqliteNow+`
+        WHERE status IN ('pending','processing') AND (expires_at<=$1 OR (attempts>=$2 AND (status='pending' OR lease_until<=$1)))`, now, MaxTelegramSpeechAttempts)
+	if err != nil {
 		return TelegramSpeechJob{}, false, err
 	}
 	job, err := scanSpeech(tx.QueryRow(ctx, `SELECT `+speechColumns+` FROM telegram_speech_jobs job JOIN telegram_deliveries delivery ON delivery.delivery_id=job.delivery_id
-        WHERE job.status IN ('pending','processing') AND job.attempts<$2 AND job.expires_at>$1 AND delivery.status='sent'
+        WHERE job.status IN ('pending','processing') AND job.attempts<$2 AND job.expires_at>$1
           AND ((job.status='pending' AND job.next_attempt_at<=$1) OR (job.status='processing' AND job.lease_until<=$1))
           AND NOT EXISTS(SELECT 1 FROM telegram_speech_jobs earlier WHERE earlier.bot_id=job.bot_id AND earlier.chat_id=job.chat_id
             AND earlier.message_thread_id=job.message_thread_id AND earlier.status IN ('pending','processing') AND earlier.sequence<job.sequence)
         ORDER BY job.sequence LIMIT 1`, now, MaxTelegramSpeechAttempts))
 	if errors.Is(err, sql.ErrNoRows) {
-		return TelegramSpeechJob{}, false, tx.Commit(ctx)
+		if err := tx.Commit(ctx); err != nil {
+			return TelegramSpeechJob{}, false, err
+		}
+		if cancelled.RowsAffected()+failed.RowsAffected() > 0 {
+			s.notifyTelegramVoiceJobs()
+		}
+		return TelegramSpeechJob{}, false, nil
 	}
 	if err != nil {
 		return TelegramSpeechJob{}, false, err
 	}
 	job.LeaseID, job.LeaseUntil = uuid.New(), now.Add(leaseDuration)
 	job.Attempts++
-	if _, err := tx.Exec(ctx, `UPDATE telegram_speech_jobs SET status='processing',lease_id=$2,lease_until=$3,attempts=$4 WHERE job_id=$1`, job.ID, job.LeaseID, job.LeaseUntil, job.Attempts); err != nil {
+	if _, err := tx.Exec(ctx, `UPDATE telegram_speech_jobs SET status='processing',prepared=0,lease_id=$2,lease_until=$3,attempts=$4 WHERE job_id=$1`, job.ID, job.LeaseID, job.LeaseUntil, job.Attempts); err != nil {
 		return TelegramSpeechJob{}, false, err
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return TelegramSpeechJob{}, false, err
+	}
+	if cancelled.RowsAffected()+failed.RowsAffected() > 0 {
+		s.notifyTelegramVoiceJobs()
 	}
 	return job.TelegramSpeechJob, true, nil
 }
 
 func (s *Store) NextTelegramSpeechAttempt(ctx context.Context) (time.Time, bool, error) {
 	var next *time.Time
-	err := s.pool.QueryRow(ctx, `SELECT min(CASE WHEN delivery.status<>'sent' THEN job.expires_at
-        ELSE min(CASE WHEN job.status='pending' THEN job.next_attempt_at ELSE job.lease_until END,job.expires_at) END)
+	err := s.pool.QueryRow(ctx, `SELECT min(min(CASE WHEN job.status='pending' THEN job.next_attempt_at ELSE job.lease_until END,job.expires_at))
         FROM telegram_speech_jobs job JOIN telegram_deliveries delivery ON delivery.delivery_id=job.delivery_id
         WHERE job.status IN ('pending','processing')
           AND NOT EXISTS(SELECT 1 FROM telegram_speech_jobs earlier WHERE earlier.bot_id=job.bot_id AND earlier.chat_id=job.chat_id
@@ -163,30 +206,113 @@ func currentSpeechLease(ctx context.Context, tx *dbTx, id, lease uuid.UUID) (tel
 	return job, nil
 }
 
-// CheckTelegramSpeech fences every external I/O boundary. Once authorization
-// is revoked the queued content stays canceled after later reauthorization.
+func authorizedSpeechLease(ctx context.Context, tx *dbTx, id, lease uuid.UUID) (telegramSpeechRecord, bool, error) {
+	job, err := currentSpeechLease(ctx, tx, id, lease)
+	if err != nil {
+		return telegramSpeechRecord{}, false, err
+	}
+	var allowed bool
+	if err := tx.QueryRow(ctx, `SELECT `+speechAllowedSQL("job")+` FROM telegram_speech_jobs job WHERE job.job_id=$1`, id).Scan(&allowed); err != nil {
+		return telegramSpeechRecord{}, false, err
+	}
+	if !allowed {
+		if _, err := tx.Exec(ctx, `UPDATE telegram_speech_jobs SET status='cancelled',prepared=0,lease_id=NULL,lease_until=NULL,error_code='speech_unauthorized',completed_at=`+sqliteNow+` WHERE job_id=$1`, id); err != nil {
+			return telegramSpeechRecord{}, false, err
+		}
+	}
+	return job, allowed, nil
+}
+
+// CheckTelegramSpeech fences every external I/O boundary during preparation
+// and upload. Revoked content stays canceled after later reauthorization.
 func (s *Store) CheckTelegramSpeech(ctx context.Context, id, lease uuid.UUID) (bool, error) {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return false, err
 	}
 	defer tx.Rollback(ctx)
-	if _, err := currentSpeechLease(ctx, tx, id, lease); err != nil {
-		if errors.Is(err, ErrTelegramSpeechLease) {
-			return false, nil
-		}
+	_, allowed, err := authorizedSpeechLease(ctx, tx, id, lease)
+	if errors.Is(err, ErrTelegramSpeechLease) {
+		return false, nil
+	}
+	if err != nil {
 		return false, err
 	}
-	var allowed bool
-	if err := tx.QueryRow(ctx, `SELECT `+speechAllowedSQL("job")+` AND EXISTS(SELECT 1 FROM telegram_deliveries d WHERE d.delivery_id=job.delivery_id AND d.status='sent') FROM telegram_speech_jobs job WHERE job.job_id=$1`, id).Scan(&allowed); err != nil {
+	if err := tx.Commit(ctx); err != nil {
 		return false, err
 	}
 	if !allowed {
-		if _, err := tx.Exec(ctx, `UPDATE telegram_speech_jobs SET status='cancelled',lease_id=NULL,lease_until=NULL,error_code='speech_unauthorized',completed_at=`+sqliteNow+` WHERE job_id=$1`, id); err != nil {
+		s.notifyTelegramVoiceJobs()
+	}
+	return allowed, nil
+}
+
+// PrepareTelegramSpeech releases the text gate after every unsent audio chunk
+// has been encoded in memory. The same lease owns readiness and later uploads.
+func (s *Store) PrepareTelegramSpeech(ctx context.Context, id, lease uuid.UUID) error {
+	return s.refreshTelegramSpeech(ctx, id, lease, true)
+}
+
+// RenewTelegramSpeech gives preparation or a text-delivery wait another twelve
+// minutes without extending the job's lifetime or changing its readiness.
+func (s *Store) RenewTelegramSpeech(ctx context.Context, id, lease uuid.UUID) error {
+	return s.refreshTelegramSpeech(ctx, id, lease, false)
+}
+
+func (s *Store) refreshTelegramSpeech(ctx context.Context, id, lease uuid.UUID, prepared bool) error {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	_, allowed, err := authorizedSpeechLease(ctx, tx, id, lease)
+	if err != nil {
+		return err
+	}
+	if allowed {
+		if _, err := tx.Exec(ctx, `UPDATE telegram_speech_jobs SET prepared=CASE WHEN $2 THEN 1 ELSE prepared END,lease_until=$3 WHERE job_id=$1`, id, prepared, time.Now().UTC().Add(12*time.Minute)); err != nil {
+			return err
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return err
+	}
+	if prepared || !allowed {
+		s.notifyTelegramVoiceJobs()
+	}
+	if !allowed {
+		return ErrTelegramSpeechLease
+	}
+	return nil
+}
+
+// TelegramSpeechTextSent is the upload barrier: all ordinary text chunks must
+// be checkpointed before any prepared audio can be sent.
+func (s *Store) TelegramSpeechTextSent(ctx context.Context, id, lease uuid.UUID) (bool, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback(ctx)
+	_, allowed, err := authorizedSpeechLease(ctx, tx, id, lease)
+	if err != nil {
+		return false, err
+	}
+	var sent bool
+	if allowed {
+		if err := tx.QueryRow(ctx, `SELECT job.prepared=1 AND delivery.status='sent'
+            FROM telegram_speech_jobs job JOIN telegram_deliveries delivery ON delivery.delivery_id=job.delivery_id WHERE job.job_id=$1`, id).Scan(&sent); err != nil {
 			return false, err
 		}
 	}
-	return allowed, tx.Commit(ctx)
+	if err := tx.Commit(ctx); err != nil {
+		return false, err
+	}
+	if !allowed {
+		s.notifyTelegramVoiceJobs()
+		return false, ErrTelegramSpeechLease
+	}
+	return sent, nil
 }
 
 // CheckpointTelegramSpeech records a confirmed Telegram message and extends the
@@ -204,6 +330,14 @@ func (s *Store) CheckpointTelegramSpeech(ctx context.Context, id, lease uuid.UUI
 	job, err := currentSpeechLease(ctx, tx, id, lease)
 	if err != nil {
 		return err
+	}
+	var ready bool
+	if err := tx.QueryRow(ctx, `SELECT job.prepared=1 AND delivery.status='sent'
+        FROM telegram_speech_jobs job JOIN telegram_deliveries delivery ON delivery.delivery_id=job.delivery_id WHERE job.job_id=$1`, id).Scan(&ready); err != nil {
+		return err
+	}
+	if !ready {
+		return ErrTelegramSpeechPending
 	}
 	if index < job.NextChunk {
 		var previous int64
@@ -267,9 +401,9 @@ func (s *Store) FailTelegramSpeech(ctx context.Context, id, lease uuid.UUID, cod
 		delay = time.Hour
 	}
 	if retryable && job.Attempts < MaxTelegramSpeechAttempts && job.expiresAt.After(time.Now().UTC().Add(delay+10*time.Second)) {
-		_, err = tx.Exec(ctx, `UPDATE telegram_speech_jobs SET status='pending',lease_id=NULL,lease_until=NULL,error_code=$2,next_attempt_at=$3 WHERE job_id=$1`, id, code, time.Now().UTC().Add(delay))
+		_, err = tx.Exec(ctx, `UPDATE telegram_speech_jobs SET status='pending',prepared=0,lease_id=NULL,lease_until=NULL,error_code=$2,next_attempt_at=$3 WHERE job_id=$1`, id, code, time.Now().UTC().Add(delay))
 	} else {
-		_, err = tx.Exec(ctx, `UPDATE telegram_speech_jobs SET status='failed',lease_id=NULL,lease_until=NULL,error_code=$2,completed_at=`+sqliteNow+` WHERE job_id=$1`, id, code)
+		_, err = tx.Exec(ctx, `UPDATE telegram_speech_jobs SET status='failed',prepared=0,lease_id=NULL,lease_until=NULL,error_code=$2,completed_at=`+sqliteNow+` WHERE job_id=$1`, id, code)
 	}
 	if err != nil {
 		return err
@@ -293,7 +427,7 @@ func (s *Store) CancelTelegramSpeechJobs(ctx context.Context, botID string) erro
 		return err
 	}
 	defer tx.Rollback(ctx)
-	result, err := tx.Exec(ctx, `UPDATE telegram_speech_jobs SET status='cancelled',lease_id=NULL,lease_until=NULL,error_code='speech_disabled',completed_at=`+sqliteNow+` WHERE bot_id=$1 AND status IN ('pending','processing')`, botID)
+	result, err := tx.Exec(ctx, `UPDATE telegram_speech_jobs SET status='cancelled',prepared=0,lease_id=NULL,lease_until=NULL,error_code='speech_disabled',completed_at=`+sqliteNow+` WHERE bot_id=$1 AND status IN ('pending','processing')`, botID)
 	if err != nil {
 		return err
 	}

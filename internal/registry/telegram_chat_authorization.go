@@ -49,7 +49,7 @@ func (s *Store) ApplyTelegramChatAllowlist(ctx context.Context, bot string, chat
 	if err := cancelTelegramVoiceJobs(ctx, tx, "bot_id=$1 AND NOT "+telegramChatAllowedSQL("telegram_voice_jobs.bot_id", "telegram_voice_jobs.chat_id"), []any{bot}, "voice_unauthorized"); err != nil {
 		return err
 	}
-	if _, err := tx.Exec(ctx, `UPDATE telegram_speech_jobs SET status='cancelled',lease_id=NULL,lease_until=NULL,error_code='speech_unauthorized',completed_at=`+sqliteNow+`
+	if _, err := tx.Exec(ctx, `UPDATE telegram_speech_jobs SET status='cancelled',prepared=0,lease_id=NULL,lease_until=NULL,error_code='speech_unauthorized',completed_at=`+sqliteNow+`
         WHERE bot_id=$1 AND status IN ('pending','processing') AND NOT `+telegramChatAllowedSQL("telegram_speech_jobs.bot_id", "telegram_speech_jobs.chat_id"), bot); err != nil {
 		return err
 	}

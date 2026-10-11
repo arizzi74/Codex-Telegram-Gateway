@@ -7,8 +7,8 @@ import (
 )
 
 // TelegramTypingTarget identifies a conversation where Telegram should show
-// that the gateway is waiting for Codex. It is a transient projection of
-// durable command/session state; typing notifications themselves are never
+// that the gateway is waiting for Codex or preparing an audio reply. It is a
+// transient projection of durable work; typing notifications themselves are never
 // persisted.
 type TelegramTypingTarget struct {
 	BotID   string
@@ -17,9 +17,9 @@ type TelegramTypingTarget struct {
 }
 
 // ListTelegramTypingTargets returns distinct Telegram conversations with an
-// accepted command still in flight or a visible turn still running, including CLI turns.
-// Requiring an online worker and, for session commands, the original binding
-// makes disconnects stop presence without mutating command history.
+// accepted command, a visible running turn, or a final answer awaiting speech.
+// Codex work requires an online worker and a visible session. Local speech
+// remains active after the turn finishes while its destination stays authorized.
 func (s *Store) ListTelegramTypingTargets(ctx context.Context, limit int) ([]TelegramTypingTarget, error) {
 	if limit < 1 || limit > 1000 {
 		return nil, errors.New("registry: invalid Telegram typing target limit")
@@ -43,6 +43,11 @@ func (s *Store) ListTelegramTypingTargets(ctx context.Context, limit int) ([]Tel
         WHERE session.archived=FALSE AND session.state='running' AND session.active_turn_id IS NOT NULL
           AND worker.enabled=TRUE AND worker.connectivity='online'
           AND `+sessionVisibleSQL("destination.bot_id", "destination.chat_id", "destination.message_thread_id", "session.session_id")+`
+        UNION ALL
+        SELECT speech.bot_id,speech.chat_id,speech.message_thread_id,speech.created_at
+        FROM telegram_speech_jobs speech
+        WHERE speech.status IN ('pending','processing') AND speech.expires_at>`+sqliteNow+`
+          AND `+speechAllowedSQL("speech")+`
     ) SELECT bot_id,chat_id,topic_id FROM waiting WHERE `+telegramChatAllowedSQL("waiting.bot_id", "waiting.chat_id")+` GROUP BY bot_id,chat_id,topic_id ORDER BY min(waiting_since),bot_id,chat_id,topic_id LIMIT $1`, limit)
 	if err != nil {
 		return nil, fmt.Errorf("registry: list Telegram typing targets: %w", err)

@@ -43,6 +43,7 @@ const deliveryQueueReadySQL = `SELECT EXISTS (
 const claimDeliveriesSQL = `WITH claimed AS (
  SELECT delivery.delivery_id FROM telegram_deliveries delivery
  WHERE delivery.status IN ('pending','failed','sending') AND delivery.visibility_revoked=0 AND delivery.next_attempt_at <= ` + sqliteNow + `
+   AND NOT (` + pendingSpeechPreparationSQL + `)
    AND NOT (` + pendingPickerCleanupSQL + `)
    AND NOT EXISTS(SELECT 1 FROM telegram_input_reply_helpers helper WHERE helper.delivery_id=delivery.delivery_id AND (helper.retired=1 OR helper.backfill_pending=1))
    AND (delivery.kind NOT IN ('agent_progress_message','tool_progress_message') OR (NOT ` + pendingSelectionConfirmationSQL + ` AND NOT ` + pendingProgressRepositionSQL + ` AND NOT ` + pendingProgressOrderSQL + ` AND NOT ` + newerProgressDeliverySQL + ` AND NOT EXISTS (
