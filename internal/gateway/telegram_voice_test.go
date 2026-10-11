@@ -86,6 +86,10 @@ func TestDownloadVoiceChecksBoundariesAndNeverLeaksToken(t *testing.T) {
 		want       string
 	}{
 		{"valid", "voice/file.oga", 3, 3, 200, ""},
+		{"unknown size", "voice/file.oga", 0, 3, 200, ""},
+		{"truncated body", "voice/file.oga", 4, 3, 200, "voice_download_failed"},
+		{"body larger than metadata", "voice/file.oga", 2, 3, 200, "voice_download_failed"},
+		{"negative size", "voice/file.oga", -1, 0, 200, "voice_download_failed"},
 		{"oversize metadata", "voice/file.oga", voice.MaxInputBytes + 1, 0, 200, "voice_too_large"},
 		{"oversize body", "voice/file.oga", 0, voice.MaxInputBytes + 1, 200, "voice_too_large"},
 		{"traversal", "../private", 0, 0, 200, "voice_download_failed"},
@@ -119,7 +123,7 @@ func TestDownloadVoiceChecksBoundariesAndNeverLeaksToken(t *testing.T) {
 			} else if err == nil || err.Error() != tc.want || strings.Contains(err.Error(), "private-test-token") {
 				t.Fatalf("error=%v", err)
 			}
-			if (tc.name == "oversize metadata" || tc.name == "traversal") && requests != 1 {
+			if (tc.name == "oversize metadata" || tc.name == "negative size" || tc.name == "traversal") && requests != 1 {
 				t.Fatal("invalid file was downloaded")
 			}
 		})

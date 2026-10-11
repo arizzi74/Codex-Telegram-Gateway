@@ -32,9 +32,11 @@ var (
 	ErrAudioTooLong     = errors.New("audio exceeds maximum duration")
 )
 
-// DecodeOggOpus returns mono float32 PCM at 16 kHz. Only a single, complete
-// Ogg/Opus logical stream is supported. All container checks and decoding run
-// in Go, without ffmpeg, cgo, or temporary audio files.
+// DecodeOggOpus returns mono float32 PCM at 16 kHz. Only a single Ogg/Opus
+// logical stream with complete pages and packets is supported. Telegram iOS
+// streams can end at a complete audio page without an Ogg end-of-stream flag.
+// All container checks and decoding run in Go, without ffmpeg, cgo, or temporary
+// audio files.
 func DecodeOggOpus(ctx context.Context, input io.Reader) ([]float32, error) {
 	return DecodeOggOpusWithLimit(ctx, input, DefaultMaxDuration)
 }
@@ -72,8 +74,20 @@ func DecodeOggOpusWithLimit(ctx context.Context, input io.Reader, limit time.Dur
 			return nil, err
 		}
 	}
-	if !state.ended || len(state.partial) != 0 || state.audioPackets == 0 {
-		return nil, invalidAudio("missing end of stream or audio packets")
+	if len(state.partial) != 0 || state.audioPackets == 0 {
+		return nil, invalidAudio("unfinished packet or missing audio packets")
+	}
+	if !state.ended {
+		// Telegram iOS finishes with writeFrame(nil, 0), flushing buffered
+		// pages without submitting an EOS-marked packet:
+		// https://github.com/TelegramMessenger/Telegram-iOS/blob/f1dd7a2dbd02cbbf513e75d5695d8d36d1cf5838/submodules/OpusBinding/Sources/opusenc/opusenc.m#L592-L613
+		// Permit physical EOF only after a fully validated audio page. A
+		// missing whole page cannot be distinguished from this producer's
+		// intentional EOF; partial pages/packets are always rejected.
+		if !state.lastPageHasAudio || !state.haveAudioGranule {
+			return nil, invalidAudio("missing complete final audio page")
+		}
+		state.finalGranule = state.lastGranule
 	}
 	// Granule positions and pre-skip use 48 kHz units, regardless of the
 	// decoder output rate. Fractional 16 kHz samples are rounded down.
@@ -208,6 +222,7 @@ type oggDecodeState struct {
 	granuleOffset              uint64
 	lastGranule, finalGranule  uint64
 	haveAudioGranule, ended    bool
+	lastPageHasAudio           bool
 }
 
 func (s *oggDecodeState) page(ctx context.Context, p oggPage) error {
@@ -260,6 +275,7 @@ func (s *oggDecodeState) page(ctx context.Context, p oggPage) error {
 	if first && (completed != 1 || len(s.partial) != 0) {
 		return invalidAudio("OpusHead must be alone on first page")
 	}
+	s.lastPageHasAudio = s.audioPackets > before
 	if s.audioPackets == before {
 		if p.flags&4 != 0 {
 			if len(s.partial) != 0 || s.audioPackets == 0 || p.granule != s.lastGranule {

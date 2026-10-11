@@ -15,7 +15,7 @@ import (
 // These samples are independently decoded by libopus 1.3.1 at 16 kHz mono,
 // not by this package. The fixture license/provenance is in testdata/README.
 func TestDecodeGoldenLibopus(t *testing.T) {
-	for _, name := range []string{"tiny", "silk-stereo", "hybrid-stereo", "celt-mono"} {
+	for _, name := range []string{"tiny", "silk-stereo", "hybrid-stereo", "celt-mono", "telegram-ios-no-eos"} {
 		t.Run(name, func(t *testing.T) {
 			input := fixture(t, name+".ogg")
 			got, err := DecodeOggOpus(context.Background(), bytes.NewReader(input))
@@ -43,6 +43,89 @@ func TestDecodeGoldenLibopus(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestDecodeTelegramIOSCleanEOFMatchesEOS(t *testing.T) {
+	data := fixture(t, "telegram-ios-no-eos.ogg")
+	lastOffset := lastFixturePage(t, data)
+	if data[lastOffset+5]&4 != 0 {
+		t.Fatal("Telegram iOS fixture must end without EOS")
+	}
+	got, err := DecodeOggOpus(context.Background(), bytes.NewReader(data))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 38296 { // (120 * 960 - 312 pre-skip) / 3.
+		t.Fatalf("got %d samples after physical EOF and pre-skip", len(got))
+	}
+	control := append([]byte(nil), data...)
+	control[lastOffset+5] |= 4
+	binary.LittleEndian.PutUint32(control[lastOffset+22:], oggChecksum(control[lastOffset:]))
+	want, err := DecodeOggOpus(context.Background(), bytes.NewReader(control))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != len(want) {
+		t.Fatalf("physical EOF changed sample count: %d != %d", len(got), len(want))
+	}
+	for i := range got {
+		if got[i] != want[i] {
+			t.Fatalf("physical EOF changed sample %d", i)
+		}
+	}
+	if _, err := DecodeOggOpusWithLimit(context.Background(), bytes.NewReader(data), time.Second); !errors.Is(err, ErrAudioTooLong) {
+		t.Fatalf("physical EOF bypassed duration bound: %v", err)
+	}
+}
+
+func TestDecodeTelegramIOSRejectsIncompleteEOF(t *testing.T) {
+	data := fixture(t, "telegram-ios-no-eos.ogg")
+	lastOffset := lastFixturePage(t, data)
+	headerSize := 27 + int(data[lastOffset+26])
+	// Clean EOF is allowed only at a complete audio-page boundary. Partial
+	// headers, lacing, payloads and packets, and non-audio tails still fail.
+	cases := map[string][]byte{
+		"partial header":    data[:lastOffset+10],
+		"partial lacing":    data[:lastOffset+headerSize-1],
+		"partial payload":   data[:len(data)-1],
+		"empty tail":        appendPages(data, makePage(0, math.MaxUint64, 5, nil, nil)),
+		"unfinished packet": appendPages(data, makePage(0, math.MaxUint64, 5, []byte{255}, make([]byte, 255))),
+	}
+	for name, mutate := range map[string]func([]byte){
+		"checksum":        func(page []byte) { page[len(page)-1] ^= 1 },
+		"page sequence":   func(page []byte) { binary.LittleEndian.PutUint32(page[18:22], 6) },
+		"missing granule": func(page []byte) { binary.LittleEndian.PutUint64(page[6:14], math.MaxUint64) },
+		"non-final trim":  func(page []byte) { binary.LittleEndian.PutUint64(page[6:14], 120*960-3) },
+	} {
+		changed := append([]byte(nil), data...)
+		page := changed[lastOffset:]
+		mutate(page)
+		if name != "checksum" {
+			binary.LittleEndian.PutUint32(page[22:26], oggChecksum(page))
+		}
+		cases[name] = changed
+	}
+	for name, malformed := range cases {
+		t.Run(name, func(t *testing.T) {
+			if _, err := DecodeOggOpus(context.Background(), bytes.NewReader(malformed)); !errors.Is(err, ErrInvalidAudio) {
+				t.Fatalf("accepted incomplete or invalid EOF: %v", err)
+			}
+		})
+	}
+}
+
+func lastFixturePage(t *testing.T, data []byte) int {
+	t.Helper()
+	last := 0
+	for offset := 0; offset < len(data); {
+		_, used, err := parseOggPage(data[offset:])
+		if err != nil {
+			t.Fatal(err)
+		}
+		last = offset
+		offset += used
+	}
+	return last
 }
 
 func TestDecodePacketContinuationAndTags(t *testing.T) {
@@ -134,7 +217,6 @@ func TestDecodeRejectsMalformedAndTruncated(t *testing.T) {
 	cases := map[string][]byte{
 		"wrong sequence":      appendPages(makePage(2, 0, 0, packetLacing(packets[0]), packets[0]), makePage(0, 0, 2, packetLacing(packets[1]), packets[1])),
 		"missing tags":        appendPages(makePage(2, 0, 0, packetLacing(packets[0]), packets[0]), makePage(4, 591, 1, packetLacing(packets[2]), packets[2])),
-		"missing EOS":         appendPages(makePage(2, 0, 0, packetLacing(packets[0]), packets[0]), makePage(0, 0, 1, packetLacing(packets[1]), packets[1]), makePage(0, 960, 2, packetLacing(packets[2]), packets[2])),
 		"chained":             append(append([]byte(nil), valid...), valid...),
 		"orphan continuation": appendPages(makePage(2, 0, 0, packetLacing(packets[0]), packets[0]), makePage(1, 0, 1, packetLacing(packets[1]), packets[1])),
 		"bad final granule":   appendPages(makePage(2, 0, 0, packetLacing(packets[0]), packets[0]), makePage(0, 0, 1, packetLacing(packets[1]), packets[1]), makePage(4, 100000, 2, packetLacing(packets[2]), packets[2])),

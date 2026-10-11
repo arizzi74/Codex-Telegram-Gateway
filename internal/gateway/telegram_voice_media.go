@@ -89,6 +89,9 @@ func (t *TelegramClient) DownloadVoice(ctx context.Context, fileID string) ([]by
 	if file.Size > voice.MaxInputBytes {
 		return nil, telegramMediaError("voice_too_large")
 	}
+	if file.Size < 0 {
+		return nil, telegramMediaError("voice_download_failed")
+	}
 	if !safeTelegramFilePath(file.Path) {
 		return nil, telegramMediaError("voice_download_failed")
 	}
@@ -115,6 +118,13 @@ func (t *TelegramClient) DownloadVoice(ctx context.Context, fileID string) ([]by
 	}
 	if len(data) > voice.MaxInputBytes {
 		return nil, telegramMediaError("voice_too_large")
+	}
+	// iOS recordings may end without an Ogg EOS marker. Check Telegram's
+	// declared file size too, so a download cut at a complete page boundary
+	// cannot silently become a shorter but otherwise valid recording.
+	if file.Size > 0 && int64(len(data)) != file.Size {
+		clear(data)
+		return nil, telegramMediaError("voice_download_failed")
 	}
 	return data, nil
 }
