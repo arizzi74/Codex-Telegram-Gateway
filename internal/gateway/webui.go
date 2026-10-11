@@ -13,9 +13,10 @@ import (
 )
 
 var (
-	ErrWebUIUnavailable = errors.New("worker is disconnected; reconnect when it is online")
-	ErrWebUIUnsupported = errors.New("update this worker to enable the web interface")
-	ErrWebUILimit       = errors.New("too many open web sessions; disconnect another tab first")
+	ErrWebUIUnavailable      = errors.New("worker is disconnected; reconnect when it is online")
+	ErrWebUIUnsupported      = errors.New("update this worker to enable the web interface")
+	ErrWebUILimit            = errors.New("too many open web sessions; disconnect another tab first")
+	ErrWebUIFilesUnsupported = errors.New("update this worker to enable file downloads")
 )
 
 // WebUIStream is a transient, connection-fenced app-server relay. Its messages
@@ -32,16 +33,35 @@ type WebUIStream struct {
 	err         error
 	queuedBytes int // protected by hub.mu
 	inputBytes  int // in-flight sends; protected by hub.mu
+	file        bool
 }
 
 func (h *Hub) OpenWebUI(ctx context.Context, session registry.AdminSession) (*WebUIStream, error) {
+	return h.openWebUI(ctx, session, "open", nil)
+}
+
+// OpenWebUIFile opens a read-only, credit-controlled file transfer on the
+// owning worker. It does not connect to Codex or enter the command queue.
+func (h *Hub) OpenWebUIFile(ctx context.Context, session registry.AdminSession, request protocol.WebUIFileRequest) (*WebUIStream, error) {
+	data, err := json.Marshal(request)
+	if err != nil {
+		return nil, err
+	}
+	return h.openWebUI(ctx, session, "file_open", data)
+}
+
+func (h *Hub) openWebUI(ctx context.Context, session registry.AdminSession, action string, data json.RawMessage) (*WebUIStream, error) {
 	h.mu.Lock()
 	p := h.peers[session.WorkerID]
 	if p == nil || p.ctx.Err() != nil {
 		h.mu.Unlock()
 		return nil, ErrWebUIUnavailable
 	}
-	if !p.supportsWebUI {
+	if action == "file_open" && !p.supportsWebUIFiles {
+		h.mu.Unlock()
+		return nil, ErrWebUIFilesUnsupported
+	}
+	if action == "open" && !p.supportsWebUI {
 		h.mu.Unlock()
 		return nil, ErrWebUIUnsupported
 	}
@@ -60,7 +80,7 @@ func (h *Hub) OpenWebUI(ctx context.Context, session registry.AdminSession) (*We
 		return nil, ErrWebUILimit
 	}
 	streamCtx, cancel := context.WithCancel(ctx)
-	s := &WebUIStream{hub: h, peer: p, id: uuid.NewString(), ctx: streamCtx, cancel: cancel, frames: make(chan protocol.WebUIFrame, 64)}
+	s := &WebUIStream{hub: h, peer: p, id: uuid.NewString(), ctx: streamCtx, cancel: cancel, frames: make(chan protocol.WebUIFrame, 64), file: action == "file_open"}
 	h.webuis[s.id] = s
 	h.mu.Unlock()
 	if err := h.store.CheckConnection(ctx, p.workerID, p.connectionID); err != nil {
@@ -68,7 +88,7 @@ func (h *Hub) OpenWebUI(ctx context.Context, session registry.AdminSession) (*We
 		return nil, ErrWebUIUnavailable
 	}
 	openCtx, done := context.WithTimeout(ctx, 10*time.Second)
-	err := p.send(openCtx, "webui", protocol.WebUIFrame{ID: s.id, Action: "open", RuntimeID: session.RuntimeID, RuntimeGeneration: session.RuntimeGeneration, SessionID: session.ID})
+	err := p.send(openCtx, "webui", protocol.WebUIFrame{ID: s.id, Action: action, RuntimeID: session.RuntimeID, RuntimeGeneration: session.RuntimeGeneration, SessionID: session.ID, Data: data})
 	done()
 	if err != nil {
 		s.Close()
@@ -199,6 +219,11 @@ func (h *Hub) handleWebUI(p *peer, envelope protocol.Envelope) error {
 	if s.peer != p {
 		h.mu.Unlock()
 		return errors.New("web relay connection mismatch")
+	}
+	if s.file && (len(f.Data) > 128<<10 || len(f.Error) > 4096) {
+		h.mu.Unlock()
+		s.stop(errors.New("invalid file transfer frame"))
+		return nil
 	}
 	if f.Action == "output" && (len(f.Data) == 0 || !json.Valid(f.Data)) {
 		h.mu.Unlock()

@@ -33,6 +33,7 @@ type webUIRelays struct {
 	mu         sync.Mutex
 	inputBytes int // queued and in-flight browser input, protected by mu
 	clients    map[string]*webUIRelay
+	files      map[string]*webUIFileTransfer
 	wg         sync.WaitGroup
 }
 
@@ -62,13 +63,16 @@ type webUIRequest struct {
 }
 
 func newWebUIRelays(c *Connection, ctx context.Context, writes chan<- outbound) *webUIRelays {
-	return &webUIRelays{c: c, ctx: ctx, writes: writes, clients: make(map[string]*webUIRelay)}
+	return &webUIRelays{c: c, ctx: ctx, writes: writes, clients: make(map[string]*webUIRelay), files: make(map[string]*webUIFileTransfer)}
 }
 
 func (p *webUIRelays) close() {
 	p.mu.Lock()
 	for _, client := range p.clients {
 		client.cancel()
+	}
+	for _, transfer := range p.files {
+		transfer.cancel()
 	}
 	p.mu.Unlock()
 	p.wg.Wait()
@@ -86,10 +90,13 @@ func (p *webUIRelays) fail(id, message string) {
 
 func (p *webUIRelays) receive(frame protocol.WebUIFrame) {
 	if err := frame.Validate(); err != nil {
+		p.cancelFile(frame.ID)
 		p.fail(frame.ID, "Invalid web UI frame.")
 		return
 	}
 	switch frame.Action {
+	case "file_open":
+		p.openFile(frame)
 	case "open":
 		runtime, session, err := p.target(frame)
 		if err != nil {
@@ -97,7 +104,7 @@ func (p *webUIRelays) receive(frame protocol.WebUIFrame) {
 			return
 		}
 		p.mu.Lock()
-		if p.clients[frame.ID] != nil || len(p.clients) >= maxWebUIConnections {
+		if p.clients[frame.ID] != nil || p.files[frame.ID] != nil || len(p.clients)+len(p.files) >= maxWebUIConnections {
 			p.mu.Unlock()
 			p.fail(frame.ID, "Too many web UI connections or connection already open.")
 			return
@@ -122,6 +129,9 @@ func (p *webUIRelays) receive(frame protocol.WebUIFrame) {
 			}
 		}()
 	case "input", "close":
+		if p.receiveFile(frame) {
+			return
+		}
 		p.mu.Lock()
 		client := p.clients[frame.ID]
 		p.mu.Unlock()
@@ -181,7 +191,7 @@ func (p *webUIRelays) target(frame protocol.WebUIFrame) (protocol.Runtime, proto
 			break
 		}
 	}
-	if runtime.ID == "" || runtime.Generation != frame.RuntimeGeneration || runtime.State != "running" || !filepath.IsAbs(runtime.LocalSocket) {
+	if runtime.ID == "" || runtime.Generation != frame.RuntimeGeneration || runtime.State != "running" || (frame.Action != "file_open" && !filepath.IsAbs(runtime.LocalSocket)) {
 		return runtime, protocol.Session{}, errors.New("The runtime changed or is unavailable. Refresh the session list.")
 	}
 	if runtime.WorkerID != "" && runtime.WorkerID != p.c.cfg.WorkerID {

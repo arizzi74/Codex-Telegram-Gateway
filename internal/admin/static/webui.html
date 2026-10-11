@@ -20,6 +20,7 @@
   <script defer src="/tgw/webui/static/webui-command-ui.js"></script>
   <script defer src="/tgw/webui/static/webui-notifications.js"></script>
   <script defer src="/tgw/webui/static/webui-drafts.js"></script>
+  <script defer src="/tgw/webui/static/webui-files.js"></script>
   <script defer src="/tgw/webui/static/webui.js"></script>
 </head>
 <body>
@@ -74,6 +75,12 @@
       </form>
     </section>
   </main>
+  <dialog id="file-dialog" aria-labelledby="file-title" aria-describedby="file-message">
+    <div class="settings-heading"><h2 id="file-title">File download</h2><button id="file-close" type="button" class="quiet" aria-label="Close file details" autofocus>×</button></div>
+    <dl class="file-details"><dt>Filename</dt><dd id="file-name"></dd><dt>Path</dt><dd id="file-path"></dd><dt>Size</dt><dd id="file-size"></dd><dt>Worker</dt><dd id="file-worker"></dd></dl>
+    <p id="file-message" role="status" aria-live="polite"></p>
+    <div class="file-actions"><button id="file-retry" type="button" class="quiet" hidden>Retry</button><button id="file-download" type="button" class="primary" disabled>Download</button></div>
+  </dialog>
   <dialog id="goal-dialog" aria-labelledby="goal-title" aria-describedby="goal-objective">
     <div class="goal-heading"><h2 id="goal-title">Goal</h2><button id="close-goal" type="button" class="quiet" autofocus>Close</button></div>
     <p id="goal-objective" tabindex="0"></p>

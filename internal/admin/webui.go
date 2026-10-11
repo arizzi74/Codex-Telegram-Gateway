@@ -34,6 +34,7 @@ func (s *Server) webuiRoutes() {
 		{"webui.css", "text/css; charset=utf-8"},
 		{"webui.js", "application/javascript; charset=utf-8"},
 		{"webui-format.js", "application/javascript; charset=utf-8"},
+		{"webui-files.js", "application/javascript; charset=utf-8"},
 		{"webui-diagrams.js", "application/javascript; charset=utf-8"},
 		{"webui-mermaid-LICENSE.txt", "text/plain; charset=utf-8"},
 		{"webui-commands.js", "application/javascript; charset=utf-8"},
@@ -51,6 +52,7 @@ func (s *Server) webuiRoutes() {
 	s.mux.HandleFunc("/tgw/api/v1/webui/connect", s.webuiConnect)
 	s.mux.HandleFunc("/tgw/api/v1/webui/commands", s.webuiCommands)
 	s.mux.HandleFunc("/tgw/api/v1/webui/activity", s.webuiActivity)
+	s.mux.HandleFunc("/tgw/api/v1/webui/files", s.webuiFile)
 }
 
 func (s *Server) webuiDiagramRenderer(w http.ResponseWriter, r *http.Request) {

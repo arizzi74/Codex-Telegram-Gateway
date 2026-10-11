@@ -29,6 +29,10 @@
   const maxImageBytes = 10 * 1024 * 1024, maxDraftImageBytes = 40 * 1024 * 1024;
   let imagePickerSession = null;
   let followLatest = true, bottomFrame = null;
+  const fileUI = window.CodexFiles.create({
+    getContext: () => ({ sessionId: state.selected?.session_id || '', authGeneration: state.authGeneration, authenticated: state.authenticated, connected: state.connected }),
+    expired: expire, focusFallback: () => state.authenticated ? $('transcript') : $('auth-login')
+  });
   let lastHistoryScrollTop = 0, lastHistoryHeight = 0, lastHistoryViewport = 0;
   let fontSize = 14;
   try { const saved = Number(localStorage.getItem('codex-webui-font-size')); if (Number.isInteger(saved) && saved >= 12 && saved <= 22) fontSize = saved; } catch (_) { /* Storage can be disabled. */ }
@@ -508,6 +512,7 @@
     state.pending.clear();
   }
   function closeSocket() {
+    fileUI.clear();
     clearSteerNotice();
     clearGoal();
     loadingOlder = false; suppressHistoryScroll = false;
@@ -1138,6 +1143,7 @@
     socket.onclose = async event => {
       clearTimeout(handshakeTimer);
       if (generation !== state.generation || state.socket !== socket) return;
+      fileUI.clear();
       state.connected = false; state.loading = false;
       clearGoal();
       clearPermissions();
@@ -1391,6 +1397,8 @@
     const article = node('article', 'message ' + (isUser ? 'user' : isTool ? 'tool' : item.phase === 'commentary' ? 'commentary' : 'assistant'));
     if (isReasoning) article.classList.add('reasoning');
     article.dataset.itemId = item.id || '';
+    article.dataset.fileSessionId = state.selected?.session_id || '';
+    article.dataset.workerName = state.selected?.worker_name || state.selected?.worker_id || 'Worker';
     const header = node('div', 'message-header'); header.append(node('span', 'role', isUser ? '› You' : isTool ? '• ' + (isReasoning ? reasoningLabel : 'Tool') : '• Codex'));
     const date = itemDate(item), timeLabel = itemTimeLabel(item);
     if (date) { const time = node('time', '', (timeLabel ? timeLabel + ' · ' : '') + date.toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })); time.dateTime = date.toISOString(); time.dataset.source = item._timeSource; time.title = (timeLabel || (item._timeSource === 'item-started' ? 'Item started' : 'Item created')) + ': ' + date.toLocaleString(); header.append(time); }

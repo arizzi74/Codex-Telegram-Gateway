@@ -28,7 +28,7 @@ var versionedWebUIAssets = sync.OnceValues(func() (webUIAssetBundle, error) {
 	if err != nil {
 		return webUIAssetBundle{}, err
 	}
-	names := []string{"webui.css", "webui-format.js", "webui-diagrams.js", "webui-mermaid-runtime.js", "webui-commands.js", "webui-command-ui.js", "webui-notifications.js", "webui-drafts.js", "webui.js", "session-auth.js", "session-auth.css"}
+	names := []string{"webui.css", "webui-format.js", "webui-files.js", "webui-diagrams.js", "webui-mermaid-runtime.js", "webui-commands.js", "webui-command-ui.js", "webui-notifications.js", "webui-drafts.js", "webui.js", "session-auth.js", "session-auth.css"}
 	hash := sha256.New()
 	_, _ = hash.Write(page)
 	_, _ = hash.Write([]byte{0})

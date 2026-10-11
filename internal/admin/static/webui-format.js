@@ -10,27 +10,59 @@ window.CodexFormat = (() => {
   };
   // Neither terminal escapes nor control characters are meaningful to a browser transcript.
   const clean = value => String(value ?? '').replace(/\x1b\][^\x07]*(?:\x07|\x1b\\)/g, '').replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, '').replace(/[\x00-\x08\x0b-\x1f\x7f]/g, '');
+  // Do not turn an invalid raw target into a different, valid worker path when
+  // removing terminal controls from the surrounding message.
+  function cleanMarkdown(value) {
+    const raw = String(value ?? '');
+    // The sentinel preserves offsets, and lets the same target grammar match
+    // invalid whitespace controls before clean() could remove them.
+    const guarded = raw.replace(/[\x00-\x08\x0b-\x1f\x7f]/g, '\ufffd');
+    const references = /\[[^\]\n]+\]\((<[^<>\n]+>|(?:\\.|[^\s\\()]|\((?:\\.|[^\s\\()])*\))+)\)/g;
+    let result = '', cursor = 0;
+    for (const match of guarded.matchAll(references)) {
+      result += raw.slice(cursor, match.index) + match[0];
+      cursor = match.index + match[0].length;
+    }
+    return clean(result + raw.slice(cursor));
+  }
   function safeLink(value) {
+    if (value.includes('\ufffd') || /[\x00-\x1f\x7f]/.test(value)) return null;
     try {
       const parsed = new URL(value);
       if (['https:', 'http:', 'mailto:'].includes(parsed.protocol)) return parsed.href;
-    } catch (_) { /* Local file references remain readable text, never browser fetches. */ }
+    } catch (_) { /* Worker files are handled separately from browser URLs. */ }
     return null;
   }
+  function fileLink(value) {
+    if (!value || /^[#?]/.test(value) || value.startsWith('//') || /[\x00-\x1f\x7f\\\ufffd]/.test(value)) return false;
+    if (/^file:/i.test(value)) {
+      if (!/^file:\/\/(?:localhost)?\//i.test(value)) return false;
+      try { const parsed = new URL(value); return parsed.protocol === 'file:' && (!parsed.hostname || parsed.hostname === 'localhost') && !!parsed.pathname; }
+      catch (_) { return false; }
+    }
+    // Bare filenames with an extension may also carry an editor line/column suffix.
+    if (/^[a-z][a-z0-9+.-]*:/i.test(value)) return /^[^/:]+\.[^/:]+(?::\d+){1,2}$/.test(value);
+    return true;
+  }
   function inline(parent, value, depth = 0) {
-    const text = clean(value);
+    const text = cleanMarkdown(value);
     if (depth > 8) { parent.append(document.createTextNode(text)); return; }
-    const pattern = /(`+)([^`\n]+?)\1|\[([^\]\n]+)\]\(([^\s)]+)\)|\*\*([^*\n]+)\*\*|__([^_\n]+)__|~~([^~\n]+)~~|\*([^*\n]+)\*|_([^_\n]+)_|https?:\/\/[^\s<>]+/g;
+    const pattern = /(`+)([^`\n]+?)\1|\[([^\]\n]+)\]\((<[^<>\n]+>|(?:\\.|[^\s\\()]|\((?:\\.|[^\s\\()])*\))+)\)|\*\*([^*\n]+)\*\*|__([^_\n]+)__|~~([^~\n]+)~~|\*([^*\n]+)\*|_([^_\n]+)_|https?:\/\/[^\s<>]+/g;
     let cursor = 0;
     for (const match of text.matchAll(pattern)) {
       parent.append(document.createTextNode(text.slice(cursor, match.index)));
       let child;
       if (match[1]) child = node('code', '', match[2]);
       else if (match[3]) {
-        const href = safeLink(match[4]);
-        child = node(href ? 'a' : 'span', '', match[3]);
+        const target = match[4].replace(/^<|>$/g, '').replace(/\\([\\ ()])/g, '$1');
+        const href = safeLink(target), local = !href && fileLink(target);
+        child = node(href || local ? 'a' : 'span', local ? 'file-link' : '', match[3]);
         if (href) { child.href = href; child.target = '_blank'; child.rel = 'noopener noreferrer'; }
-        else child.title = clean(match[4]);
+        else if (local) {
+          child.href = '#file'; child.dataset.filePath = target; child.title = target;
+          child.setAttribute('aria-haspopup', 'dialog'); child.setAttribute('aria-controls', 'file-dialog');
+          const icon = node('span', 'file-link-icon', '↧'); icon.setAttribute('aria-hidden', 'true'); child.append(icon);
+        } else child.title = target;
       } else if (match[5] || match[6]) { child = node('strong'); inline(child, match[5] || match[6], depth + 1); }
       else if (match[7]) { child = node('s'); inline(child, match[7], depth + 1); }
       else if (match[8] || match[9]) { child = node('em'); inline(child, match[8] || match[9], depth + 1); }
@@ -63,7 +95,7 @@ window.CodexFormat = (() => {
   function markdown(value, depth = 0) {
     const root = document.createDocumentFragment();
     if (depth > 12) { root.append(node('p', '', clean(value))); return root; }
-    const lines = clean(value).split('\n');
+    const lines = cleanMarkdown(value).split('\n');
     for (let i = 0; i < lines.length;) {
       const line = lines[i];
       if (!line.trim()) { i++; continue; }

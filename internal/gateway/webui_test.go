@@ -68,6 +68,9 @@ func TestWebUIHubCapabilitiesAndLimits(t *testing.T) {
 	if _, err := hub.OpenWebUI(ctx, session); !errors.Is(err, ErrWebUIUnsupported) {
 		t.Fatalf("old worker: %v", err)
 	}
+	if _, err := hub.OpenWebUIFile(ctx, session, protocol.WebUIFileRequest{Path: "report.md"}); !errors.Is(err, ErrWebUIFilesUnsupported) {
+		t.Fatalf("old worker file capability: %v", err)
+	}
 	p.supportsWebUI = true
 	for range 16 {
 		hub.webuis[uuid.NewString()] = &WebUIStream{peer: p}

@@ -208,7 +208,33 @@ The interface follows new output only while you are near the bottom. Selecting a
 
 Embedded stylesheet and script URLs include a content fingerprint so a page reload after deployment loads a matching set of assets. An already open tab needs a browser refresh to use the new interface.
 
-The web UI uses the admin authentication boundary and therefore grants the same trusted operator access. HTTPS, secure session cookies, exact WebSocket Origin checks, selected-session authorization, and the worker's existing execution permissions apply. Message rendering builds DOM text nodes rather than accepting HTML. Remote image embeds are not fetched. Only HTTP, HTTPS, and mail links become clickable; local paths remain text. Assets are served by the gateway; no third-party hosts are contacted. Mermaid's separate sandbox permits diagram styles without relaxing the application or admin console's content security policy.
+The web UI uses the admin authentication boundary and therefore grants the same trusted operator access. HTTPS, secure session cookies, exact WebSocket Origin checks, selected-session authorization, and the worker's existing execution permissions apply. Message rendering builds DOM text nodes rather than accepting HTML. Remote image embeds are not fetched. HTTP, HTTPS, and mail links open normally. Links to worker project files open the download dialog described below; unsupported schemes remain text. Assets are served by the gateway; no third-party hosts are contacted. Mermaid's separate sandbox permits diagram styles without relaxing the application or admin console's content security policy.
+
+## Downloading project files
+
+Markdown links to generated project files are underlined and marked with a
+small download indicator. Select a link to open a dialog showing the worker,
+file path and size, then choose **Download**. The Web UI remains on the current
+conversation. This also works for links in saved history on desktop and mobile;
+external website links retain their usual behavior.
+
+Absolute paths, paths relative to the session project, home-relative paths and
+local `file:` URLs are resolved by the owning worker. Editor line anchors such
+as `:12` and `#L12` are ignored when downloading. Only regular files inside the
+session's project can be downloaded, up to **128 MiB**. Symbolic links, files
+with multiple hard links, traversal and private credential/configuration paths
+are rejected. A missing file, offline
+worker or outdated worker produces a message in the dialog instead of navigating
+away. Switching sessions, disconnecting, or signing out cancels the dialog's
+pending request.
+
+Both the gateway and worker need v0.5.87 or later. The gateway uses the existing
+authenticated worker connection and sends one bounded chunk at a time. Downloads
+require the administrator session, exact Origin and CSRF token. Authorization,
+worker connection and session/runtime identity are rechecked during transfer.
+File contents are not written to the gateway database or a gateway cache, and no
+additional Codex process or turn is started. The browser holds the requested file
+in memory until it hands it to the browser's download mechanism.
 
 ## Upstream formatting reference and attribution
 

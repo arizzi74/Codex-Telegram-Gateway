@@ -7,7 +7,7 @@ import (
 	"github.com/google/uuid"
 )
 
-// WebUIFrame is an ephemeral, session-bound app-server relay. Frames are never
+// WebUIFrame is an ephemeral, session-bound relay. Frames are never
 // persisted in the command outbox or replayed following a reconnect.
 type WebUIFrame struct {
 	ID                string          `json:"id"`
@@ -28,12 +28,17 @@ func (f WebUIFrame) Validate() error {
 		return errors.New("invalid web UI connection identity")
 	}
 	switch f.Action {
-	case "open":
+	case "open", "file_open":
 		if _, err := uuid.Parse(f.RuntimeID); err != nil {
 			return errors.New("invalid web UI runtime identity")
 		}
 		if _, err := uuid.Parse(f.SessionID); err != nil || f.RuntimeGeneration == 0 {
 			return errors.New("invalid web UI session target")
+		}
+		if f.Action == "file_open" {
+			if _, err := DecodeWebUIFileRequest(f.Data); err != nil {
+				return err
+			}
 		}
 	case "input":
 		if len(f.Data) == 0 || len(f.Data) > MaxWebUIInputBytes || !json.Valid(f.Data) {
