@@ -69,7 +69,7 @@ func TestSpeechChild(t *testing.T) {
 
 func fakeService(t *testing.T, mode string) *Service {
 	t.Helper()
-	s := New(t.TempDir(), os.Args[0])
+	s := New(privateTestDir(t), os.Args[0])
 	s.command = func(string, int) *exec.Cmd {
 		cmd := exec.Command(os.Args[0], "-test.run=^TestSpeechChild$")
 		cmd.Env = append(os.Environ(), "TELEGRAMGW_SPEECH_TEST_CHILD=1", "TELEGRAMGW_SPEECH_TEST_MODE="+mode)
@@ -77,6 +77,17 @@ func fakeService(t *testing.T, mode string) *Service {
 	}
 	t.Cleanup(s.Close)
 	return s
+}
+
+func privateTestDir(t *testing.T) string {
+	t.Helper()
+	// testing.TempDir creates its numbered child with mode 0777, masked by
+	// the runner's umask. Model storage requires its own explicit 0700 path.
+	dir := filepath.Join(t.TempDir(), "models")
+	if err := os.Mkdir(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	return dir
 }
 
 func TestServiceReusesSwitchesAndReapsHelper(t *testing.T) {

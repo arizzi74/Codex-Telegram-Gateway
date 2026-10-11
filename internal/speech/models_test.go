@@ -145,13 +145,15 @@ func TestDownloadVerifiesAtomicFilesAndCleansFailures(t *testing.T) {
 	spec := testAsset("english", "model.safetensors", data)
 	for _, mode := range []string{"good", "checksum", "long", "status", "network"} {
 		t.Run(mode, func(t *testing.T) {
-			dir := t.TempDir()
+			dir := privateTestDir(t)
 			target := filepath.Join(dir, spec.name)
 			old := []byte("previous verified model")
 			if err := os.WriteFile(target, old, 0600); err != nil {
 				t.Fatal(err)
 			}
+			requested := false
 			client := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+				requested = true
 				if req.URL.Scheme != "https" || req.URL.Host != "huggingface.co" || !strings.Contains(req.URL.Path, modelRevision) {
 					t.Fatal("download is not pinned")
 				}
@@ -172,6 +174,9 @@ func TestDownloadVerifiesAtomicFilesAndCleansFailures(t *testing.T) {
 				return &http.Response{StatusCode: status, ContentLength: int64(len(body)), Body: io.NopCloser(bytes.NewReader(body)), Header: make(http.Header)}, nil
 			})}
 			err := downloadAsset(context.Background(), client, target, spec, nil)
+			if !requested {
+				t.Fatal("fixture failed before reaching the intended download branch")
+			}
 			if (err == nil) != (mode == "good") {
 				t.Fatalf("download = %v", err)
 			}
@@ -191,6 +196,29 @@ func TestDownloadVerifiesAtomicFilesAndCleansFailures(t *testing.T) {
 				t.Fatal("download temporary files survived")
 			}
 		})
+	}
+}
+
+func TestPrivateDirectoryCreatesPrivateStorageAndRejectsSharedPermissions(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "models")
+	if err := privateDirectory(dir); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(dir)
+	if err != nil || info.Mode().Perm() != 0700 {
+		t.Fatalf("new model directory must be private: %v, %v", info, err)
+	}
+	for _, permissions := range []os.FileMode{0750, 0755, 0770, 0777} {
+		if err := os.Chmod(dir, permissions); err != nil {
+			t.Fatal(err)
+		}
+		if err := privateDirectory(dir); err == nil {
+			t.Fatalf("shared model directory accepted: %04o", permissions)
+		}
+		info, err := os.Stat(dir)
+		if err != nil || info.Mode().Perm() != permissions {
+			t.Fatalf("existing directory permissions were changed: %v, %v", info, err)
+		}
 	}
 }
 
