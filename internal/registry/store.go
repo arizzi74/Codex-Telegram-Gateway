@@ -34,6 +34,7 @@ type Store struct {
 	pool     *dbPool
 	activity sessionActivityHub
 	webpush  webPushHub
+	voice    telegramVoiceHub
 }
 
 // Open creates or opens a private SQLite database file and configures durable
@@ -51,6 +52,7 @@ func (s *Store) Close() {
 	if s != nil && s.pool != nil {
 		s.closeSessionActivity()
 		s.closeWebPush()
+		s.closeTelegramVoiceJobs()
 		s.pool.Close()
 	}
 }

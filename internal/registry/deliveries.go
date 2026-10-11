@@ -138,7 +138,9 @@ func (s *Store) MarkDeliverySent(ctx context.Context, id string, messageID int64
 	defer tx.Rollback(ctx)
 	var bot string
 	var chat int64
-	if err = tx.QueryRow(ctx, `UPDATE telegram_deliveries SET status='sent', sent_at=(strftime('%Y-%m-%dT%H:%M:%f','now') || '000000Z'), telegram_message_id=$2, last_error=NULL WHERE delivery_id=$1 AND (status='sending' OR EXISTS(SELECT 1 FROM telegram_input_reply_helpers helper WHERE helper.delivery_id=telegram_deliveries.delivery_id AND helper.retired=1)) RETURNING bot_id,chat_id`, deliveryID, messageID).Scan(&bot, &chat); err != nil {
+	if err = tx.QueryRow(ctx, `UPDATE telegram_deliveries SET status='sent', sent_at=(strftime('%Y-%m-%dT%H:%M:%f','now') || '000000Z'), telegram_message_id=$2, last_error=NULL WHERE delivery_id=$1 AND (status='sending'
+        OR (visibility_revoked=1 AND kind='ui_response' AND json_extract(payload,'$.view')='voice_transcribing')
+        OR EXISTS(SELECT 1 FROM telegram_input_reply_helpers helper WHERE helper.delivery_id=telegram_deliveries.delivery_id AND helper.retired=1)) RETURNING bot_id,chat_id`, deliveryID, messageID).Scan(&bot, &chat); err != nil {
 		return err
 	}
 	if err := checkpointTelegramProgress(ctx, tx, deliveryID, -1, messageID); err != nil {
@@ -295,7 +297,9 @@ func (s *Store) MarkDeliveryChunkSent(ctx context.Context, id string, index int,
 	defer tx.Rollback(ctx)
 	var bot string
 	var chat int64
-	if err = tx.QueryRow(ctx, `SELECT bot_id,chat_id FROM telegram_deliveries WHERE delivery_id=$1 AND (status='sending' OR EXISTS(SELECT 1 FROM telegram_input_reply_helpers helper WHERE helper.delivery_id=telegram_deliveries.delivery_id AND helper.retired=1))`, deliveryID).Scan(&bot, &chat); err != nil {
+	if err = tx.QueryRow(ctx, `SELECT bot_id,chat_id FROM telegram_deliveries WHERE delivery_id=$1 AND (status='sending'
+        OR (visibility_revoked=1 AND kind='ui_response' AND json_extract(payload,'$.view')='voice_transcribing')
+        OR EXISTS(SELECT 1 FROM telegram_input_reply_helpers helper WHERE helper.delivery_id=telegram_deliveries.delivery_id AND helper.retired=1))`, deliveryID).Scan(&bot, &chat); err != nil {
 		return err
 	}
 	if _, err = tx.Exec(ctx, `UPDATE telegram_delivery_chunks SET status='sent',telegram_message_id=$3,sent_at=(strftime('%Y-%m-%dT%H:%M:%f','now') || '000000Z') WHERE delivery_id=$1 AND chunk_index=$2 AND status='pending'`, deliveryID, index, messageID); err != nil {

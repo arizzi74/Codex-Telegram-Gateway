@@ -202,6 +202,7 @@ func run(args []string, logger *slog.Logger) error {
 		services.Go(func() { console.RunWebPush(serviceCtx, logger) })
 		services.Go(func() { _ = sender.Run(serviceCtx) })
 		services.Go(func() { _ = dispatcher.Run(serviceCtx) })
+		services.Go(func() { gateway.NewTelegramVoiceProcessor(store, api, cfg, logger).Run(serviceCtx) })
 		services.Go(func() {
 			ticker := time.NewTicker(time.Minute)
 			defer ticker.Stop()

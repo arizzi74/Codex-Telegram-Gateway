@@ -88,7 +88,8 @@ func workerSupportsImageInput(ctx context.Context, tx *dbTx, workerID uuid.UUID)
 // contain credentials or file URLs and must never be stored as user feedback.
 func mediaErrorResult(code string) AcceptResult {
 	switch code {
-	case "image_too_large", "image_download_failed", "image_unsupported", "image_worker_upgrade", "image_input_reply", "target_unavailable":
+	case "image_too_large", "image_download_failed", "image_unsupported", "image_worker_upgrade", "image_input_reply", "target_unavailable",
+		"voice_disabled", "voice_invalid", "voice_too_large", "voice_too_long", "voice_unavailable":
 	default:
 		code = "image_unsupported"
 	}

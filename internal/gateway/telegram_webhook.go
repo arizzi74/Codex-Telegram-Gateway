@@ -96,6 +96,9 @@ func (h *Webhook) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		in.CallbackToken = strings.TrimPrefix(update.Callback.Data, "cb:")
 		in.CallbackMessageID = message.ID
+	} else if len(message.Voice) > 0 && string(message.Voice) != "null" {
+		h.acceptVoiceMessage(w, r, in, message.Voice)
+		return
 	} else if message.hasMedia() {
 		// Captions stay literal except for explicit steering, which carries the
 		// image to the active turn. Other slash commands must not execute while

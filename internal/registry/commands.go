@@ -39,11 +39,14 @@ type IncomingUpdate struct {
 	Images                                                 []protocol.Image
 	MediaError                                             string
 	imageTarget                                            *routeTarget
+	commandCreatedAt                                       time.Time
 }
 
 // AcceptResult is a durable UI response descriptor. The Telegram renderer owns
 // presentation; the registry only records a bounded view/result code.
 type AcceptResult struct {
+	VoiceJobID         string                  `json:"voice_job_id,omitempty"`
+	Transcript         string                  `json:"transcript,omitempty"`
 	PreviousPickerID   string                  `json:"previous_picker_id,omitempty"`
 	WorkerUpdates      []WorkerUpdateStatus    `json:"worker_updates,omitempty"`
 	MultiSession       bool                    `json:"multi_session,omitempty"`
@@ -224,6 +227,9 @@ func (s *Store) AcceptTelegram(ctx context.Context, in IncomingUpdate) (AcceptRe
 	}
 	if result.ApprovalID != "" || result.CommandID != "" {
 		s.notifySessionActivity()
+	}
+	if result.View == "voice_cancelled" || (strings.EqualFold(in.Action, "interrupt") && result.CommandID != "") {
+		s.notifyTelegramVoiceJobs()
 	}
 	return result, nil
 }
@@ -459,10 +465,28 @@ func acceptTextCommand(ctx context.Context, tx *dbTx, in IncomingUpdate, operati
 		}
 	}
 	expected := ""
+	if operation == protocol.Interrupt && target.activeTurnID == "" {
+		var pendingVoice bool
+		if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM telegram_voice_jobs WHERE session_id=$1 AND status IN ('pending','processing'))`, target.sessionID).Scan(&pendingVoice); err != nil {
+			return AcceptResult{}, err
+		}
+		if pendingVoice {
+			if err := cancelTelegramVoiceJobs(ctx, tx, "session_id=$1", []any{target.sessionID}, "voice_cancelled"); err != nil {
+				return AcceptResult{}, err
+			}
+			// The cancellation already queued feedback for each voice note.
+			return AcceptResult{View: "voice_cancelled", SessionID: target.sessionID.String(), RuntimeID: target.runtimeID.String()}, nil
+		}
+	}
 	if operation == protocol.Steer || operation == protocol.Interrupt {
 		expected = target.activeTurnID
 		if expected == "" {
 			return AcceptResult{}, ErrStaleTurn
+		}
+	}
+	if operation == protocol.Interrupt {
+		if err := cancelTelegramVoiceJobs(ctx, tx, "session_id=$1", []any{target.sessionID}, "voice_cancelled"); err != nil {
+			return AcceptResult{}, err
 		}
 	}
 	command, err := createTelegramCommand(ctx, tx, in, target, operation, target.sessionID.String(), expected, protocol.Arguments{Text: in.Text, Images: in.Images})
@@ -853,6 +877,10 @@ func createTelegramCommand(ctx context.Context, tx *dbTx, in IncomingUpdate, tar
 		return protocol.Command{}, ErrTelegramTarget
 	}
 	now := time.Now().UTC()
+	createdAt := now
+	if !in.commandCreatedAt.IsZero() {
+		createdAt = in.commandCreatedAt
+	}
 	ttl := in.CommandTTL
 	if ttl == 0 {
 		ttl = defaultCommandTTL
@@ -860,7 +888,7 @@ func createTelegramCommand(ctx context.Context, tx *dbTx, in IncomingUpdate, tar
 	if ttl <= 0 {
 		return protocol.Command{}, ErrTelegramTarget
 	}
-	command := protocol.Command{ID: uuid.NewString(), WorkerID: target.workerID.String(), RuntimeID: target.runtimeID.String(), RuntimeGeneration: uint64(target.generation), SessionID: sessionID, ThreadID: target.threadID, Operation: operation, ExpectedTurnID: expectedTurn, Arguments: args, CreatedAt: now, ExpiresAt: now.Add(ttl)}
+	command := protocol.Command{ID: uuid.NewString(), WorkerID: target.workerID.String(), RuntimeID: target.runtimeID.String(), RuntimeGeneration: uint64(target.generation), SessionID: sessionID, ThreadID: target.threadID, Operation: operation, ExpectedTurnID: expectedTurn, Arguments: args, CreatedAt: createdAt, ExpiresAt: now.Add(ttl)}
 	if err := command.Validate(); err != nil {
 		return protocol.Command{}, fmt.Errorf("registry: create command: %w", err)
 	}
@@ -879,10 +907,10 @@ func createTelegramCommand(ctx context.Context, tx *dbTx, in IncomingUpdate, tar
 	if _, err := tx.Exec(ctx, `INSERT INTO commands
         (command_id, source, worker_id, runtime_id, runtime_generation, session_id,
          operation, expected_turn_id, payload, status, telegram_bot_id, telegram_update_id,
-         telegram_user_id, telegram_chat_id, telegram_message_thread_id, expires_at)
-        VALUES ($1,'telegram',$2,$3,$4,$5,$6,NULLIF($7,''),$8,'pending',$9,$10,$11,$12,$13,$14)`,
+         telegram_user_id, telegram_chat_id, telegram_message_thread_id, expires_at, created_at)
+        VALUES ($1,'telegram',$2,$3,$4,$5,$6,NULLIF($7,''),$8,'pending',$9,$10,$11,$12,$13,$14,$15)`,
 		id, target.workerID, target.runtimeID, target.generation, dbSession, string(operation), expectedTurn,
-		string(payload), in.BotID, in.UpdateID, in.UserID, in.ChatID, in.TopicID, command.ExpiresAt); err != nil {
+		string(payload), in.BotID, in.UpdateID, in.UserID, in.ChatID, in.TopicID, command.ExpiresAt, createdAt); err != nil {
 		return protocol.Command{}, fmt.Errorf("registry: persist command: %w", err)
 	}
 	return command, nil
@@ -920,6 +948,9 @@ func bindingMatches(ctx context.Context, tx *dbTx, in IncomingUpdate, sessionID 
 }
 
 func queueUIResponse(ctx context.Context, tx *dbTx, in IncomingUpdate, result AcceptResult) error {
+	if result.View == "voice_cancelled" {
+		return nil
+	}
 	if err := retireSelectionConfirmations(ctx, tx, in, result); err != nil {
 		return err
 	}
@@ -965,13 +996,19 @@ func (s *Store) pendingCommands(ctx context.Context, workerID *uuid.UUID, limit 
 	query := `SELECT payload FROM commands WHERE
         status IN ('pending','dispatched','acknowledged')
         AND (status='pending' OR (status='dispatched' AND dispatched_at <= $1))
-        AND (expires_at IS NULL OR expires_at > (strftime('%Y-%m-%dT%H:%M:%f','now') || '000000Z'))`
+        AND (expires_at IS NULL OR expires_at > (strftime('%Y-%m-%dT%H:%M:%f','now') || '000000Z'))
+        AND (operation NOT IN ('start_turn','steer','input_response') OR NOT EXISTS (
+            SELECT 1 FROM telegram_voice_jobs voice
+            WHERE voice.status IN ('pending','processing') AND voice.bot_id=commands.telegram_bot_id
+              AND voice.chat_id=commands.telegram_chat_id
+              AND voice.message_thread_id=COALESCE(commands.telegram_message_thread_id,0)
+              AND voice.update_id<commands.telegram_update_id))`
 	args := []any{time.Now().UTC().Add(-dispatchedCommandRetryAfter)}
 	if workerID != nil {
 		query += " AND worker_id=$2"
 		args = append(args, *workerID)
 	}
-	query += fmt.Sprintf(" ORDER BY created_at LIMIT $%d", len(args)+1)
+	query += fmt.Sprintf(" ORDER BY created_at,COALESCE(telegram_update_id,0),command_id LIMIT $%d", len(args)+1)
 	args = append(args, limit)
 	rows, err := s.pool.Query(ctx, query, args...)
 	if err != nil {

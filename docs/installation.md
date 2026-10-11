@@ -708,6 +708,43 @@ and SQLite backup. Once new
 service startup has been attempted, failures retain the new files for inspection
 so later writes cannot be lost through an automatic rollback.
 
+## Optional local voice transcription
+
+After installing or updating the gateway, run:
+
+```sh
+sudo codex-telegramgw setup voice
+```
+
+This installs the matching `codex-whisper` helper, downloads the multilingual
+Whisper base model with a pinned SHA-256 checksum, enables local voice
+transcription, and restarts the gateway. The model is kept at
+`/usr/local/share/codex-whisper/ggml-base.bin`. The helper is part of subsequent
+gateway updates and their backup/rollback handling; the model is reused.
+
+The gateway JSON contains:
+
+```json
+"voice": {
+  "enabled": true,
+  "helper_path": "/usr/local/lib/codex-telegramgw/codex-whisper",
+  "model_path": "/usr/local/share/codex-whisper/ggml-base.bin",
+  "threads": 2
+}
+```
+
+Voice transcription is disabled until setup is run. To disable it again, set
+`voice.enabled` to `false` and restart the gateway. Pending voice jobs are then
+cancelled. The feature does not require changing worker sandbox settings or
+installing anything on worker hosts.
+
+Redistributable helper archives cover Linux amd64/arm64 and macOS amd64/arm64.
+Linux helpers are static musl executables. macOS helpers use system libraries
+only. The gateway service itself remains supported on Linux. Source builds use
+`scripts/build-whisper-linux.sh` on Linux or `scripts/build-whisper.sh` on macOS;
+these build-time dependencies are not required on installed hosts. See
+[`native/whisper`](../native/whisper) for pinned source and licenses.
+
 ## Publishing an update
 
 Maintainers commit and push the change, then create a new stable version tag:
@@ -729,13 +766,14 @@ Web Push controls and public website with a pinned Playwright/Chromium setup.
 Website publication runs its own browser checks before deploying `site/` to
 GitHub Pages. These are development tools, not installed gateway dependencies.
 
-Each release publishes ten component archives, four native manager executables
+Each release publishes fourteen component archives (including the Whisper helper
+for Linux/macOS on amd64/arm64), four native manager executables
 (`codex-telegramgw-{linux,darwin}-{amd64,arm64}`), `install.sh`, `SHA256SUMS`, and
-`SHA256SUMS.sigstore.json` (17 files total).
+`SHA256SUMS.sigstore.json` (21 files total).
 Every component archive contains the matching native manager and inner checksums.
-Packaging and verification use the Go release tool. Python remains only in the
-repository's historical PostgreSQL migration tools and their CI tests; those
-tools are not shipped in the release archives.
+Packaging and verification use the Go release tool. Python is used only for
+development checks: historical PostgreSQL migration utilities/tests and native
+Whisper speech tests in CI. It is not required on installed hosts.
 
 The native manager verifies the manifest's Sigstore build attestation before
 accepting its hashes or executing downloaded programs. It requires GitHub's OIDC

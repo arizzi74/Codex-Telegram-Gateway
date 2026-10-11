@@ -187,7 +187,7 @@ func UnpackVerified(archive, target, binary string) error {
 			return err
 		}
 		mode := os.FileMode(0600)
-		if name == binary || name == "codex-telegramgw" || name == "scripts/release-manager.py" {
+		if name == binary || name == "codex-telegramgw" || name == "scripts/release-manager.py" || name == "codex-whisper" {
 			mode = 0700
 		}
 		output, err := root.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_EXCL, mode)
@@ -221,6 +221,16 @@ func UnpackVerified(archive, target, binary string) error {
 			return errors.New("release archive is missing its verified program or updater")
 		}
 		if err = VerifyFile(filepath.Join(target, name), hash); err != nil {
+			return err
+		}
+	}
+	// Verify the optional helper whenever present, including gateway bundles.
+	// Older signed gateway releases remain installable without voice support.
+	if seen["codex-whisper"] {
+		if hashes["codex-whisper"] == "" {
+			return errors.New("release archive is missing its verified Whisper helper")
+		}
+		if err = VerifyFile(filepath.Join(target, "codex-whisper"), hashes["codex-whisper"]); err != nil {
 			return err
 		}
 	}
@@ -328,7 +338,11 @@ func (m *Manager) Package(ctx context.Context, release *Release, l *Layout, bina
 	if err = UnpackVerified(archive, destination, binary); err != nil {
 		return "", err
 	}
-	for _, program := range []string{binary, "codex-telegramgw"} {
+	programs := []string{binary, "codex-telegramgw"}
+	if binary == "codex-gateway" && FileExists(filepath.Join(destination, "codex-whisper")) {
+		programs = append(programs, "codex-whisper")
+	}
+	for _, program := range programs {
 		if program == "codex-local" {
 			continue
 		}

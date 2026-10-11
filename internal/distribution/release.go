@@ -40,9 +40,9 @@ func (t Target) Suffix() string       { return t.OS + "-" + t.Arch }
 func (t Target) ManagerAsset() string { return ManagerName + "-" + t.Suffix() }
 func (t Target) Components() []string {
 	if t.OS == "linux" {
-		return []string{"codex-gateway", "codex-worker", "codex-local"}
+		return []string{"codex-gateway", "codex-worker", "codex-local", "codex-whisper"}
 	}
-	return []string{"codex-worker", "codex-local"}
+	return []string{"codex-worker", "codex-local", "codex-whisper"}
 }
 
 func Assets() []string {
@@ -129,7 +129,7 @@ type file struct {
 
 func packagedSources(root string) (map[string]file, error) {
 	files := make(map[string]file)
-	for _, name := range []string{"README.md", "LICENSE", "examples", "deploy", "migrations"} {
+	for _, name := range []string{"README.md", "LICENSE", "examples", "deploy", "migrations", "native/whisper/NOTICE.md", "native/whisper/source.env", "native/whisper/licenses"} {
 		err := filepath.WalkDir(filepath.Join(root, name), func(filename string, entry fs.DirEntry, err error) error {
 			if err != nil {
 				return err
@@ -189,7 +189,19 @@ func Package(root, dist, binary string, target Target) error {
 	files[binary] = file{program, 0755}
 	files[ManagerName] = file{manager, 0755}
 	files[LegacyManagerName] = file{manager, 0755}
-	files["SHA256SUMS"] = file{manifest(map[string][]byte{binary: program, ManagerName: manager, LegacyManagerName: manager}), 0644}
+	programs := map[string][]byte{binary: program, ManagerName: manager, LegacyManagerName: manager}
+	if binary == "codex-gateway" {
+		helper, err := os.ReadFile(filepath.Join(dist, "codex-whisper-"+target.Suffix()))
+		if err != nil {
+			return err
+		}
+		if err := verifyNative(helper, target); err != nil {
+			return fmt.Errorf("whisper helper: %w", err)
+		}
+		files["codex-whisper"] = file{helper, 0755}
+		programs["codex-whisper"] = helper
+	}
+	files["SHA256SUMS"] = file{manifest(programs), 0644}
 	output, err := os.Create(filepath.Join(dist, binary+"-"+target.Suffix()+".tar.gz"))
 	if err != nil {
 		return err
@@ -257,6 +269,15 @@ func verifyNative(data []byte, target Target) error {
 	}
 	if program.Cpu != expected || program.Type != macho.TypeExec {
 		return errors.New("incorrect macOS executable architecture or type")
+	}
+	libraries, err := program.ImportedLibraries()
+	if err != nil {
+		return err
+	}
+	for _, library := range libraries {
+		if !strings.HasPrefix(library, "/usr/lib/") && !strings.HasPrefix(library, "/System/Library/Frameworks/") {
+			return errors.New("macOS executable has a non-system shared-library dependency")
+		}
 	}
 	return nil
 }
@@ -336,7 +357,7 @@ func Verify(root, dist string) error {
 	}
 	assets := Assets()
 	if len(hashes) != len(assets) {
-		return errors.New("release manifest must contain exactly ten archives, four managers and installer")
+		return errors.New("release manifest must contain exactly fourteen archives, four managers and installer")
 	}
 	for _, name := range assets {
 		expected, ok := hashes[name]
@@ -355,7 +376,7 @@ func Verify(root, dist string) error {
 	if err != nil {
 		return err
 	}
-	if len(archives) != 10 {
+	if len(archives) != 14 {
 		return errors.New("unexpected or missing platform archive")
 	}
 	sources, err := packagedSources(root)
@@ -381,13 +402,21 @@ func Verify(root, dist string) error {
 		if err := verifyNative(manager, target); err != nil {
 			return fmt.Errorf("%s: %w", target.ManagerAsset(), err)
 		}
+		helperArchive, err := readArchive(filepath.Join(dist, "codex-whisper-"+target.Suffix()+".tar.gz"))
+		if err != nil {
+			return err
+		}
 		for _, binary := range target.Components() {
 			name := binary + "-" + target.Suffix() + ".tar.gz"
 			files, err := readArchive(filepath.Join(dist, name))
 			if err != nil {
 				return fmt.Errorf("%s: %w", name, err)
 			}
-			if len(files) != len(sources)+4 {
+			expectedFiles := len(sources) + 4
+			if binary == "codex-gateway" {
+				expectedFiles++
+			}
+			if len(files) != expectedFiles {
 				return fmt.Errorf("unexpected archive contents: %s", name)
 			}
 			for source, expected := range sources {
@@ -400,10 +429,14 @@ func Verify(root, dist string) error {
 			if err != nil {
 				return fmt.Errorf("%s: %w", name, err)
 			}
-			if len(inner) != 3 {
+			executables := []string{binary, ManagerName, LegacyManagerName}
+			if binary == "codex-gateway" {
+				executables = append(executables, "codex-whisper")
+			}
+			if len(inner) != len(executables) {
 				return fmt.Errorf("unexpected inner checksum manifest: %s", name)
 			}
-			for _, executable := range []string{binary, ManagerName, LegacyManagerName} {
+			for _, executable := range executables {
 				actual, ok := files[executable]
 				if !ok || digest(actual.data) != inner[executable] {
 					return fmt.Errorf("archive checksum mismatch: %s: %s", name, executable)
@@ -411,9 +444,15 @@ func Verify(root, dist string) error {
 				if actual.mode&0111 == 0 {
 					return fmt.Errorf("archive binary is not executable: %s: %s", name, executable)
 				}
+				if err := verifyNative(actual.data, target); err != nil {
+					return fmt.Errorf("%s: %s: %w", name, executable, err)
+				}
 			}
 			if err := verifyNative(files[binary].data, target); err != nil {
 				return fmt.Errorf("%s: %w", name, err)
+			}
+			if binary == "codex-gateway" && !bytes.Equal(files["codex-whisper"].data, helperArchive["codex-whisper"].data) {
+				return fmt.Errorf("gateway helper differs from its platform helper archive: %s", name)
 			}
 			for _, executable := range []string{ManagerName, LegacyManagerName} {
 				if !bytes.Equal(files[executable].data, manager) {

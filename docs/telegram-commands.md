@@ -205,8 +205,9 @@ separately.
 
 For a photo with multiple resolutions, the gateway selects the largest version
 that fits its size limit. Each image message is a separate submission; albums
-are not combined into one turn. Video, audio, voice messages, stickers,
+are not combined into one turn. Video, generic audio uploads, stickers,
 animations and non-image documents produce an unsupported-attachment reply.
+Telegram voice notes use the optional local transcription feature below.
 Reply to input requests with text, and send images separately. If Telegram still
 shows a reply to a question in its composer, close that preview with **×** before
 sending an image, including one with a `/tgsteer` caption.
@@ -223,6 +224,59 @@ Both gateway and worker need v0.5.13 or later. During a rolling upgrade, an old
 worker produces an update-required reply instead of receiving only the caption.
 Images sent to earlier gateway versions were ignored before command storage;
 resend them after the upgrade.
+
+## Voice notes
+
+Enable local transcription on the gateway host:
+
+```sh
+sudo codex-telegramgw setup voice
+```
+
+The installer verifies and installs the release's Whisper helper and a pinned
+multilingual **base** model, enables the gateway configuration and restarts the
+gateway. Workers do not need an audio decoder or a model. No OpenAI transcription
+API key, Python, FFmpeg, or separately installed audio libraries are needed.
+
+Select a session and send a Telegram voice note. The gateway shows a temporary
+transcribing message, then the recognized text. That text is submitted to the
+session selected when the recording was received and appears in its Web UI
+history. An idle session receives a new prompt; an active session receives a
+steer for that exact turn. If that active turn ends or the target changes while
+transcription is running, the recording is not redirected to another turn.
+A recording accepted while idle remains a new prompt and can enter the normal
+next-turn queue if another turn starts meanwhile.
+Replying to a pending free-text question answers that question. Spoken slash
+commands are literal prompt text, not gateway commands. Voice captions are not
+included in the transcript; send additional instructions as a separate message.
+
+Only Ogg/Opus Telegram voice notes are supported initially, up to **5 minutes**
+and **20 MiB** each. MP3/M4A uploads and video notes are not decoded. Limits apply
+to the actual bytes and decoded duration as well as Telegram's metadata.
+Language detection is automatic; transcription does not translate the recording.
+
+One recording is processed at a time. The model stays in memory and the helper
+sleeps between recordings. The default is two inference threads. Allow roughly
+0.5–1 GB of RAM for the multilingual base model and inference, plus about
+150 MB of model storage. Processing time depends on recording length and CPU.
+There is no per-minute API charge; the resulting Codex prompt uses the session's
+normal account and usage allowance.
+
+Accepted recordings have a durable queue and a frozen destination. Later text
+prompts in the same chat/topic wait behind outstanding recordings; selection
+and stop controls remain usable. The queue accepts up to 20 outstanding
+recordings. Each transcription has a ten-minute processing budget, and queued
+jobs expire after 15 minutes. Failed downloads and temporary helper failures retry with a
+bounded delay; inference timeouts do not repeat automatically. Gateway restarts preserve pending work; a hard crash may leave a
+job waiting until its lease expires. Interrupting a session cancels its pending
+voice submissions.
+
+Audio downloads use Telegram's authenticated file API. Decoding runs in Go and
+Whisper inference stays on the gateway. Audio is held in memory, never saved in
+the database or sent to a transcription service. The recognized prompt is
+retained like ordinary text. Telegram still holds the original recording under
+its own chat storage policy. Model/helper downloads happen only during setup
+or software updates.
 
 ## Conversation history
 

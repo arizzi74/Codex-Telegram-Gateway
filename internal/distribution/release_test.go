@@ -49,11 +49,12 @@ func releaseFixture(t *testing.T) (string, string) {
 	t.Helper()
 	root := t.TempDir()
 	dist := filepath.Join(root, "dist")
-	for _, source := range []string{"README.md", "LICENSE", "examples/worker.json", "deploy/systemd/codex-worker.service", "migrations/001_registry.sql", "scripts/install.sh"} {
+	for _, source := range []string{"README.md", "LICENSE", "examples/worker.json", "deploy/systemd/codex-worker.service", "migrations/001_registry.sql", "scripts/install.sh", "native/whisper/NOTICE.md", "native/whisper/source.env", "native/whisper/licenses/whisper.cpp-MIT.txt"} {
 		writeTestFile(t, filepath.Join(root, source), []byte("source for "+source+"\n"))
 	}
 	for _, target := range Targets() {
 		writeTestFile(t, filepath.Join(dist, target.ManagerAsset()), nativeFixture(target))
+		writeTestFile(t, filepath.Join(dist, "codex-whisper-"+target.Suffix()), nativeFixture(target))
 		for _, component := range target.Components() {
 			writeTestFile(t, filepath.Join(dist, component+"-"+target.Suffix()), nativeFixture(target))
 			if err := Package(root, dist, component, target); err != nil {
@@ -120,8 +121,8 @@ func TestReleasePreservesContentsAndNativeMigrationManager(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(hashes) != 15 {
-		t.Fatalf("expected fifteen checksummed assets plus manifest, got %d", len(hashes))
+	if len(hashes) != 19 {
+		t.Fatalf("expected nineteen checksummed assets plus manifest, got %d", len(hashes))
 	}
 }
 
@@ -282,5 +283,49 @@ func TestNativeValidationRejectsDynamicLoader(t *testing.T) {
 	_ = binary.Write(&buffer, binary.LittleEndian, elf.Prog64{Type: uint32(elf.PT_INTERP)})
 	if err := verifyNative(buffer.Bytes(), target); err == nil || !strings.Contains(err.Error(), "dynamic loader") {
 		t.Fatalf("dynamic executable: %v", err)
+	}
+}
+
+func TestGatewayHelperMustMatchPlatformArchive(t *testing.T) {
+	root, dist := releaseFixture(t)
+	name := filepath.Join(dist, "codex-gateway-linux-amd64.tar.gz")
+	original := nativeFixture(Target{"linux", "amd64"})
+	changed := append(append([]byte(nil), original...), 0)
+	rewriteArchive(t, name, func(name string, contents *file) (string, *tar.Header) {
+		if name == "codex-whisper" {
+			contents.data = changed
+		}
+		if name == "SHA256SUMS" {
+			contents.data = []byte(strings.Replace(string(contents.data), digest(original)+"  codex-whisper\n", digest(changed)+"  codex-whisper\n", 1))
+		}
+		return name, nil
+	}, false)
+	if err := WriteManifest(dist); err != nil {
+		t.Fatal(err)
+	}
+	if err := Verify(root, dist); err == nil || !strings.Contains(err.Error(), "helper differs") {
+		t.Fatalf("accepted inconsistent native helper: %v", err)
+	}
+}
+
+func TestNativeMacValidationRejectsNonSystemLibraries(t *testing.T) {
+	target := Target{"darwin", "arm64"}
+	for _, library := range []string{"/usr/lib/libSystem.B.dylib", "/opt/homebrew/opt/libomp/lib/libomp.dylib", "@rpath/libwhisper.dylib"} {
+		var header macho.FileHeader
+		if err := binary.Read(bytes.NewReader(nativeFixture(target)), binary.LittleEndian, &header); err != nil {
+			t.Fatal(err)
+		}
+		size := uint32((24 + len(library) + 1 + 7) / 8 * 8)
+		header.Ncmd, header.Cmdsz = 1, size
+		var buffer bytes.Buffer
+		binary.Write(&buffer, binary.LittleEndian, header)
+		binary.Write(&buffer, binary.LittleEndian, uint32(0))
+		binary.Write(&buffer, binary.LittleEndian, macho.DylibCmd{Cmd: macho.LoadCmdDylib, Len: size, Name: 24})
+		buffer.WriteString(library)
+		buffer.Write(make([]byte, int(size)-24-len(library)))
+		err := verifyNative(buffer.Bytes(), target)
+		if (err == nil) != strings.HasPrefix(library, "/usr/lib/") {
+			t.Fatalf("library %q: %v", library, err)
+		}
 	}
 }

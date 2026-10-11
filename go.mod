@@ -9,6 +9,7 @@ require (
 	github.com/go-webauthn/webauthn v0.18.1
 	github.com/golang-jwt/jwt/v5 v5.3.1
 	github.com/google/uuid v1.6.0
+	github.com/pion/opus v0.1.1-0.20261005072002-44637de087b3
 	github.com/sigstore/sigstore-go v1.3.0
 	github.com/yuin/goldmark v1.8.6
 	go.etcd.io/bbolt v1.5.0

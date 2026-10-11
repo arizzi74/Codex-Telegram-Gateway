@@ -1,0 +1,63 @@
+name: Native Whisper
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        type: string
+        required: true
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Helper release version
+        default: dev
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: linux
+            arch: amd64
+            runner: ubuntu-24.04
+          - os: linux
+            arch: arm64
+            runner: ubuntu-24.04-arm
+          - os: darwin
+            arch: amd64
+            runner: macos-15-intel
+          - os: darwin
+            arch: arm64
+            runner: macos-15
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Build static musl Linux helper
+        if: matrix.os == 'linux'
+        env:
+          VERSION: ${{ inputs.version }}
+          TARGET_ARCH: ${{ matrix.arch }}
+        run: bash scripts/build-whisper-linux.sh "$TARGET_ARCH"
+      - name: Build macOS helper using system libraries
+        if: matrix.os == 'darwin'
+        env:
+          VERSION: ${{ inputs.version }}
+          WHISPER_TARGET_ARCH: ${{ matrix.arch }}
+          WHISPER_TARGET_OS: darwin
+        run: bash scripts/build-whisper.sh
+      - name: Verify real speech, warm model, protocol framing and EOF
+        env:
+          TARGET_OS: ${{ matrix.os }}
+          TARGET_ARCH: ${{ matrix.arch }}
+        run: python3 native/whisper/smoke.py "dist/whisper/codex-whisper-$TARGET_OS-$TARGET_ARCH"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: whisper-${{ matrix.os }}-${{ matrix.arch }}
+          if-no-files-found: error
+          path: dist/whisper/codex-whisper-*

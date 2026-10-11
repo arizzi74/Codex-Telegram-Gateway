@@ -155,7 +155,7 @@ func checkpointPickerCleanup(ctx context.Context, tx *dbTx, deliveryID uuid.UUID
 	var chat, topic int64
 	err := tx.QueryRow(ctx, `SELECT bot_id,chat_id,message_thread_id FROM telegram_deliveries
         WHERE delivery_id=$1 AND visibility_revoked=1 AND kind='ui_response'
-          AND (json_extract(payload,'$.view') IN ('sessions','instances') OR (json_extract(payload,'$.view')='runtime_picker' AND json_extract(payload,'$.action')='sessions'))`, deliveryID).Scan(&bot, &chat, &topic)
+          AND (json_extract(payload,'$.view') IN ('sessions','instances','voice_transcribing') OR (json_extract(payload,'$.view')='runtime_picker' AND json_extract(payload,'$.action')='sessions'))`, deliveryID).Scan(&bot, &chat, &topic)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil
 	}

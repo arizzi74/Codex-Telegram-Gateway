@@ -90,6 +90,21 @@ func (s *Sender) renderUIResponse(ctx context.Context, row registry.Delivery) (s
 		return telegramErrorText(response.ErrorCode), nil, nil
 	}
 	switch response.View {
+	case "voice_transcribing", "voice_transcript":
+		title := "🎙 Voice note"
+		presentation, err := s.deliveryPresentation(ctx, row)
+		if err != nil {
+			return "", nil, err
+		}
+		if presentation.Name != "" && !presentation.MultiSession {
+			// Transcription can finish after the user switches sessions.
+			// Keep the frozen destination visible in single-session mode too.
+			title += " · " + presentation.Name
+		}
+		if response.View == "voice_transcribing" {
+			return title + "\n\nTranscribing locally…", nil, nil
+		}
+		return title + "\n\n" + response.Transcript, nil, nil
 	case "worker_updates", "worker_update_result":
 		return s.renderWorkerUpdates(response), nil, nil
 	case "help", "start":
@@ -836,6 +851,28 @@ func codexHelpText() string {
 }
 func telegramErrorText(code string) string {
 	switch code {
+	case "voice_disabled":
+		return "Local voice transcription is not enabled. On the gateway host, run: sudo codex-telegramgw setup voice"
+	case "voice_unavailable":
+		return "Local voice transcription is unavailable. Check that the Whisper helper and model are installed, then send the recording again."
+	case "voice_invalid", "voice_invalid_audio", "voice_decode_failed", "voice_unsupported":
+		return "This recording could not be decoded. Send a Telegram voice note in Ogg/Opus format; MP3 and M4A attachments are not supported."
+	case "voice_too_large":
+		return "The voice note is too large. Send a recording of 20 MiB or less."
+	case "voice_too_long":
+		return "The voice note is too long. Send a recording of 5 minutes or less."
+	case "voice_download_failed":
+		return "The voice note could not be downloaded from Telegram. Please send it again."
+	case "voice_transcription_failed", "voice_timeout":
+		return "The voice note could not be transcribed in time. Please send a shorter recording or type your message."
+	case "voice_empty":
+		return "No speech was recognized in the recording. Please try again or type your message."
+	case "voice_queue_full":
+		return "The voice-note queue is full. Wait for the pending recordings to finish, then try again."
+	case "voice_unauthorized":
+		return "This voice note was cancelled because access to its destination changed."
+	case "voice_cancelled":
+		return "Voice note cancelled."
 	case "worker_updates_usage":
 		return "Use /tgupdateworkers without arguments to check and update workers and Codex runtimes when idle."
 	case "image_too_large":

@@ -48,7 +48,7 @@ func run(args []string) error {
 		if err := distribution.Verify(*root, *dist); err != nil {
 			return err
 		}
-		fmt.Println("Verified ten platform archives, four native managers and installer.")
+		fmt.Println("Verified fourteen platform archives, four native managers and installer.")
 		return nil
 	default:
 		return fmt.Errorf("unknown release-tool command: %s", args[0])

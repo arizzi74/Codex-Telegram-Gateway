@@ -746,6 +746,16 @@ func (m *Manager) ApplyUpdate(ctx context.Context, l *Layout, packages map[strin
 		{l.Binary, filepath.Join(packages[l.Component], filepath.Base(l.Binary))},
 		{l.Manager, filepath.Join(packages[l.Component], "codex-telegramgw")},
 	}
+	if l.Component == "gateway" {
+		helper := filepath.Join(packages[l.Component], "codex-whisper")
+		if FileExists(helper) {
+			sources = append(sources, struct{ destination, source string }{filepath.Join(l.Bin, "codex-whisper"), helper})
+		} else if configured, err := gatewayVoiceEnabled(l.Config); err != nil {
+			return err
+		} else if configured {
+			return errors.New("voice is enabled but the gateway release has no Whisper helper")
+		}
+	}
 	if l.Component == "worker" {
 		sources = append(sources, struct{ destination, source string }{filepath.Join(l.Bin, "codex-local"), filepath.Join(packages["local"], "codex-local")})
 	}

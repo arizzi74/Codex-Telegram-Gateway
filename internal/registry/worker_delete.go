@@ -95,6 +95,7 @@ func scopeDeletedWorker(ctx context.Context, tx *dbTx, workerID uuid.UUID) error
 		{"approval", "approvals", "approval_id"},
 		{"request", "worker_update_requests", "request_id"},
 		{"enrollment", "worker_enrollments", "enrollment_id"},
+		{"voice", "telegram_voice_jobs", "job_id"},
 	} {
 		query := `INSERT INTO _worker_delete_ids SELECT '` + source.kind + `',` + source.column + ` FROM ` + source.table + ` WHERE worker_id=$1`
 		if _, err := tx.Exec(ctx, query, workerID); err != nil {
@@ -176,7 +177,9 @@ var deletedWorkerQueries = []string{
 	// linkage while the worker's command and message identities still exist.
 	// Raw command text can embed an ID, e.g. /tgsessions <runtime UUID>, so raw
 	// receipts also match IDs within strings; graph discovery uses exact values.
-	`UPDATE telegram_updates SET raw='{}',user_id=NULL,chat_id=NULL WHERE EXISTS (SELECT 1 FROM commands command
+	`UPDATE telegram_updates SET raw='{}',user_id=NULL,chat_id=NULL WHERE EXISTS (SELECT 1 FROM telegram_voice_jobs voice
+        WHERE voice.worker_id=$1 AND voice.bot_id=telegram_updates.bot_id AND voice.update_id=telegram_updates.update_id)
+		OR EXISTS (SELECT 1 FROM commands command
         WHERE command.worker_id=$1 AND command.telegram_bot_id=telegram_updates.bot_id
           AND command.telegram_update_id=telegram_updates.update_id)
 		OR EXISTS (SELECT 1 FROM json_tree(raw) atom JOIN _worker_delete_ids identity
@@ -203,6 +206,7 @@ var deletedWorkerQueries = []string{
 	`DELETE FROM webpush_deliveries WHERE session_id IN (SELECT id FROM _worker_delete_ids WHERE kind='session')
         OR event_id IN (SELECT id FROM _worker_delete_ids WHERE kind='event')`,
 	`DELETE FROM telegram_question_answers WHERE approval_id IN (SELECT id FROM _worker_delete_ids WHERE kind='approval')`,
+	`DELETE FROM telegram_voice_jobs WHERE worker_id=$1`,
 	`DELETE FROM approvals WHERE worker_id=$1`,
 	// Delivery chunks cascade; helper, edit and progress dependents were removed.
 	`DELETE FROM telegram_deliveries WHERE delivery_id IN (SELECT id FROM _worker_delete_ids WHERE kind='delivery')`,

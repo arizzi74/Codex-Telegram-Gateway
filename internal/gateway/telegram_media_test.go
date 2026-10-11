@@ -50,7 +50,7 @@ func TestWebhookImagesAndCaptions(t *testing.T) {
 		{"document", `"document":{"file_id":"original"},"caption":"Screenshot"`, "Screenshot", "original", ""},
 		{"large photo fallback", fmt.Sprintf(`"photo":[{"file_id":"fit","width":100,"height":100},{"file_id":"large","width":200,"height":200,"file_size":%d}]`, protocol.MaxImageBytes+1), "", "fit", ""},
 		{"too large", fmt.Sprintf(`"document":{"file_id":"large","file_size":%d}`, protocol.MaxImageBytes+1), "", "", "image_too_large"},
-		{"voice", `"voice":{"file_id":"voice"}`, "", "", "image_unsupported"},
+		{"voice", `"voice":{"file_id":"voice"}`, "", "", "voice_disabled"},
 		{"animation", `"animation":{"file_id":"animation"},"document":{"file_id":"animation"}`, "", "", "image_unsupported"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

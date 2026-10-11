@@ -76,20 +76,26 @@ func (l *Layout) RequireUser() error {
 		if os.Geteuid() != 0 {
 			return errors.New("gateway installation and updates require sudo")
 		}
-		for _, path := range []string{l.State, l.Config, filepath.Dir(l.Config), filepath.Dir(l.Manager), l.Binary, l.Manager} {
-			info, err := os.Lstat(path)
-			if errors.Is(err, os.ErrNotExist) {
-				continue
-			}
-			if err != nil {
-				return err
-			}
-			if err := validateGatewayInstallerPath(info, path == l.Binary || path == l.Manager); err != nil {
-				return err
-			}
-		}
+		return l.validateGatewayInstallation(os.Lstat)
 	} else if os.Geteuid() == 0 {
 		return errors.New("run worker installation and updates as the worker account, without sudo")
+	}
+	return nil
+}
+
+func (l *Layout) validateGatewayInstallation(stat func(string) (os.FileInfo, error)) error {
+	helper := filepath.Join(l.Bin, "codex-whisper")
+	for _, path := range []string{l.State, l.Config, filepath.Dir(l.Config), filepath.Dir(l.Manager), l.Binary, l.Manager, helper} {
+		info, err := stat(path)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		if err := validateGatewayInstallerPath(info, path == l.Binary || path == l.Manager || path == helper); err != nil {
+			return err
+		}
 	}
 	return nil
 }

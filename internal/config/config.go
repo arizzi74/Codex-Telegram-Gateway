@@ -48,6 +48,34 @@ type GatewayConfig struct {
 	CommandExpiry     time.Duration `json:"command_expiry"`
 	ReadHeaderTimeout time.Duration `json:"read_header_timeout"`
 	Secrets           BotSecrets    `json:"-"`
+	Voice             VoiceConfig   `json:"voice"`
+}
+
+// VoiceConfig controls optional local Telegram voice-note transcription.
+type VoiceConfig struct {
+	Enabled    bool   `json:"enabled"`
+	HelperPath string `json:"helper_path"`
+	ModelPath  string `json:"model_path"`
+	Threads    int    `json:"threads"`
+}
+
+func (v VoiceConfig) withDefaults() (VoiceConfig, error) {
+	if v.HelperPath == "" {
+		v.HelperPath = "/usr/local/lib/codex-telegramgw/codex-whisper"
+	}
+	if v.ModelPath == "" {
+		v.ModelPath = "/usr/local/share/codex-whisper/ggml-base.bin"
+	}
+	if v.Threads == 0 {
+		v.Threads = 2
+	}
+	if v.Threads < 1 || v.Threads > 2 {
+		return v, errors.New("gateway config: voice.threads must be 1 or 2")
+	}
+	if !filepath.IsAbs(v.HelperPath) || !filepath.IsAbs(v.ModelPath) || strings.ContainsRune(v.HelperPath, '\x00') || strings.ContainsRune(v.ModelPath, '\x00') {
+		return v, errors.New("gateway config: voice helper_path and model_path must be absolute local paths")
+	}
+	return v, nil
 }
 
 // WorkerConfig is the JSON configuration for codex-worker. WorkerID is the
@@ -219,17 +247,18 @@ func LoadWorker(path string) (WorkerConfig, error) {
 }
 
 type gatewayJSON struct {
-	Listen            string  `json:"listen"`
-	PublicBaseURL     string  `json:"public_base_url"`
-	DatabasePath      string  `json:"database_path"`
-	BotSecretsFile    string  `json:"bot_secrets_file"`
-	WebhookSecretEnv  string  `json:"webhook_secret_env"`
-	AllowedUserIDs    []int64 `json:"allowed_user_ids"`
-	AllowedChatIDs    []int64 `json:"allowed_chat_ids"`
-	HeartbeatInterval string  `json:"heartbeat_interval"`
-	UnreachableAfter  string  `json:"unreachable_after"`
-	CommandExpiry     string  `json:"command_expiry"`
-	ReadHeaderTimeout string  `json:"read_header_timeout"`
+	Voice             VoiceConfig `json:"voice"`
+	Listen            string      `json:"listen"`
+	PublicBaseURL     string      `json:"public_base_url"`
+	DatabasePath      string      `json:"database_path"`
+	BotSecretsFile    string      `json:"bot_secrets_file"`
+	WebhookSecretEnv  string      `json:"webhook_secret_env"`
+	AllowedUserIDs    []int64     `json:"allowed_user_ids"`
+	AllowedChatIDs    []int64     `json:"allowed_chat_ids"`
+	HeartbeatInterval string      `json:"heartbeat_interval"`
+	UnreachableAfter  string      `json:"unreachable_after"`
+	CommandExpiry     string      `json:"command_expiry"`
+	ReadHeaderTimeout string      `json:"read_header_timeout"`
 }
 
 func (r gatewayJSON) config() (GatewayConfig, error) {
@@ -253,6 +282,10 @@ func (r gatewayJSON) config() (GatewayConfig, error) {
 		return GatewayConfig{}, errors.New("gateway config: durations must be positive and unreachable_after must exceed heartbeat_interval")
 	}
 	cfg := GatewayConfig{Listen: r.Listen, PublicBaseURL: r.PublicBaseURL, DatabasePath: r.DatabasePath, BotSecretsFile: r.BotSecretsFile, WebhookSecretEnv: r.WebhookSecretEnv, AllowedUserIDs: r.AllowedUserIDs, AllowedChatIDs: r.AllowedChatIDs, HeartbeatInterval: heartbeat, UnreachableAfter: unreachable, CommandExpiry: expiry, ReadHeaderTimeout: readHeader}
+	cfg.Voice, err = r.Voice.withDefaults()
+	if err != nil {
+		return GatewayConfig{}, err
+	}
 	if cfg.Listen == "" {
 		cfg.Listen = DefaultGatewayListen
 	}

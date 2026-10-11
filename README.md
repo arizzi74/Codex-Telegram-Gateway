@@ -32,6 +32,7 @@ flowchart TB
   gateway -->|"Telegram Bot API"| telegram
   browser <-->|"HTTPS / WebSocket"| gateway
   gateway <--> registry
+  gateway <-->|"Local PCM pipe; optional voice transcription"| whisper["Resident Whisper helper"]
 
   subgraph machine_a["Worker A · Linux / macOS"]
     direction TB
@@ -233,7 +234,7 @@ The bot authorizes only the numeric `WLID` in its private `.botsecrets` file.
 Changing a Telegram username does not grant access. To use the bot, send
 `/tgstart`, then `/tginstances` or `/tgsessions` and select a session.
 Use `/tgsessions` to select a session or create one with **New session**.
-Ordinary messages and images steer the session's active turn automatically;
+Ordinary messages, images and enabled voice notes steer the session's active turn automatically;
 when the session is idle, they start a new turn.
 Gateway commands begin with `/tg`: `/tgstatus`, `/tgdeletesession`,
 `/tglastmessages`, `/tghistory`, `/tgmultisession`, `/tgdisconnect`, `/tgsteer`,
@@ -263,6 +264,12 @@ that recent window.
 Send a photo or a JPEG, PNG, WebP or GIF image file to the selected session,
 with an optional caption. Images can be up to 10 MiB; both the gateway and
 worker must support image input (v0.5.13 or later).
+
+Telegram voice notes can be transcribed locally with a bundled Whisper helper.
+Run `sudo codex-telegramgw setup voice` on the gateway host to install the
+multilingual base model and enable it. No transcription API key or FFmpeg is
+required. See [voice notes](docs/telegram-commands.md#voice-notes) for limits,
+routing and resource use.
 
 Ordinary messages target the selection frozen when each message is accepted.
 They steer its active turn, with the same acknowledgement as `/tgsteer`, or

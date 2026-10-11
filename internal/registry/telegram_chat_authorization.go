@@ -46,7 +46,14 @@ func (s *Store) ApplyTelegramChatAllowlist(ctx context.Context, bot string, chat
         WHERE bot_id=$1 AND status<>'deleted' AND NOT `+telegramChatAllowedSQL("progress.bot_id", "progress.chat_id"), bot); err != nil {
 		return err
 	}
-	return tx.Commit(ctx)
+	if err := cancelTelegramVoiceJobs(ctx, tx, "bot_id=$1 AND NOT "+telegramChatAllowedSQL("telegram_voice_jobs.bot_id", "telegram_voice_jobs.chat_id"), []any{bot}, "voice_unauthorized"); err != nil {
+		return err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return err
+	}
+	s.notifyTelegramVoiceJobs()
+	return nil
 }
 
 // TelegramChatAllowed checks current persisted authorization at an outbound

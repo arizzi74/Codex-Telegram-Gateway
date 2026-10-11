@@ -2,9 +2,11 @@
 .env
 *.env
 !*.env.example
+!/native/whisper/source.env
 /config.local.*
 /state/
 /dist/
+/.native-dist/
 /bin/
 /coverage.out
 *.db
