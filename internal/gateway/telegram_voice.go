@@ -30,47 +30,99 @@ type voiceEngine interface {
 	Close() error
 }
 
+// VoiceConfiguration publishes committed settings. A processor applies changes
+// between jobs so changing a model does not discard a recording being decoded.
+type VoiceConfiguration interface {
+	VoiceConfig() config.VoiceConfig
+	Changed() <-chan struct{}
+}
+
+type audioInferenceLimiter interface {
+	AcquireInference(context.Context) (func(), error)
+}
+
 // TelegramVoiceProcessor serializes CPU-heavy work. The helper stays resident
 // between jobs; the wakeup channel and slow idle fallback avoid a polling loop.
 type TelegramVoiceProcessor struct {
-	store  TelegramVoiceStore
-	api    TelegramVoiceAPI
-	cfg    config.GatewayConfig
-	log    *slog.Logger
-	engine voiceEngine
-	decode func(context.Context, io.Reader) ([]float32, error)
+	store     TelegramVoiceStore
+	api       TelegramVoiceAPI
+	cfg       config.GatewayConfig
+	log       *slog.Logger
+	engine    voiceEngine
+	decode    func(context.Context, io.Reader) ([]float32, error)
+	settings  VoiceConfiguration
+	newEngine func(config.VoiceConfig) (voiceEngine, error)
 }
 
-func NewTelegramVoiceProcessor(store TelegramVoiceStore, api TelegramVoiceAPI, cfg config.GatewayConfig, logger *slog.Logger) *TelegramVoiceProcessor {
-	return &TelegramVoiceProcessor{store: store, api: api, cfg: cfg, log: logger}
+func NewTelegramVoiceProcessor(store TelegramVoiceStore, api TelegramVoiceAPI, cfg config.GatewayConfig, logger *slog.Logger, settings ...VoiceConfiguration) *TelegramVoiceProcessor {
+	p := &TelegramVoiceProcessor{store: store, api: api, cfg: cfg, log: logger}
+	if len(settings) > 0 {
+		p.settings = settings[0]
+	}
+	return p
 }
 
 func (p *TelegramVoiceProcessor) Run(ctx context.Context) {
-	if !p.cfg.Voice.Enabled {
-		cleanupCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-		defer cancel()
-		if err := p.store.CancelTelegramVoiceJobs(cleanupCtx, p.cfg.Secrets.BotName, "voice_cancelled"); err != nil && ctx.Err() == nil {
-			p.log.Warn("Pending voice-note cancellation deferred")
+	defer func() {
+		if p.engine != nil {
+			_ = p.engine.Close()
 		}
-		return
-	}
-	if p.engine == nil {
-		engine, err := voice.New(voice.Config{BinaryPath: p.cfg.Voice.HelperPath, ModelPath: p.cfg.Voice.ModelPath, Threads: p.cfg.Voice.Threads})
-		if err != nil {
-			p.log.Error("Local voice transcription configuration is unavailable")
-			return
-		}
-		p.engine = engine
-	}
-	defer p.engine.Close()
-	warmCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
-	err := p.engine.Start(warmCtx)
-	cancel()
-	if err != nil && ctx.Err() == nil {
-		p.log.Warn("Whisper warmup failed; the next voice note will retry")
-	}
+	}()
+	initialized := false
 	idleDelay := time.Second
 	for ctx.Err() == nil {
+		var settingsChanged <-chan struct{}
+		selected := p.cfg.Voice
+		if p.settings != nil {
+			// Subscribe before reading to avoid missing a concurrent commit.
+			settingsChanged = p.settings.Changed()
+			selected = p.settings.VoiceConfig()
+		}
+		if !initialized || selected != p.cfg.Voice {
+			if initialized && p.engine != nil {
+				_ = p.engine.Close()
+				p.engine = nil
+			}
+			p.cfg.Voice = selected
+			initialized = true
+			if !selected.Enabled {
+				cleanupCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+				if err := p.store.CancelTelegramVoiceJobs(cleanupCtx, p.cfg.Secrets.BotName, "voice_cancelled"); err != nil && ctx.Err() == nil {
+					p.log.Warn("Pending voice-note cancellation deferred")
+				}
+				cancel()
+			} else {
+				if p.engine == nil {
+					var err error
+					if p.newEngine != nil {
+						p.engine, err = p.newEngine(selected)
+					} else {
+						p.engine, err = voice.New(voice.Config{BinaryPath: selected.HelperPath, ModelPath: selected.ModelPath, Threads: selected.Threads})
+					}
+					if err != nil {
+						p.log.Error("Local voice transcription configuration is unavailable")
+						return
+					}
+				}
+				warmCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+				err := p.engine.Start(warmCtx)
+				cancel()
+				if err != nil && ctx.Err() == nil {
+					p.log.Warn("Whisper warmup failed; the next voice note will retry")
+				}
+			}
+		}
+		if !selected.Enabled {
+			if p.settings == nil {
+				return
+			}
+			select {
+			case <-ctx.Done():
+				return
+			case <-settingsChanged:
+				continue
+			}
+		}
 		changed := p.store.TelegramVoiceJobsChanged()
 		claimCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 		job, ok, err := p.store.ClaimTelegramVoice(claimCtx, 12*time.Minute)
@@ -98,6 +150,9 @@ func (p *TelegramVoiceProcessor) Run(ctx context.Context) {
 			timer.Stop()
 			return
 		case <-changed:
+			timer.Stop()
+			idleDelay = time.Second
+		case <-settingsChanged:
 			timer.Stop()
 			idleDelay = time.Second
 		case <-timer.C:
@@ -169,7 +224,18 @@ func (p *TelegramVoiceProcessor) process(ctx context.Context, job registry.Teleg
 		return
 	}
 	defer clear(pcm)
+	var release func()
+	if limiter, ok := p.settings.(audioInferenceLimiter); ok {
+		release, err = limiter.AcquireInference(workCtx)
+		if err != nil {
+			fail("voice_transcription_failed", ctx.Err() != nil)
+			return
+		}
+	}
 	result, err := p.engine.Transcribe(workCtx, pcm)
+	if release != nil {
+		release()
+	}
 	if err != nil {
 		// A crashed helper can be safely restarted: no command exists until
 		// CompleteTelegramVoice commits. Do not repeat a timed-out inference.
@@ -183,7 +249,14 @@ func (p *TelegramVoiceProcessor) process(ctx context.Context, job registry.Teleg
 	}
 	completeCtx, completeCancel := context.WithTimeout(ctx, 5*time.Second)
 	defer completeCancel()
-	if _, err := p.store.CompleteTelegramVoice(completeCtx, job.ID, job.LeaseID, result.Text); err != nil && !errors.Is(err, registry.ErrTelegramVoiceLease) {
+	if store, ok := p.store.(interface {
+		CompleteTelegramVoiceWithLanguage(context.Context, uuid.UUID, uuid.UUID, string, string) (registry.AcceptResult, error)
+	}); ok {
+		_, err = store.CompleteTelegramVoiceWithLanguage(completeCtx, job.ID, job.LeaseID, result.Text, result.Language)
+	} else {
+		_, err = p.store.CompleteTelegramVoice(completeCtx, job.ID, job.LeaseID, result.Text)
+	}
+	if err != nil && !errors.Is(err, registry.ErrTelegramVoiceLease) {
 		p.log.Warn("Voice-note submission deferred")
 		fail("voice_transcription_failed", true)
 	}

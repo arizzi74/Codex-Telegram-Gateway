@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/iaia/telegramgw/internal/audio"
 	"github.com/iaia/telegramgw/internal/registry"
 	"github.com/iaia/telegramgw/internal/voice"
 )
@@ -25,8 +26,12 @@ type telegramVoiceAcceptor interface {
 func (h *Webhook) acceptVoiceMessage(w http.ResponseWriter, r *http.Request, in registry.IncomingUpdate, raw json.RawMessage) {
 	var recording registry.TelegramVoice
 	code := ""
+	enabled := h.cfg.Voice.Enabled
+	if h.voiceSettings != nil {
+		enabled = h.voiceSettings.VoiceConfig().Enabled
+	}
 	switch {
-	case !h.cfg.Voice.Enabled:
+	case !enabled:
 		code = "voice_disabled"
 	case json.Unmarshal(raw, &recording) != nil:
 		code = "voice_invalid"
@@ -48,6 +53,9 @@ func (h *Webhook) acceptVoiceMessage(w http.ResponseWriter, r *http.Request, in 
 		in.Action, in.MediaError = "media_error", code
 		_, err = h.acceptTelegramReply(ctx, in)
 	} else {
+		if settings, ok := h.voiceSettings.(interface{ Settings() audio.Settings }); ok {
+			recording.ReplyWithAudio = settings.Settings().ReplyWithAudio
+		}
 		// Routing is frozen in the same transaction as durable acceptance. No
 		// Telegram downloads, audio decoding, or inference happen in the webhook.
 		for {

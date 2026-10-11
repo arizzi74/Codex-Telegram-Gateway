@@ -178,7 +178,7 @@ func (m *Manager) SetupVoiceWithOptions(ctx context.Context, opts VoiceSetupOpti
 	if err != nil {
 		return err
 	}
-	model, threads, err := resolveVoiceSetupOptions(cfg, opts)
+	model, threads, err := resolveVoiceSetupOptionsWithAudio(l, cfg, opts)
 	if err != nil {
 		return err
 	}
@@ -345,6 +345,13 @@ func (m *Manager) applyVoiceModel(ctx context.Context, l *Layout, helper, model,
 	if err != nil {
 		return err
 	}
+	audioState, err := openVoiceAudioState(l, cfg)
+	if err != nil {
+		return err
+	}
+	if audioState != nil {
+		defer audioState.close()
+	}
 	voice, _ := cfg["voice"].(map[string]any)
 	if voice == nil {
 		voice = map[string]any{}
@@ -365,13 +372,22 @@ func (m *Manager) applyVoiceModel(ctx context.Context, l *Layout, helper, model,
 	if err != nil {
 		return err
 	}
-	changed, restartAttempted := false, false
+	if audioState != nil {
+		if err := AtomicWrite(filepath.Join(backup, "audio-settings.json"), audioState.original, 0600, nil); err != nil {
+			return err
+		}
+	}
+	changed, audioChanged, restartAttempted := false, false, false
 	defer func() {
 		if retErr == nil {
 			return
 		}
 		if changed {
 			retErr = errors.Join(retErr, configSnapshot.restore(), helperSnapshot.restore())
+		}
+		if audioChanged {
+			_, err := audioState.replace(audioState.original)
+			retErr = errors.Join(retErr, err)
 		}
 		if restartAttempted {
 			cleanup, cancel := context.WithTimeout(context.WithoutCancel(ctx), time.Minute)
@@ -407,6 +423,12 @@ func (m *Manager) applyVoiceModel(ctx context.Context, l *Layout, helper, model,
 	cfg["voice"] = voice
 	if err := WriteJSON(l.Config, cfg); err != nil {
 		return err
+	}
+	if audioState != nil {
+		audioChanged, err = audioState.apply(modelName, threads)
+		if err != nil {
+			return err
+		}
 	}
 	restartAttempted = true
 	if err := m.Service(ctx, l, "restart"); err != nil {

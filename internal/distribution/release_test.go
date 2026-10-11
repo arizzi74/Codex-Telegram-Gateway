@@ -49,7 +49,7 @@ func releaseFixture(t *testing.T) (string, string) {
 	t.Helper()
 	root := t.TempDir()
 	dist := filepath.Join(root, "dist")
-	for _, source := range []string{"README.md", "LICENSE", "examples/worker.json", "deploy/systemd/codex-worker.service", "migrations/001_registry.sql", "scripts/install.sh", "native/whisper/NOTICE.md", "native/whisper/source.env", "native/whisper/licenses/whisper.cpp-MIT.txt"} {
+	for _, source := range []string{"README.md", "LICENSE", "examples/worker.json", "deploy/systemd/codex-worker.service", "migrations/001_registry.sql", "scripts/install.sh", "native/whisper/NOTICE.md", "native/whisper/source.env", "native/whisper/licenses/whisper.cpp-MIT.txt", "internal/speech/licenses/Golem-MIT.txt"} {
 		writeTestFile(t, filepath.Join(root, source), []byte("source for "+source+"\n"))
 	}
 	for _, target := range Targets() {

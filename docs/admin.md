@@ -63,6 +63,8 @@ The browser uses these endpoints:
 | `DELETE /tgw/api/v1/admin/sessions/{id}` | Revokes one browser login and its notification subscriptions. |
 | `POST /tgw/api/v1/admin/sessions/revoke-all` | Signs out every browser belonging to the account. |
 | `GET /tgw/api/v1/admin/dashboard` | Returns visible sessions and statistics, workers, runtimes, bot status, and pending counts. |
+| `GET /tgw/api/v1/admin/audio` | Returns audio settings, gateway CPU/RAM resources, installed models and setup progress. |
+| `POST /tgw/api/v1/admin/audio/settings` | Downloads required models and applies local audio settings asynchronously; requires recent authentication. |
 | `GET, DELETE /tgw/api/v1/admin/passkeys[/{id}]` | Lists credentials or revokes a non-final credential. |
 | `POST /tgw/api/v1/admin/worker-enrollments` | Creates a one-use enrollment URL with a 10-minute expiry and the selected service access. |
 | `DELETE /tgw/api/v1/admin/worker-enrollments/{id}` | Revokes an unused enrollment URL. |
@@ -92,6 +94,40 @@ passkey or the configured password when needed; a rejected or cancelled
 verification performs no mutation.
 Both stages of additional-passkey registration enforce this check. Browser
 session revocation remains available without another authentication prompt.
+
+## Audio
+
+In **Audio**, select **Enable voice notes**, choose a Whisper model, then choose
+**Download and apply**. **Base** is the recommended multilingual model;
+**Small** is an advanced option with a larger download and memory budget. The
+panel shows gateway CPU cores, the CPU cores available to its process, and total
+and available RAM. The recommended thread count is one fewer available CPU core,
+with a minimum of 1 and a maximum of 32. Existing model and thread choices are
+preserved; **Use recommended** applies the current recommendation to the form.
+
+Applying settings requires authentication within the previous five minutes.
+Download and validation progress appears in the panel. Current settings remain
+active until setup succeeds, and failed setup keeps the proposed changes so they
+can be corrected or retried. Manual and automatic dashboard refreshes preserve
+unsaved form edits. **Discard changes** restores the currently applied settings.
+Audio settings are saved on the gateway and survive browser reloads.
+
+When the local speech engine is available, **Reply to voice notes with audio**
+adds an audio version alongside the final text reply to a voice prompt. This
+option is disabled by default; typed prompts continue to receive text. Choose Italian, English,
+or **Match the voice note (Italian or English)**. The required local speech
+models download when you apply the settings. These controls remain disabled
+when audio is disabled or setup is running. Transcription can be enabled
+independently of audio replies.
+
+Audio replies use Golem's Go implementation of Pocket TTS and a Go Ogg/Opus
+encoder. No Python, FFmpeg, hosted speech API key or subscription is required.
+Automatic language matching downloads both stock language models, using about
+430 MiB of disk in addition to the Whisper model; one language uses about
+215 MiB. The speech helper added about 321 MiB of resident RAM in the observed
+test; memory and processing time vary by machine and reply length. Text is sent
+first, and long audio replies are split into voice notes without summarizing the
+final answer. A speech failure leaves the text reply available.
 
 ## Worker enrollment
 

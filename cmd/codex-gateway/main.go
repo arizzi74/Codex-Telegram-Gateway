@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"sync"
@@ -18,11 +19,13 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/iaia/telegramgw/internal/admin"
+	"github.com/iaia/telegramgw/internal/audio"
 	"github.com/iaia/telegramgw/internal/auth"
 	"github.com/iaia/telegramgw/internal/buildinfo"
 	"github.com/iaia/telegramgw/internal/config"
 	"github.com/iaia/telegramgw/internal/gateway"
 	"github.com/iaia/telegramgw/internal/registry"
+	"github.com/iaia/telegramgw/internal/speech"
 )
 
 func main() {
@@ -52,6 +55,9 @@ func run(args []string, logger *slog.Logger) error {
 	}
 	if len(args) == 0 {
 		args = []string{"serve"}
+	}
+	if args[0] == "speech-helper" {
+		return speech.RunHelper(args[1:], os.Stdin, os.Stdout)
 	}
 	if args[0] == "version" || args[0] == "--version" {
 		fmt.Println(buildinfo.Version)
@@ -158,14 +164,26 @@ func run(args []string, logger *slog.Logger) error {
 		hub.AckHandler = store.AcknowledgeCommand
 		mux := gateway.NewMux(store, hub)
 		api := gateway.NewTelegramClient(cfg.Secrets.BotToken)
-		mux.Handle("/tgw/api/v1/telegram/webhook", gateway.NewWebhook(store, cfg, secret, api, logger))
+		audioSettings, err := audio.New(filepath.Join(filepath.Dir(cfg.DatabasePath), "audio"), cfg.Voice)
+		if err != nil {
+			return errors.New("could not load audio settings; check gateway audio state and permissions")
+		}
+		executable, err := os.Executable()
+		if err != nil {
+			return errors.New("could not locate the gateway speech helper")
+		}
+		speechService := speech.New(filepath.Join(filepath.Dir(cfg.DatabasePath), "audio", "tts"), executable)
+		defer speechService.Close()
+		audioSettings.SetSpeechSupport(speechService)
+		speechService.SetInferenceLimiter(audioSettings)
+		mux.Handle("/tgw/api/v1/telegram/webhook", gateway.NewWebhook(store, cfg, secret, api, logger, audioSettings))
 		redactor, err := auth.NewRedactor([]string{regexp.QuoteMeta(cfg.Secrets.BotToken), regexp.QuoteMeta(secret), `cwk_[a-f0-9]+`, `sk-[A-Za-z0-9_-]{16,}`}, "[REDACTED]")
 		if err != nil {
 			return err
 		}
 		console, err := admin.New(store, admin.Config{Origin: cfg.PublicBaseURL, BotAPI: api,
 			BotUsername: cfg.Secrets.BotName, AllowedUserCount: len(cfg.AllowedUserIDs),
-			AllowedChatCount: len(cfg.AllowedChatIDs), Redactor: redactor, WebUI: hub})
+			AllowedChatCount: len(cfg.AllowedChatIDs), Redactor: redactor, WebUI: hub, Audio: audioSettings})
 		if err != nil {
 			return err
 		}
@@ -202,7 +220,11 @@ func run(args []string, logger *slog.Logger) error {
 		services.Go(func() { console.RunWebPush(serviceCtx, logger) })
 		services.Go(func() { _ = sender.Run(serviceCtx) })
 		services.Go(func() { _ = dispatcher.Run(serviceCtx) })
-		services.Go(func() { gateway.NewTelegramVoiceProcessor(store, api, cfg, logger).Run(serviceCtx) })
+		services.Go(func() { audioSettings.Run(serviceCtx) })
+		services.Go(func() { gateway.NewTelegramVoiceProcessor(store, api, cfg, logger, audioSettings).Run(serviceCtx) })
+		services.Go(func() {
+			gateway.NewTelegramSpeechProcessor(store, api, speechService, audioSettings, cfg, logger, redactor).Run(serviceCtx)
+		})
 		services.Go(func() {
 			ticker := time.NewTicker(time.Minute)
 			defer ticker.Stop()

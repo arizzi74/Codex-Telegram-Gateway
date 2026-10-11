@@ -129,7 +129,7 @@ type file struct {
 
 func packagedSources(root string) (map[string]file, error) {
 	files := make(map[string]file)
-	for _, name := range []string{"README.md", "LICENSE", "examples", "deploy", "migrations", "native/whisper/NOTICE.md", "native/whisper/source.env", "native/whisper/licenses"} {
+	for _, name := range []string{"README.md", "LICENSE", "examples", "deploy", "migrations", "native/whisper/NOTICE.md", "native/whisper/source.env", "native/whisper/licenses", "internal/speech/licenses"} {
 		err := filepath.WalkDir(filepath.Join(root, name), func(filename string, entry fs.DirEntry, err error) error {
 			if err != nil {
 				return err

@@ -30,11 +30,12 @@ var ErrTelegramVoiceLease = errors.New("registry: Telegram voice lease is no lon
 // TelegramVoice contains Telegram metadata only; file URLs, credentials and
 // audio bytes must never be supplied. FileSize may be zero when Telegram omits it.
 type TelegramVoice struct {
-	FileID       string `json:"file_id"`
-	FileUniqueID string `json:"file_unique_id"`
-	MIMEType     string `json:"mime_type"`
-	Duration     int    `json:"duration"`
-	FileSize     int64  `json:"file_size"`
+	FileID         string `json:"file_id"`
+	FileUniqueID   string `json:"file_unique_id"`
+	MIMEType       string `json:"mime_type"`
+	Duration       int    `json:"duration"`
+	FileSize       int64  `json:"file_size"`
+	ReplyWithAudio bool   `json:"-"`
 }
 
 // TelegramVoiceJob is an immutable download request with a fenced lease. The
@@ -224,11 +225,11 @@ func acceptTelegramVoice(ctx context.Context, tx *dbTx, in IncomingUpdate, voice
 	if _, err := tx.Exec(ctx, `INSERT INTO telegram_voice_jobs
         (job_id,bot_id,update_id,user_id,chat_id,message_thread_id,reply_to_message_id,
          worker_id,runtime_id,runtime_generation,session_id,thread_id,expected_turn_id,approval_id,question_id,question_secret,
-         file_id,file_unique_id,mime_type,duration_seconds,file_size,command_ttl_ns,expires_at)
-        VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,NULLIF($15,''),$16,$17,$18,$19,$20,$21,$22,$23)`,
+         file_id,file_unique_id,mime_type,duration_seconds,file_size,command_ttl_ns,expires_at,reply_with_audio)
+        VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,NULLIF($15,''),$16,$17,$18,$19,$20,$21,$22,$23,$24)`,
 		job.ID, job.BotID, job.UpdateID, job.UserID, job.ChatID, job.TopicID, job.replyTo,
 		job.target.workerID, job.target.runtimeID, job.target.generation, job.target.sessionID, job.target.threadID, job.target.activeTurnID, approval, job.questionID, job.questionSecret,
-		voice.FileID, voice.FileUniqueID, voice.MIMEType, voice.Duration, voice.FileSize, int64(job.ttl), time.Now().UTC().Add(telegramVoiceLifetime)); err != nil {
+		voice.FileID, voice.FileUniqueID, voice.MIMEType, voice.Duration, voice.FileSize, int64(job.ttl), time.Now().UTC().Add(telegramVoiceLifetime), voice.ReplyWithAudio); err != nil {
 		return AcceptResult{}, fmt.Errorf("registry: queue voice: %w", err)
 	}
 	return AcceptResult{View: "voice_transcribing", VoiceJobID: job.ID.String(), SessionID: job.target.sessionID.String(), RuntimeID: job.target.runtimeID.String()}, nil
@@ -295,14 +296,14 @@ func freezeTelegramVoiceQuestion(ctx context.Context, tx *dbTx, job *telegramVoi
 const telegramVoiceColumns = `sequence,job_id,bot_id,update_id,user_id,chat_id,message_thread_id,reply_to_message_id,
     worker_id,runtime_id,runtime_generation,session_id,thread_id,expected_turn_id,approval_id,COALESCE(question_id,''),question_secret,
     COALESCE(file_id,''),COALESCE(file_unique_id,''),COALESCE(mime_type,''),COALESCE(duration_seconds,0),COALESCE(file_size,0),command_ttl_ns,
-    status,attempts,COALESCE(lease_id,'00000000-0000-0000-0000-000000000000'),COALESCE(lease_until,created_at),created_at,expires_at`
+    status,attempts,COALESCE(lease_id,'00000000-0000-0000-0000-000000000000'),COALESCE(lease_until,created_at),created_at,expires_at,reply_with_audio`
 
 func scanTelegramVoice(row *dbRow) (telegramVoiceRecord, error) {
 	var j telegramVoiceRecord
 	var ttl int64
 	err := row.Scan(&j.sequence, &j.ID, &j.BotID, &j.UpdateID, &j.UserID, &j.ChatID, &j.TopicID, &j.replyTo,
 		&j.target.workerID, &j.target.runtimeID, &j.target.generation, &j.target.sessionID, &j.target.threadID, &j.target.activeTurnID, &j.approvalID, &j.questionID, &j.questionSecret,
-		&j.FileID, &j.FileUniqueID, &j.MIMEType, &j.Duration, &j.FileSize, &ttl, &j.status, &j.Attempts, &j.LeaseID, &j.LeaseUntil, &j.createdAt, &j.expiresAt)
+		&j.FileID, &j.FileUniqueID, &j.MIMEType, &j.Duration, &j.FileSize, &ttl, &j.status, &j.Attempts, &j.LeaseID, &j.LeaseUntil, &j.createdAt, &j.expiresAt, &j.ReplyWithAudio)
 	j.ttl = time.Duration(ttl)
 	return j, err
 }
@@ -405,6 +406,13 @@ func currentTelegramVoiceLease(ctx context.Context, tx *dbTx, id, lease uuid.UUI
 // CompleteTelegramVoice submits plain transcript text and its UI delivery in
 // one transaction. Replays cannot create a second command or second answer.
 func (s *Store) CompleteTelegramVoice(ctx context.Context, id, lease uuid.UUID, transcript string) (AcceptResult, error) {
+	return s.CompleteTelegramVoiceWithLanguage(ctx, id, lease, transcript, "en")
+}
+
+func (s *Store) CompleteTelegramVoiceWithLanguage(ctx context.Context, id, lease uuid.UUID, transcript, language string) (AcceptResult, error) {
+	if language != "it" {
+		language = "en"
+	}
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return AcceptResult{}, err
@@ -511,7 +519,7 @@ func (s *Store) CompleteTelegramVoice(ctx context.Context, id, lease uuid.UUID, 
 			command = result.CommandID
 		}
 		if _, err := tx.Exec(ctx, `UPDATE telegram_voice_jobs SET status='completed',completed_at=`+sqliteNow+`,command_id=$2,
-            lease_id=NULL,lease_until=NULL,file_id=NULL,file_unique_id=NULL,mime_type=NULL,duration_seconds=NULL,file_size=NULL,error_code=NULL WHERE job_id=$1`, id, command); err != nil {
+        lease_id=NULL,lease_until=NULL,file_id=NULL,file_unique_id=NULL,mime_type=NULL,duration_seconds=NULL,file_size=NULL,error_code=NULL,transcript_language=$3 WHERE job_id=$1`, id, command, language); err != nil {
 			return AcceptResult{}, err
 		}
 	}

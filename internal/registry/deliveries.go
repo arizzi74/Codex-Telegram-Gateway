@@ -162,7 +162,11 @@ func (s *Store) MarkDeliverySent(ctx context.Context, id string, messageID int64
 			return err
 		}
 	}
-	return tx.Commit(ctx)
+	if err := tx.Commit(ctx); err != nil {
+		return err
+	}
+	s.notifyTelegramVoiceJobs()
+	return nil
 }
 
 // DeliveryChunks loads the immutable messages frozen before the first API call.
@@ -346,7 +350,11 @@ func (s *Store) MarkDeliveryChunkSent(ctx context.Context, id string, index int,
 			return err
 		}
 	}
-	return tx.Commit(ctx)
+	if err := tx.Commit(ctx); err != nil {
+		return err
+	}
+	s.notifyTelegramVoiceJobs()
+	return nil
 }
 
 func (s *Store) RetryDelivery(ctx context.Context, id string, retryAfter time.Duration, reason string) error {

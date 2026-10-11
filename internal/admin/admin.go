@@ -16,6 +16,7 @@ import (
 	"github.com/go-webauthn/webauthn/protocol"
 	wa "github.com/go-webauthn/webauthn/webauthn"
 	"github.com/google/uuid"
+	"github.com/iaia/telegramgw/internal/audio"
 	"github.com/iaia/telegramgw/internal/auth"
 	"github.com/iaia/telegramgw/internal/config"
 	"github.com/iaia/telegramgw/internal/gateway"
@@ -42,6 +43,7 @@ type Config struct {
 	AllowedChatCount int
 	Redactor         *auth.Redactor
 	WebUI            *gateway.Hub
+	Audio            *audio.Manager
 }
 
 type Server struct {
@@ -57,6 +59,7 @@ type Server struct {
 	passwordSlots  chan struct{}
 	enrollments    *httpguard.Limiter
 	webui          *gateway.Hub
+	audio          *audio.Manager
 }
 
 // New builds an isolated admin handler. Origin must be the configured public
@@ -83,6 +86,7 @@ func New(store *registry.Store, cfg Config) (*Server, error) {
 	s.bot = newBotMonitor(cfg)
 	s.redactor = cfg.Redactor
 	s.webui = cfg.WebUI
+	s.audio = cfg.Audio
 	s.routes()
 	return s, nil
 }
@@ -103,6 +107,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/tgw/api/v1/admin/login/options", s.loginOptions)
 	s.mux.HandleFunc("/tgw/api/v1/admin/login/password", s.passwordLogin)
 	s.mux.HandleFunc("/tgw/api/v1/admin/password", s.passwordSettings)
+	s.mux.HandleFunc("/tgw/api/v1/admin/audio", s.audioStatus)
+	s.mux.HandleFunc("/tgw/api/v1/admin/audio/settings", s.audioSettings)
 	s.mux.HandleFunc("/tgw/api/v1/admin/session", s.session)
 	s.mux.HandleFunc("/tgw/api/v1/admin/sessions", s.browserSessions)
 	s.mux.HandleFunc("/tgw/api/v1/admin/sessions/", s.browserSession)

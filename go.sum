@@ -32,6 +32,8 @@ github.com/AzureAD/microsoft-authentication-library-for-go v1.7.0 h1:4iB+IesclUX
 github.com/AzureAD/microsoft-authentication-library-for-go v1.7.0/go.mod h1:HKpQxkWaGLJ+D/5H8QRpyQXA1eKjxkFlOMwck5+33Jk=
 github.com/SherClockHolmes/webpush-go v1.4.0 h1:ocnzNKWN23T9nvHi6IfyrQjkIc0oJWv1B1pULsf9i3s=
 github.com/SherClockHolmes/webpush-go v1.4.0/go.mod h1:XSq8pKX11vNV8MJEMwjrlTkxhAj1zKfxmyhdV7Pd6UA=
+github.com/ThiraSoft/golem v0.45.2 h1:XMH/YJYZckFxtqng/v7fOD2489vIxYxfXG9W9Q5CJ/A=
+github.com/ThiraSoft/golem v0.45.2/go.mod h1:6Pw/ht0ts2t18IN52MoxuBD/NdxoRQ8C0ZuJNmjrNzw=
 github.com/alessio/shellescape v1.4.1 h1:V7yhSDDn8LP4lc4jS8pFkt0zCnzVJlG5JXy9BVKJUX0=
 github.com/alessio/shellescape v1.4.1/go.mod h1:PZAiSCk0LJaZkiCSkPv8qIobYglO3FPpyFjDCtHLS30=
 github.com/asaskevich/govalidator v0.0.0-20230301143203-a9d515a09cc2 h1:DklsrG3dyBCFEj5IhUbnKptjxatkF07cF2ak3yi77so=

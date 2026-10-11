@@ -96,6 +96,7 @@ func scopeDeletedWorker(ctx context.Context, tx *dbTx, workerID uuid.UUID) error
 		{"request", "worker_update_requests", "request_id"},
 		{"enrollment", "worker_enrollments", "enrollment_id"},
 		{"voice", "telegram_voice_jobs", "job_id"},
+		{"speech", "telegram_speech_jobs", "job_id"},
 	} {
 		query := `INSERT INTO _worker_delete_ids SELECT '` + source.kind + `',` + source.column + ` FROM ` + source.table + ` WHERE worker_id=$1`
 		if _, err := tx.Exec(ctx, query, workerID); err != nil {
@@ -207,6 +208,7 @@ var deletedWorkerQueries = []string{
         OR event_id IN (SELECT id FROM _worker_delete_ids WHERE kind='event')`,
 	`DELETE FROM telegram_question_answers WHERE approval_id IN (SELECT id FROM _worker_delete_ids WHERE kind='approval')`,
 	`DELETE FROM telegram_voice_jobs WHERE worker_id=$1`,
+	`DELETE FROM telegram_speech_jobs WHERE worker_id=$1`,
 	`DELETE FROM approvals WHERE worker_id=$1`,
 	// Delivery chunks cascade; helper, edit and progress dependents were removed.
 	`DELETE FROM telegram_deliveries WHERE delivery_id IN (SELECT id FROM _worker_delete_ids WHERE kind='delivery')`,

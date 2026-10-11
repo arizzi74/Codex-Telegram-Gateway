@@ -22,15 +22,20 @@ type TelegramRegistry interface {
 	PrepareTelegramImage(context.Context, registry.IncomingUpdate) (registry.IncomingUpdate, error)
 }
 type Webhook struct {
-	store  TelegramRegistry
-	cfg    config.GatewayConfig
-	secret string
-	api    TelegramAPI
-	log    *slog.Logger
+	store         TelegramRegistry
+	cfg           config.GatewayConfig
+	secret        string
+	api           TelegramAPI
+	log           *slog.Logger
+	voiceSettings VoiceConfiguration
 }
 
-func NewWebhook(store TelegramRegistry, cfg config.GatewayConfig, secret string, api TelegramAPI, logger *slog.Logger) *Webhook {
-	return &Webhook{store, cfg, secret, api, logger}
+func NewWebhook(store TelegramRegistry, cfg config.GatewayConfig, secret string, api TelegramAPI, logger *slog.Logger, settings ...VoiceConfiguration) *Webhook {
+	h := &Webhook{store: store, cfg: cfg, secret: secret, api: api, log: logger}
+	if len(settings) > 0 {
+		h.voiceSettings = settings[0]
+	}
+	return h
 }
 
 func (h *Webhook) ServeHTTP(w http.ResponseWriter, r *http.Request) {

@@ -33,6 +33,7 @@ flowchart TB
   browser <-->|"HTTPS / WebSocket"| gateway
   gateway <--> registry
   gateway <-->|"Local PCM pipe; optional voice transcription"| whisper["Resident Whisper helper"]
+  gateway <-->|"Local PCM pipe; optional spoken replies"| speech["Go Pocket TTS helper"]
 
   subgraph machine_a["Worker A · Linux / macOS"]
     direction TB
@@ -266,10 +267,17 @@ with an optional caption. Images can be up to 10 MiB; both the gateway and
 worker must support image input (v0.5.13 or later).
 
 Telegram voice notes can be transcribed locally with a bundled Whisper helper.
-Run `sudo codex-telegramgw setup voice` on the gateway host to install the
-multilingual base model and enable it. No transcription API key or FFmpeg is
-required. See [voice notes](docs/telegram-commands.md#voice-notes) for limits,
-routing and resource use.
+Open **Admin → Audio support in Telegram** to enable transcription, download a
+model, and select CPU threads. The page shows available CPUs and RAM, recommends
+the multilingual **base** model and one fewer thread than available cores
+(minimum one), and preserves existing installations' selections. The CLI
+alternative remains `sudo codex-telegramgw setup voice`.
+
+Optional spoken replies use a local, entirely Go Pocket TTS engine with English
+and Italian voices. A voice-note turn receives its normal final text followed
+by audio with the same content. No paid speech API, Python, or FFmpeg is needed;
+recordings stay in memory. See [voice notes](docs/telegram-commands.md#voice-notes)
+for limits, routing and resource use.
 
 Ordinary messages target the selection frozen when each message is accepted.
 They steer its active turn, with the same acknowledgement as `/tgsteer`, or

@@ -227,7 +227,15 @@ resend them after the upgrade.
 
 ## Voice notes
 
-Enable local transcription on the gateway host:
+Enable local transcription in the administrator console's **Audio** panel:
+select **Enable voice notes**, choose **Base (recommended)** or **Small**, and
+apply the settings. The panel shows gateway CPU and RAM resources, recommends
+one fewer available CPU core (minimum 1, maximum 32), and lets you adjust the
+thread count. Required model downloads and setup run in the background with
+progress and errors shown in the panel. Existing settings stay active until
+the new setup succeeds.
+
+Alternatively, enable transcription on the gateway host:
 
 ```sh
 sudo codex-telegramgw setup voice
@@ -241,7 +249,9 @@ API key, Python, FFmpeg, or separately installed audio libraries are needed.
 For the multilingual **small** model and three CPU threads, use
 `sudo codex-telegramgw setup voice --model small --threads 3`. Setup supports
 base and small models and 1–32 threads. Re-running setup without model/thread
-options preserves the existing supported selection.
+options preserves the existing supported selection, including settings saved in
+the administrator console. Explicit command-line options replace those choices;
+audio reply and language preferences are preserved.
 
 Select a session and send a Telegram voice note. The gateway shows a temporary
 transcribing message, then the recognized text. That text is submitted to the
@@ -261,13 +271,31 @@ to the actual bytes and decoded duration as well as Telegram's metadata.
 Language detection is automatic; transcription does not translate the recording.
 
 One recording is processed at a time. The model stays in memory and the helper
-sleeps between recordings. The default is two inference threads. Allow roughly
+sleeps between recordings. The console preserves existing thread choices and
+offers a recommendation based on available CPU cores. Allow roughly
 0.5–1 GB of RAM for the multilingual base model and inference, plus about
 150 MB of model storage. Processing time depends on recording length and CPU.
 The small model uses 488 MB of disk storage and needs a larger memory budget;
 allow roughly 1–2 GB for its model and inference buffers.
 There is no per-minute API charge; the resulting Codex prompt uses the session's
 normal account and usage allowance.
+
+With **Reply to voice notes with audio** enabled in the Audio panel, the bot
+sends the final text reply to a voice prompt and an audio version of the same
+content. This option is disabled by default and does not add audio to replies
+to typed prompts. Text arrives first; long answers can produce several voice
+notes. Audio failure does not remove the final text.
+
+The local speech engine supports Italian and English; choose a language or let
+it match the voice note. Required speech models download when the settings are
+applied: about 215 MiB per language or 430 MiB for automatic matching, in
+addition to Whisper's model storage. The speech helper added about 321 MiB of
+resident RAM in the observed test; actual use depends on the machine and reply.
+Golem's Pocket TTS implementation and the Ogg/Opus encoder run in Go, without
+Python, FFmpeg, a hosted speech API key or a subscription. Generated audio stays
+in memory until upload to Telegram and is not saved in gateway files or its
+database. The option is available when the gateway's local speech engine is
+supported.
 
 Accepted recordings have a durable queue and a frozen destination. Later text
 prompts in the same chat/topic wait behind outstanding recordings; selection
@@ -283,8 +311,8 @@ Whisper inference stays on the gateway. Audio is held in memory and passed to
 the helper through a pipe; recordings and converted WAV/PCM files are never
 written to disk, saved in the database, or sent to a transcription service. The recognized prompt is
 retained like ordinary text. Telegram still holds the original recording under
-its own chat storage policy. Model/helper downloads happen only during setup
-or software updates.
+its own chat storage policy. Model/helper downloads happen when audio settings
+are applied, during command-line setup, or during software updates.
 
 ## Conversation history
 

@@ -43,6 +43,35 @@
       <h2 id="bot-heading">Telegram bot</h2>
       <div id="bot-info"><p class="muted">Bot information is not available.</p></div>
     </section>
+    <section id="audio-section" class="card" aria-labelledby="audio-heading">
+      <h2 id="audio-heading">Audio</h2>
+      <p>Transcribe Telegram voice notes locally on this gateway.</p>
+      <p id="audio-status" class="muted" role="status" aria-live="polite">Loading audio settings…</p>
+      <p id="audio-error" class="notice error" role="alert" hidden></p>
+      <dl id="audio-resources" class="facts audio-resources" aria-label="Gateway resources"></dl>
+      <form id="audio-form">
+        <label class="audio-toggle"><input id="audio-enabled" type="checkbox" disabled><span>Enable voice notes</span></label>
+        <fieldset id="audio-options" disabled>
+          <legend>Whisper model</legend>
+          <p id="audio-model-help" class="muted">Base is recommended for most gateways. Model files download when you apply your settings.</p>
+          <div class="audio-models">
+            <label class="audio-model"><input id="audio-model-base" type="radio" name="audio-model" value="base" aria-describedby="audio-base-description"><span><strong>Base <span class="badge good">Recommended</span></strong><span id="audio-base-description" class="muted">Multilingual · about 0.5–1 GB RAM</span><span id="audio-base-install" class="muted"></span></span></label>
+            <label class="audio-model"><input id="audio-model-small" type="radio" name="audio-model" value="small" aria-describedby="audio-small-description"><span><strong>Small <span class="badge">Advanced</span></strong><span id="audio-small-description" class="muted">Multilingual · about 1–2 GB RAM · slower</span><span id="audio-small-install" class="muted"></span></span></label>
+          </div>
+          <div class="audio-thread-row">
+            <label for="audio-threads">CPU threads<input id="audio-threads" type="number" min="1" max="32" step="1" inputmode="numeric" required aria-describedby="audio-threads-help"></label>
+            <button id="audio-use-recommended" type="button" class="secondary">Use recommended</button>
+          </div>
+          <p id="audio-threads-help" class="muted">Use one fewer available CPU core, with a minimum of 1 and a maximum of 32 threads.</p>
+          <label class="audio-toggle"><input id="audio-reply" type="checkbox" aria-describedby="audio-reply-help"><span>Reply to voice notes with audio</span></label>
+          <p id="audio-reply-help" class="muted">Send the final text reply and an audio version with the same content.</p>
+          <div id="audio-voice-wrap" hidden><label for="audio-voice">Audio reply language<select id="audio-voice" aria-describedby="audio-voice-help"></select></label><p id="audio-voice-help" class="muted">The local speech models download when you apply your settings. Allow about 215 MiB per language, or 430 MiB for automatic matching.</p></div>
+        </fieldset>
+        <div id="audio-progress-wrap" hidden><progress id="audio-progress" max="100" aria-label="Audio model download"></progress><p id="audio-progress-text" class="muted"></p></div>
+        <p id="audio-effective" class="muted"></p>
+        <div class="audio-actions"><button id="audio-save" type="submit" disabled>Apply audio settings</button><button id="audio-discard" type="button" class="secondary" disabled>Discard changes</button><span id="audio-unsaved" class="muted" hidden>Unsaved changes</span></div>
+      </form>
+    </section>
     <details id="session-section" class="card sessions-card" aria-labelledby="session-heading">
       <summary><h2 id="session-heading">Sessions</h2></summary>
       <div class="sessions-content">

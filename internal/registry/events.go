@@ -165,6 +165,9 @@ func (s *Store) IngestEvent(ctx context.Context, workerID, connectionID uuid.UUI
 	if pushQueued {
 		s.notifyWebPush()
 	}
+	if event.Kind == "turn_completed" {
+		s.notifyTelegramVoiceJobs()
+	}
 	return nil
 }
 
@@ -527,6 +530,13 @@ func (s *Store) applyEvent(ctx context.Context, tx *dbTx, workerID uuid.UUID, ev
 			return false, nil, err
 		}
 		commandID = &id
+		if result.TurnID != "" && (event.Kind == "turn_started" || event.Kind == "command_completed" || event.Kind == "turn_completed") {
+			if _, err := tx.Exec(ctx, `UPDATE telegram_voice_jobs SET expected_turn_id=$2
+                WHERE command_id=$1 AND status='completed' AND expected_turn_id='' AND worker_id=$3
+                  AND runtime_id=$4 AND runtime_generation=$5 AND session_id IS $6`, id, result.TurnID, workerID, target.runtimeID, int64(event.RuntimeGeneration), target.sessionID); err != nil {
+				return false, nil, err
+			}
+		}
 	}
 	if result.Session != nil && target.runtimeCurrent && target.runtimeID != nil {
 		expectedID := target.sessionID
@@ -951,10 +961,14 @@ func enqueueEventDeliveries(ctx context.Context, tx *dbTx, eventID uuid.UUID, ev
 	}
 	rows.Close()
 	for _, target := range targets {
+		deliveryID := uuid.New()
 		if _, err := tx.Exec(ctx, `INSERT INTO telegram_deliveries
             (delivery_id, event_id, bot_id, chat_id, message_thread_id, kind, payload)
-	            VALUES ($1,$2,$3,$4,$5,$6,$7)`, uuid.New(), eventID, target.botID, target.chatID, target.topicID, event.Kind, string(payload)); err != nil {
+	            VALUES ($1,$2,$3,$4,$5,$6,$7)`, deliveryID, eventID, target.botID, target.chatID, target.topicID, event.Kind, string(payload)); err != nil {
 			return fmt.Errorf("registry: enqueue event delivery: %w", err)
+		}
+		if err := enqueueTelegramSpeech(ctx, tx, deliveryID, event, target.botID, target.chatID, target.topicID); err != nil {
+			return err
 		}
 	}
 	return nil

@@ -14,6 +14,15 @@ let dashboard = null;
 let sessionPage = 0;
 let passwordSettings = null;
 let passwordSettingsBusy = false;
+let audioSnapshot = null;
+let audioDraft = null;
+let audioPending = null;
+let audioSaving = false;
+let audioSaveSequence = 0;
+let audioLoadingEpoch = null;
+let audioPollTimer = null;
+let audioError = '';
+let audioNotice = '';
 // Enrollment URLs exist only in this open dialog, never in browser storage.
 let workerEnrollment = null;
 let enrollmentBusy = false;
@@ -49,13 +58,15 @@ async function call(path, opts = {}) {
   }
   return response.status === 204 ? null : response.json();
 }
-async function sensitiveCall(path, opts) {
+async function sensitiveCall(path, opts, isCurrent = () => true) {
   await sessionAuth.ensureFresh();
+  if (!isCurrent()) throw new Error('Your sign-in changed. Review your settings and try again.');
   try { return await call(path, opts); } catch (error) {
     // Only this explicit server rejection proves that the mutation did not run.
     // Network failures and ambiguous responses must never replay a mutation.
     if (error.status !== 403 || error.code !== 'reauthentication_required') throw error;
     await sessionAuth.reauthenticate();
+    if (!isCurrent()) throw new Error('Your sign-in changed. Review your settings and try again.');
     return call(path, opts);
   }
 }
@@ -168,6 +179,15 @@ function lockConsole(reason) {
   closeWorkerEnrollment();
   passwordSettings = null;
   renderPasswordSettings();
+  clearTimeout(audioPollTimer);
+  audioSnapshot = null;
+  audioDraft = null;
+  audioPending = null;
+  audioSaveSequence++;
+  audioSaving = false;
+  audioError = '';
+  audioNotice = '';
+  renderAudio();
   $('console').hidden = true;
   $('logout').hidden = true;
   $('auth').hidden = false;
@@ -469,6 +489,186 @@ async function disablePassword() {
     if (error.name !== 'NotAllowedError' && error.name !== 'AbortError') showError(error);
   } finally { passwordSettingsBusy = false; if (authenticated) renderPasswordSettings(); }
 }
+function audioSettings(value) {
+  if (typeof value?.enabled !== 'boolean' || !['base', 'small'].includes(value.model) ||
+      !Number.isInteger(value.threads) || value.threads < 1 || value.threads > 32 || typeof value.reply_with_audio !== 'boolean' ||
+      (value.tts_voice !== undefined && !['auto', 'italian', 'english'].includes(value.tts_voice))) return null;
+  return { enabled: value.enabled, model: value.model, threads: value.threads, reply_with_audio: value.reply_with_audio, tts_voice: value.tts_voice || 'auto' };
+}
+function sameAudioSettings(a, b) {
+  return !!a && !!b && ['enabled', 'model', 'threads', 'reply_with_audio', 'tts_voice'].every(key => a[key] === b[key]);
+}
+function audioDirty() { return !!audioDraft && !sameAudioSettings(audioDraft, audioSnapshot?.settings); }
+function audioBytes(value) {
+  if (!Number.isFinite(value) || value < 0) return 'Unavailable';
+  return value >= 1024 ** 3 ? (value / 1024 ** 3).toLocaleString(undefined, { maximumFractionDigits: 1 }) + ' GiB'
+    : (value / 1024 ** 2).toLocaleString(undefined, { maximumFractionDigits: 1 }) + ' MiB';
+}
+function recommendedAudioThreads() {
+  const resources = audioSnapshot?.resources;
+  const recommendation = resources?.recommended_threads;
+  return Number.isInteger(recommendation) ? Math.max(1, Math.min(32, recommendation))
+    : Math.max(1, Math.min(32, (resources?.available_cpus || 2) - 1));
+}
+function renderAudio() {
+  const ready = !!audioSnapshot && !!audioDraft;
+  const busy = audioSaving || !!audioSnapshot?.busy;
+  const dirty = audioDirty();
+  const enabled = ready && audioDraft.enabled;
+  $('audio-enabled').disabled = !ready || busy;
+  $('audio-enabled').checked = !!audioDraft?.enabled;
+  $('audio-options').disabled = !enabled || busy;
+  for (const model of ['base', 'small']) {
+    $('audio-model-' + model).checked = audioDraft?.model === model;
+    const info = audioSnapshot?.models?.find(item => item.name === model);
+    $('audio-' + model + '-install').textContent = info ? (info.installed ? 'Downloaded' : 'Download required') + ' · ' + audioBytes(info.size_bytes) : '';
+  }
+  // Status refreshes never replace a partially edited number field.
+  if (document.activeElement !== $('audio-threads')) $('audio-threads').value = audioDraft?.threads ?? '';
+  const recommended = recommendedAudioThreads();
+  $('audio-use-recommended').disabled = !enabled || busy;
+  $('audio-threads-help').textContent = ready
+    ? `Recommended: ${recommended} ${recommended === 1 ? 'thread' : 'threads'}. Use one fewer available CPU core, with a minimum of 1 and a maximum of 32. You can adjust this.`
+    : 'Use one fewer available CPU core, with a minimum of 1 and a maximum of 32 threads.';
+  $('audio-reply').checked = !!audioDraft?.reply_with_audio;
+  // A gateway whose speech engine became unavailable must still let an
+  // administrator turn off an already saved audio-reply preference.
+  $('audio-reply').disabled = !enabled || busy || (!audioSnapshot?.tts?.available && !audioDraft?.reply_with_audio);
+  $('audio-reply-help').textContent = audioSnapshot?.tts?.available
+    ? 'Send the final text reply and an audio version with the same content.'
+    : 'Audio replies require the local speech engine. Voice transcription can be used on its own.';
+  const voice = $('audio-voice');
+  const voices = audioSnapshot?.tts?.voices || [];
+  voice.replaceChildren();
+  for (const choice of voices) {
+    if (!['auto', 'italian', 'english'].includes(choice.id)) continue;
+    const option = el('option', '', choice.label || choice.id);
+    option.value = choice.id;
+    voice.append(option);
+  }
+  voice.value = audioDraft?.tts_voice || 'auto';
+  voice.disabled = !enabled || busy || !audioSnapshot?.tts?.available || !audioDraft?.reply_with_audio;
+  $('audio-voice-wrap').hidden = !audioSnapshot?.tts?.available || !audioDraft?.reply_with_audio;
+  const resources = $('audio-resources');
+  resources.replaceChildren();
+  if (ready) {
+    fact(resources, 'CPU cores', number(audioSnapshot.resources?.logical_cpus));
+    fact(resources, 'Available CPU cores', number(audioSnapshot.resources?.available_cpus));
+    fact(resources, 'Total RAM', audioBytes(audioSnapshot.resources?.memory_total_bytes));
+    fact(resources, 'Available RAM', audioBytes(audioSnapshot.resources?.memory_available_bytes));
+  }
+  const operation = audioSnapshot?.operation || {};
+  const states = { idle: 'Audio settings are ready.', queued: 'Audio setup is queued…', checking: 'Checking local audio files…', verifying: 'Verifying the local speech model…', downloading: 'Downloading audio model files…', warming: 'Checking the local speech voice…', preflight: 'Checking the audio helper and model…', applying: 'Applying audio settings…', ready: 'Audio settings applied.', failed: 'Audio setup failed. Your previous settings remain active.' };
+  $('audio-status').textContent = audioSaving ? 'Submitting audio settings…' : ready
+    ? audioNotice || (audioSnapshot.busy || operation.state === 'failed' ? states[operation.state] || 'Setting up audio…' : audioSnapshot.settings.enabled ? 'Voice notes are enabled.' : 'Voice notes are disabled.')
+    : audioError ? 'Audio settings are unavailable. Refresh to try again.' : 'Loading audio settings…';
+  const error = audioError || (operation.state === 'failed' ? operation.message || 'Unable to apply audio settings. Check available disk space and memory, then try again.' : '');
+  $('audio-error').textContent = error;
+  $('audio-error').hidden = !error;
+  const downloading = !!audioSnapshot?.busy && operation.state === 'downloading';
+  $('audio-progress-wrap').hidden = !downloading;
+  const total = operation.total_bytes;
+  const downloaded = operation.downloaded_bytes;
+  if (total > 0 && downloaded >= 0) $('audio-progress').value = Math.min(100, downloaded / total * 100);
+  else $('audio-progress').removeAttribute('value');
+  $('audio-progress-text').textContent = downloading
+    ? total > 0 ? `${audioBytes(downloaded)} of ${audioBytes(total)} downloaded` : 'Downloading model files…' : '';
+  if (ready && audioSnapshot.busy && operation.message && operation.state !== 'failed') $('audio-status').textContent += ' ' + operation.message;
+  const effective = audioSnapshot?.settings;
+  $('audio-effective').textContent = effective ? 'Current settings: ' + (effective.enabled
+    ? `${effective.model === 'small' ? 'Small' : 'Base'} · ${effective.threads} ${effective.threads === 1 ? 'thread' : 'threads'}${effective.reply_with_audio ? ' · text and audio replies' : ''}`
+    : 'Voice notes disabled.') : '';
+  const selectedModel = audioSnapshot?.models?.find(item => item.name === audioDraft?.model);
+  $('audio-save').textContent = busy ? 'Applying…' : enabled && selectedModel && !selectedModel.installed ? 'Download and apply' : 'Apply audio settings';
+  $('audio-save').disabled = !ready || busy || (!dirty && operation.state !== 'failed');
+  $('audio-discard').disabled = !ready || busy || !dirty;
+  $('audio-unsaved').hidden = !dirty || busy;
+  $('audio-section').setAttribute('aria-busy', String(busy));
+}
+function acceptAudioSnapshot(value) {
+  const settings = audioSettings(value?.settings);
+  if (!settings) throw new Error('The gateway returned invalid audio settings. Refresh to try again.');
+  const preserveDraft = audioDirty() || audioSaving || !!audioPending;
+  audioSnapshot = { ...value, settings };
+  if (!preserveDraft) audioDraft = { ...settings };
+  if (audioPending && !value.busy) {
+    if (value.operation?.state === 'ready' && sameAudioSettings(settings, audioPending)) {
+      if (sameAudioSettings(audioDraft, audioPending)) audioDraft = { ...settings };
+      audioNotice = 'Audio settings applied.';
+      audioPending = null;
+    } else if (value.operation?.state === 'failed') audioPending = null;
+  }
+  renderAudio();
+}
+function scheduleAudioPoll() {
+  clearTimeout(audioPollTimer);
+  if (authenticated && audioSnapshot?.busy) audioPollTimer = setTimeout(() => {
+    if (!rotationPending && !document.hidden) loadAudioSettings(authEpoch).catch(showError);
+    else scheduleAudioPoll();
+  }, 1000);
+}
+async function loadAudioSettings(epoch) {
+  if (audioLoadingEpoch === epoch || rotationPending) return;
+  audioLoadingEpoch = epoch;
+  try {
+    const value = await call('/audio', { cache: 'no-store' });
+    if (epoch !== authEpoch) return;
+    audioError = '';
+    acceptAudioSnapshot(value);
+  } catch (error) {
+    if (epoch !== authEpoch) return;
+    if (error.status === 401) throw error;
+    audioError = error.message || 'Unable to read audio settings. Refresh to try again.';
+    renderAudio();
+  } finally {
+    if (audioLoadingEpoch === epoch) audioLoadingEpoch = null;
+    scheduleAudioPoll();
+  }
+}
+function editAudio() {
+  if (!audioDraft || audioSaving || audioSnapshot?.busy) return;
+  audioDraft.enabled = $('audio-enabled').checked;
+  audioDraft.model = $('audio-model-small').checked ? 'small' : 'base';
+  const threads = $('audio-threads').valueAsNumber;
+  // Keep invalid input in the draft so a refresh cannot silently save a
+  // different thread count. Native form validation explains the allowed range.
+  audioDraft.threads = !audioDraft.enabled && (!Number.isInteger(threads) || threads < 1 || threads > 32)
+    ? audioSnapshot.settings.threads : Number.isFinite(threads) ? threads : null;
+  audioDraft.reply_with_audio = $('audio-reply').checked;
+  if (['auto', 'italian', 'english'].includes($('audio-voice').value)) audioDraft.tts_voice = $('audio-voice').value;
+  audioNotice = '';
+  renderAudio();
+}
+async function saveAudio(event) {
+  event.preventDefault();
+  if (!audioDraft || audioSaving || audioSnapshot?.busy || !$('audio-form').reportValidity()) return;
+  const submitted = audioSettings(audioDraft);
+  if (!submitted) return;
+  const sequence = ++audioSaveSequence;
+  audioSaving = true;
+  audioPending = { ...submitted };
+  audioError = '';
+  audioNotice = '';
+  renderAudio();
+  try {
+    const value = await sensitiveCall('/audio/settings', { method: 'POST', body: JSON.stringify(submitted), cache: 'no-store' },
+      () => authenticated && sequence === audioSaveSequence);
+    if (!authenticated || sequence !== audioSaveSequence) return;
+    acceptAudioSnapshot(value);
+  } catch (error) {
+    if (sequence !== audioSaveSequence) return;
+    audioPending = null;
+    if (error.status === 401) { sessionAuth.expire('expired'); return; }
+    if (authenticated) audioError = error.name === 'NotAllowedError' || error.name === 'AbortError'
+      ? 'Verification was cancelled. Your changes have not been submitted.'
+      : error.message || 'Unable to apply audio settings. Refresh to check the current status before retrying.';
+  } finally {
+    if (sequence === audioSaveSequence) {
+      audioSaving = false;
+      if (authenticated) { renderAudio(); scheduleAudioPoll(); }
+    }
+  }
+}
 async function load(includeKeys = true) {
   // A request issued between cookie revocation and login/finish response can
   // return a stale 401 after the new login is verified. Pause both periodic
@@ -504,6 +704,7 @@ async function load(includeKeys = true) {
     if (epoch !== authEpoch) return;
     renderBrowserSessions(browsers.sessions);
     if (includeKeys) await loadPasswordSettings(epoch);
+    await loadAudioSettings(epoch);
   } catch (error) {
     if (epoch !== authEpoch) return;
     if (!authenticated && error.status !== 401) msg(error.message);
@@ -652,6 +853,23 @@ $('login').addEventListener('click', () => login().catch(error => msg(error.mess
 $('password-login').addEventListener('click', () => sessionAuth.login('password').catch(() => {}));
 $('password-edit').addEventListener('click', editPassword);
 $('password-disable').addEventListener('click', disablePassword);
+$('audio-form').addEventListener('submit', saveAudio);
+for (const id of ['audio-enabled', 'audio-model-base', 'audio-model-small', 'audio-reply', 'audio-voice']) $(id).addEventListener('change', editAudio);
+$('audio-threads').addEventListener('input', editAudio);
+$('audio-use-recommended').addEventListener('click', () => {
+  if (!audioDraft || audioSaving || audioSnapshot?.busy) return;
+  audioDraft.threads = recommendedAudioThreads();
+  $('audio-threads').value = audioDraft.threads;
+  audioNotice = '';
+  renderAudio();
+});
+$('audio-discard').addEventListener('click', () => {
+  if (!audioSnapshot || audioSaving || audioSnapshot.busy) return;
+  audioDraft = { ...audioSnapshot.settings };
+  audioNotice = '';
+  audioError = '';
+  renderAudio();
+});
 $('enroll').addEventListener('click', () => enroll($('bootstrap-token').value).catch(error => msg(error.message)));
 $('add-passkey').addEventListener('click', () => perform(async () => { await enroll(); await load(); }));
 $('new-worker').addEventListener('click', openWorkerEnrollment);
