@@ -31,6 +31,7 @@ type Settings struct {
 	Threads        int    `json:"threads"`
 	ReplyWithAudio bool   `json:"reply_with_audio"`
 	TTSVoice       string `json:"tts_voice,omitempty"`
+	TTSEngine      string `json:"tts_engine,omitempty"`
 }
 
 func (s Settings) Validate() error {
@@ -42,6 +43,11 @@ func (s Settings) Validate() error {
 	}
 	if s.TTSVoice != "" && s.TTSVoice != "auto" && s.TTSVoice != "italian" && s.TTSVoice != "english" {
 		return errors.New("Select automatic, Italian, or English for audio replies.")
+	}
+	// Empty preserves the legacy engine in existing private settings. Only an
+	// explicit selection changes that engine; loading settings never migrates it.
+	if s.TTSEngine != "" && s.TTSEngine != "piper" && s.TTSEngine != "qwen3" {
+		return errors.New("Select Piper / Miro or Qwen3-TTS 1.7B quantized for audio replies.")
 	}
 	return nil
 }
@@ -80,10 +86,31 @@ type SpeechAvailability struct {
 
 // SpeechSupport supplies an optional local speech engine without coupling
 // audio settings to an engine implementation. Prepare must honor cancellation
-// and report only public, generic progress messages.
+// and report only public, generic progress messages. It must not change the
+// active engine or delete its files before settings have been saved.
 type SpeechSupport interface {
 	Available() bool
 	Prepare(context.Context, Settings, func(Operation)) error
+}
+
+// SpeechInitializer selects the saved engine without I/O or a migration when
+// speech support is attached at startup. Empty TTSEngine selects legacy speech.
+type SpeechInitializer interface {
+	SetActive(Settings)
+}
+
+// SpeechActivation is an optional commit hook. The manager drains inference
+// before saving and calls Activate after the save commits. Activate must switch
+// to the prepared engine even if cleanup fails; errors report cleanup warnings,
+// never failed activation. The supplied context cannot be canceled after commit.
+type SpeechActivation interface {
+	Activate(context.Context, Settings) error
+}
+
+// SpeechPreparationDiscarder releases a staged, warmed engine after a failed
+// settings commit. It must preserve the active engine and its managed files.
+type SpeechPreparationDiscarder interface {
+	DiscardPrepared()
 }
 
 type Operation struct {
@@ -274,7 +301,11 @@ func (m *Manager) AcquireInference(ctx context.Context) (func(), error) {
 func (m *Manager) SetSpeechSupport(support SpeechSupport) {
 	m.mu.Lock()
 	m.speech = support
+	settings := m.settings
 	m.mu.Unlock()
+	if initializer, ok := support.(SpeechInitializer); ok {
+		initializer.SetActive(settings)
+	}
 }
 
 func (m *Manager) Snapshot() Status {
@@ -365,6 +396,14 @@ func (m *Manager) configure(ctx context.Context, settings Settings) {
 	previousSettings := m.settings
 	speech := m.speech
 	m.mu.RUnlock()
+	prepared, committed := false, false
+	defer func() {
+		if prepared && !committed {
+			if discarder, ok := speech.(SpeechPreparationDiscarder); ok {
+				discarder.DiscardPrepared()
+			}
+		}
+	}()
 	if settings.Enabled {
 		if !helperAvailable(m.helper) {
 			m.failed("The local Whisper helper is unavailable. Install voice support on the gateway first.")
@@ -425,23 +464,45 @@ func (m *Manager) configure(ctx context.Context, settings Settings) {
 			m.failed("The local audio reply engine could not be prepared. Previous settings remain active.")
 			return
 		}
+		prepared = true
 	}
 	if ctx.Err() != nil {
 		m.failed("Audio configuration was canceled.")
 		return
+	}
+	var activation SpeechActivation
+	if settings.Enabled && settings.ReplyWithAudio {
+		activation, _ = speech.(SpeechActivation)
+	}
+	if activation != nil {
+		// Drain old synthesis before the commit point. Cancellation or a failed
+		// save leaves the prepared engine staged and the previous one active.
+		release, err := m.AcquireInference(ctx)
+		if err != nil {
+			m.failed("Audio configuration was canceled.")
+			return
+		}
+		defer release()
 	}
 	m.stage("applying", "Saving audio settings.", spec)
 	if err := m.save(savedSettings{Version: 1, Settings: settings, ModelLocation: location}); err != nil {
 		m.failed("Audio settings could not be saved. Previous settings remain active.")
 		return
 	}
+	message := "Audio settings saved."
+	if activation != nil {
+		if err := activation.Activate(context.WithoutCancel(ctx), settings); err != nil {
+			message = "Audio settings saved. The selected audio reply engine is active, but unused model files could not all be removed."
+		}
+	}
+	committed = true
 	m.mu.Lock()
 	m.settings, m.voice = settings, m.configFor(settings, path)
 	if settings.Enabled {
 		m.installed[spec.name] = true
 	}
 	m.busy = false
-	m.operation = Operation{State: "ready", Model: settings.Model, Message: "Audio settings saved."}
+	m.operation = Operation{State: "ready", Model: settings.Model, Message: message}
 	close(m.changed)
 	m.changed = make(chan struct{})
 	m.mu.Unlock()

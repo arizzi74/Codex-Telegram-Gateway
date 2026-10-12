@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -100,6 +101,9 @@ func TestSettingsValidation(t *testing.T) {
 		{"voice path", func(s *Settings) { s.TTSVoice = "../voice" }},
 		{"voice control", func(s *Settings) { s.TTSVoice = "italian\n" }},
 		{"voice oversized", func(s *Settings) { s.TTSVoice = strings.Repeat("a", 81) }},
+		{"unknown speech engine", func(s *Settings) { s.TTSEngine = "pocket" }},
+		{"speech engine URL", func(s *Settings) { s.TTSEngine = "https://example.com/model" }},
+		{"speech engine path", func(s *Settings) { s.TTSEngine = "../piper" }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			s := valid
@@ -114,6 +118,13 @@ func TestSettingsValidation(t *testing.T) {
 		s.Threads = threads
 		if err := s.Validate(); err != nil {
 			t.Fatal(err)
+		}
+	}
+	for _, engine := range []string{"", "piper", "qwen3"} {
+		s := valid
+		s.TTSEngine = engine
+		if err := s.Validate(); err != nil {
+			t.Fatalf("valid engine %q rejected: %v", engine, err)
 		}
 	}
 }
@@ -395,6 +406,197 @@ type speechFixture struct {
 func (s speechFixture) Available() bool { return s.available }
 func (s speechFixture) Prepare(ctx context.Context, settings Settings, progress func(Operation)) error {
 	return s.prepare(ctx, settings, progress)
+}
+
+type speechLifecycleFixture struct {
+	speechFixture
+	initialize func(Settings)
+	activate   func(context.Context, Settings) error
+	discard    func()
+}
+
+func (s speechLifecycleFixture) SetActive(settings Settings) {
+	if s.initialize != nil {
+		s.initialize(settings)
+	}
+}
+func (s speechLifecycleFixture) Activate(ctx context.Context, settings Settings) error {
+	return s.activate(ctx, settings)
+}
+func (s speechLifecycleFixture) DiscardPrepared() {
+	if s.discard != nil {
+		s.discard()
+	}
+}
+
+func TestSpeechEngineCommitAndCleanupLifecycle(t *testing.T) {
+	for _, mode := range []string{"success", "prepare failure", "save failure", "cleanup warning"} {
+		t.Run(mode, func(t *testing.T) {
+			m, _ := testManager(t)
+			previous := m.Settings()
+			if err := m.save(savedSettings{Version: 1, Settings: previous, ModelLocation: "system"}); err != nil {
+				t.Fatal(err)
+			}
+			settingsPath := filepath.Join(m.dir, "settings.json")
+			before, err := os.ReadFile(settingsPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			requested := previous
+			requested.Model, requested.ReplyWithAudio, requested.TTSEngine = "base", true, "qwen3"
+			var prepared, activated, discarded atomic.Int32
+			discardDone := make(chan struct{})
+			active := previous.TTSEngine
+			m.SetSpeechSupport(speechLifecycleFixture{
+				speechFixture: speechFixture{available: true, prepare: func(context.Context, Settings, func(Operation)) error {
+					prepared.Add(1)
+					if active != previous.TTSEngine || m.Settings() != previous {
+						t.Error("preparation changed the active engine or settings")
+					}
+					if mode == "prepare failure" {
+						return errors.New("private preparation diagnostic")
+					}
+					if mode == "save failure" {
+						return os.Rename(m.dir, m.dir+"-moved")
+					}
+					return nil
+				}},
+				discard: func() { discarded.Add(1); close(discardDone) },
+				initialize: func(settings Settings) {
+					if settings != previous || settings.TTSEngine != "" {
+						t.Error("startup silently selected a speech engine")
+					}
+				},
+				activate: func(ctx context.Context, settings Settings) error {
+					activated.Add(1)
+					data, err := readPrivate(settingsPath)
+					var saved savedSettings
+					if err != nil || json.Unmarshal(data, &saved) != nil || saved.Settings != requested {
+						t.Error("engine activated before settings were saved")
+					}
+					if m.Settings() != previous {
+						t.Error("settings published before engine activation")
+					}
+					blockedCtx, cancel := context.WithTimeout(ctx, 10*time.Millisecond)
+					defer cancel()
+					if release, err := m.AcquireInference(blockedCtx); !errors.Is(err, context.DeadlineExceeded) {
+						if release != nil {
+							release()
+						}
+						t.Error("inference was admitted while changing the active engine")
+					}
+					active = settings.TTSEngine
+					if mode == "cleanup warning" {
+						return errors.New("private cleanup path")
+					}
+					return nil
+				},
+			})
+			runManager(t, m)
+			if err := m.Apply(requested); err != nil {
+				t.Fatal(err)
+			}
+			state := "ready"
+			if mode == "prepare failure" || mode == "save failure" {
+				state = "failed"
+			}
+			status := waitSettings(t, m, state)
+			if prepared.Load() != 1 {
+				t.Fatal("selected engine was not prepared")
+			}
+			if state == "failed" {
+				if activated.Load() != 0 || active != previous.TTSEngine || status.Settings != previous {
+					t.Fatal("failed setup activated or cleaned up an engine")
+				}
+				if mode == "save failure" {
+					select {
+					case <-discardDone:
+					case <-time.After(time.Second):
+						t.Fatal("save failure did not discard the candidate")
+					}
+					if discarded.Load() != 1 {
+						t.Fatal("save failure kept the warmed candidate")
+					}
+					settingsPath = filepath.Join(m.dir+"-moved", "settings.json")
+				}
+				after, err := os.ReadFile(settingsPath)
+				if err != nil || !bytes.Equal(before, after) {
+					t.Fatal("failed setup changed persisted settings")
+				}
+			} else if activated.Load() != 1 || discarded.Load() != 0 || active != requested.TTSEngine || status.Settings != requested {
+				t.Fatal("saved engine was not activated")
+			}
+			if mode == "cleanup warning" && (!strings.Contains(status.Operation.Message, "could not all be removed") || strings.Contains(status.Operation.Message, "private") || status.Busy) {
+				t.Fatal("cleanup error did not produce a safe applied warning")
+			}
+		})
+	}
+}
+
+func TestSpeechSwitchCancellationBeforeAndAfterSettingsCommit(t *testing.T) {
+	for _, afterCommit := range []bool{false, true} {
+		t.Run(map[bool]string{false: "before commit", true: "after commit"}[afterCommit], func(t *testing.T) {
+			m, _ := testManager(t)
+			previous := m.Settings()
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			prepared := make(chan struct{})
+			var activated, discarded atomic.Int32
+			var holdInference func()
+			m.SetSpeechSupport(speechLifecycleFixture{
+				speechFixture: speechFixture{available: true, prepare: func(ctx context.Context, _ Settings, _ func(Operation)) error {
+					if !afterCommit {
+						var err error
+						holdInference, err = m.AcquireInference(ctx)
+						if err != nil {
+							return err
+						}
+					}
+					close(prepared)
+					return nil
+				}},
+				discard: func() { discarded.Add(1) },
+				activate: func(activationCtx context.Context, _ Settings) error {
+					cancel()
+					if activationCtx.Err() != nil {
+						t.Error("saved activation was canceled")
+					}
+					activated.Add(1)
+					return nil
+				},
+			})
+			done := make(chan struct{})
+			go func() { m.Run(ctx); close(done) }()
+			requested := previous
+			requested.Model, requested.ReplyWithAudio, requested.TTSEngine = "base", true, "piper"
+			if err := m.Apply(requested); err != nil {
+				t.Fatal(err)
+			}
+			if !afterCommit {
+				select {
+				case <-prepared:
+				case <-time.After(3 * time.Second):
+					t.Fatal("engine was not prepared")
+				}
+				cancel()
+			}
+			select {
+			case <-done:
+			case <-time.After(3 * time.Second):
+				t.Fatal("canceled switch blocked shutdown")
+			}
+			if holdInference != nil {
+				holdInference()
+			}
+			if afterCommit {
+				if activated.Load() != 1 || discarded.Load() != 0 || m.Settings() != requested {
+					t.Fatal("cancellation interrupted a committed switch")
+				}
+			} else if activated.Load() != 0 || discarded.Load() != 1 || m.Settings() != previous {
+				t.Fatal("canceled setup switched the active engine or kept a warmed candidate")
+			}
+		})
+	}
 }
 
 func TestSpeechPreparationIsRequiredBeforeCommit(t *testing.T) {

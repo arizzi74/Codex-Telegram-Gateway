@@ -33,7 +33,7 @@ flowchart TB
   browser <-->|"HTTPS / WebSocket"| gateway
   gateway <--> registry
   gateway <-->|"Local PCM pipe; optional voice transcription"| whisper["Resident Whisper helper"]
-  gateway <-->|"Local PCM pipe; optional spoken replies"| speech["Go Pocket TTS helper"]
+  gateway <-->|"Local PCM pipe; optional spoken replies"| speech["Piper / Miro or quantized Qwen3-TTS"]
 
   subgraph machine_a["Worker A · Linux / macOS"]
     direction TB
@@ -273,10 +273,14 @@ the multilingual **base** model and one fewer thread than available cores
 (minimum one), and preserves existing installations' selections. The CLI
 alternative remains `sudo codex-telegramgw setup voice`.
 
-Optional spoken replies use a local, entirely Go Pocket TTS engine with English
-and Italian voices. The bot keeps showing typing while preparing the complete
+Optional spoken replies offer **Piper / Miro** for fast Italian speech or
+**Qwen3-TTS 1.7B quantized** for multilingual speech with a larger CPU and RAM
+budget. The admin panel compares measured speed, model size, memory and quality.
+Selecting an engine downloads and checks its signed native helper and pinned
+models; a successful switch removes the unused engine and model files.
+The bot keeps showing typing while preparing the complete
 audio reply, then sends the final text followed by audio with the same content.
-No paid speech API, Python, or FFmpeg is needed;
+No paid speech API, Python, FFmpeg, or GPU is needed;
 recordings stay in memory. See [voice notes](docs/telegram-commands.md#voice-notes)
 for limits, routing and resource use.
 

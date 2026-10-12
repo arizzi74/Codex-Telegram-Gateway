@@ -1,3 +1,8 @@
 # Generated assets preserve whitespace inside upstream literals and licenses.
 internal/admin/static/webui-mermaid-runtime.js -whitespace linguist-generated=true
 internal/admin/static/webui-mermaid-LICENSE.txt -whitespace linguist-generated=true
+
+# Preserve upstream legal text, Markdown line breaks, and patch context bytes.
+native/piper/licenses/** -whitespace
+native/qwen-tts/licenses/** -whitespace
+native/qwen-tts/threads.patch -whitespace

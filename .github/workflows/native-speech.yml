@@ -1,0 +1,135 @@
+name: Native Speech
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        type: string
+        required: true
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Helper release version
+        default: dev
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: linux
+            arch: amd64
+            runner: ubuntu-24.04
+          - os: linux
+            arch: arm64
+            runner: ubuntu-24.04-arm
+          - os: darwin
+            arch: amd64
+            runner: macos-15-intel
+          - os: darwin
+            arch: arm64
+            runner: macos-15
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: '1.26.x'
+          check-latest: true
+      - name: Build Linux helpers with portable compiler baselines
+        if: matrix.os == 'linux'
+        env:
+          VERSION: ${{ inputs.version }}
+          TARGET_ARCH: ${{ matrix.arch }}
+        run: |
+          bash scripts/build-piper-linux.sh "$TARGET_ARCH"
+          bash scripts/build-qwen-tts-linux.sh "$TARGET_ARCH"
+      - name: Build macOS helpers
+        if: matrix.os == 'darwin'
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          bash scripts/build-piper.sh
+          bash scripts/build-qwen-tts.sh
+      - name: Download and verify pinned smoke models
+        shell: bash
+        run: |
+          set -euo pipefail
+          source native/piper/source.env
+          source native/qwen-tts/source.env
+          model_dir="$RUNNER_TEMP/native-speech-models"
+          mkdir -p "$model_dir/piper" "$model_dir/qwen-tts"
+          fetch_model() {
+            local url="$1" path="$2" size="$3" digest="$4" actual
+            curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' --tlsv1.2 --retry 3 --max-filesize "$size" "$url" -o "$path"
+            test "$(wc -c < "$path" | tr -d ' ')" -eq "$size"
+            if command -v sha256sum >/dev/null; then actual=$(sha256sum "$path" | cut -d ' ' -f 1)
+            else actual=$(shasum -a 256 "$path" | cut -d ' ' -f 1); fi
+            test "$actual" = "$digest"
+          }
+          fetch_model "$PIPER_MODEL_URL" "$model_dir/miro.tar.bz2" "$PIPER_MODEL_BYTES" "$PIPER_MODEL_SHA256"
+          python3 - "$model_dir/miro.tar.bz2" "$model_dir/piper" <<'PY'
+          import os, pathlib, shutil, sys, tarfile
+          archive, destination = sys.argv[1:]
+          root = pathlib.Path(destination)
+          count = files = total = 0
+          with tarfile.open(archive, "r:bz2") as source:
+              for entry in source:
+                  count += 1
+                  name = entry.name.rstrip("/")
+                  path = pathlib.PurePosixPath(name)
+                  if (count > 397 or not name or "\\" in name or path.is_absolute()
+                          or any(part in ("", ".", "..") for part in name.split("/"))
+                          or path.parts[0] != "vits-piper-it_IT-miro-high"
+                          or not (entry.isdir() or entry.isfile())):
+                      raise SystemExit("Invalid pinned Miro archive structure")
+                  target = root.joinpath(*path.parts)
+                  if entry.isdir():
+                      target.mkdir(parents=True, exist_ok=True, mode=0o700)
+                      continue
+                  files += 1
+                  total += entry.size
+                  if entry.size < 0 or entry.size > 63153775 or total > 81154408:
+                      raise SystemExit("Miro extraction exceeds pinned bounds")
+                  target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+                  with source.extractfile(entry) as src, target.open("xb") as dst:
+                      shutil.copyfileobj(src, dst)
+                  os.chmod(target, 0o600)
+          if (count, files, total) != (397, 359, 81154408):
+              raise SystemExit("Incomplete pinned Miro archive")
+          PY
+          qwen_url="https://huggingface.co/ggml-org/Qwen3-TTS-12Hz-1.7B-Base-GGUF/resolve/$QWEN_TTS_MODEL_REVISION"
+          fetch_model "$qwen_url/$QWEN_TTS_MODEL_NAME?download=true" "$model_dir/qwen-tts/$QWEN_TTS_MODEL_NAME" "$QWEN_TTS_MODEL_SIZE" "$QWEN_TTS_MODEL_SHA256"
+          fetch_model "$qwen_url/$QWEN_TTS_MMPROJ_NAME?download=true" "$model_dir/qwen-tts/$QWEN_TTS_MMPROJ_NAME" "$QWEN_TTS_MMPROJ_SIZE" "$QWEN_TTS_MMPROJ_SHA256"
+      - name: Verify resident models, two replies, float32 PCM and clean EOF
+        env:
+          TARGET_OS: ${{ matrix.os }}
+          TARGET_ARCH: ${{ matrix.arch }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          for language in italian english; do
+            go run ./native/piper/smoke --helper "$PWD/dist/piper/$TARGET_OS-$TARGET_ARCH/codex-piper" --dir "$RUNNER_TEMP/native-speech-models/piper" --language "$language" --threads 2
+            python3 native/qwen-tts/smoke.py --helper "$PWD/dist/qwen-tts/$TARGET_OS-$TARGET_ARCH/codex-qwen-tts" --dir "$RUNNER_TEMP/native-speech-models/qwen-tts" --language "$language" --threads 2
+          done
+      - name: Verify optimized Qwen on CPUs accepted by the production selector
+        env:
+          TELEGRAMGW_QWEN_OPTIMIZED_HELPER: ${{ github.workspace }}/dist/qwen-tts/${{ matrix.os }}-${{ matrix.arch }}/lib/codex-qwen-tts-optimized
+          TELEGRAMGW_QWEN_OPTIMIZED_MODEL_DIR: ${{ runner.temp }}/native-speech-models/qwen-tts
+        run: go test ./internal/speech -run '^TestOptimizedNativeSpeechSmoke$' -count=1 -v -timeout 30m
+      - name: Stage flat release archives
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/speech-artifacts"
+          cp dist/piper/codex-piper-*.tar.gz dist/qwen-tts/codex-qwen-tts-*.tar.gz "$RUNNER_TEMP/speech-artifacts/"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: speech-${{ matrix.os }}-${{ matrix.arch }}
+          if-no-files-found: error
+          path: ${{ runner.temp }}/speech-artifacts/*.tar.gz

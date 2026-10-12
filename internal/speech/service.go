@@ -33,20 +33,27 @@ var ErrClosed = errors.New("speech: service is closed")
 // inference live in the helper; Golem's small package-level worker pool stays
 // parked in the gateway process.
 type Service struct {
-	dir         string
-	executable  string
-	assets      []asset
-	http        *http.Client
-	command     func(string, int) *exec.Cmd
-	gate        chan struct{}
-	prepareGate chan struct{}
-	limiter     InferenceLimiter
-	done        chan struct{}
-	mu          sync.Mutex
-	closed      bool
-	process     *helperProcess
-	sequence    uint64
-	unloadEpoch uint64
+	dir           string
+	executable    string
+	assets        []asset
+	http          *http.Client
+	command       func(string, int) *exec.Cmd
+	gate          chan struct{}
+	prepareGate   chan struct{}
+	limiter       InferenceLimiter
+	done          chan struct{}
+	mu            sync.Mutex
+	closed        bool
+	process       *helperProcess
+	sequence      uint64
+	unloadEpoch   uint64
+	nativeEngine  string
+	nativeActive  *Service
+	nativePending *Service
+	pendingEngine string
+	beforeStart   func(context.Context) error
+	nativeInstall func(context.Context, string, string, func(audio.Operation)) error
+	nativeFactory func(string) *Service
 }
 
 // InferenceLimiter shares the host CPU budget with transcription. Synthesize's
@@ -124,6 +131,13 @@ func (s *Service) release() { s.gate <- struct{}{} }
 // public warmup phrase. Auto prepares both Italian and English. Failed work
 // cannot change the audio manager's active settings.
 func (s *Service) Prepare(ctx context.Context, settings audio.Settings, progress func(audio.Operation)) error {
+	if settings.TTSEngine != "" {
+		return s.prepareNative(ctx, settings, progress)
+	}
+	return s.prepareLegacy(ctx, settings, progress)
+}
+
+func (s *Service) prepareLegacy(ctx context.Context, settings audio.Settings, progress func(audio.Operation)) error {
 	if !s.Available() {
 		return errors.New("The local speech engine is unavailable.")
 	}
@@ -273,6 +287,15 @@ func (s *Service) Synthesize(ctx context.Context, text, language string, threads
 		return nil, err
 	}
 	defer s.release()
+	s.mu.Lock()
+	native, engine := s.nativeActive, s.nativeEngine
+	s.mu.Unlock()
+	if native != nil {
+		if engine == "piper" {
+			language = "italian"
+		}
+		return native.Synthesize(ctx, normalizeSpeechText(text, language), language, threads)
+	}
 	return s.synthesize(ctx, text, language, threads)
 }
 
@@ -345,6 +368,11 @@ func (s *Service) start(ctx context.Context, language string, threads int) (*hel
 	}
 	if p != nil {
 		s.discard(p)
+	}
+	if s.beforeStart != nil {
+		if err := s.beforeStart(ctx); err != nil {
+			return nil, err
+		}
 	}
 	cmd := s.command(language, threads)
 	cmd.Stderr = io.Discard
@@ -437,10 +465,17 @@ func (s *Service) Unload() {
 	s.mu.Lock()
 	s.unloadEpoch++
 	p := s.process
+	native, pending := s.nativeActive, s.nativePending
 	if p != nil {
 		p.stopping = true
 	}
 	s.mu.Unlock()
+	if native != nil {
+		native.Unload()
+	}
+	if pending != nil {
+		pending.Unload()
+	}
 	if p != nil {
 		go s.discard(p)
 	}
@@ -455,7 +490,14 @@ func (s *Service) Close() {
 	s.closed = true
 	close(s.done)
 	p := s.process
+	native, pending := s.nativeActive, s.nativePending
 	s.mu.Unlock()
+	if native != nil {
+		native.Close()
+	}
+	if pending != nil {
+		pending.Close()
+	}
 	if p != nil {
 		s.discard(p)
 	}

@@ -17,6 +17,12 @@ jobs:
     with:
       version: ${{ github.sha }}
 
+  native-speech:
+    if: github.event_name != 'schedule'
+    uses: ./.github/workflows/native-speech.yml
+    with:
+      version: ${{ github.sha }}
+
   browser:
     if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
@@ -31,8 +37,8 @@ jobs:
       - run: npm run test:browser
 
   test:
-    needs: native-whisper
-    if: always() && (needs.native-whisper.result == 'success' || github.event_name == 'schedule')
+    needs: [native-whisper, native-speech]
+    if: always() && ((needs.native-whisper.result == 'success' && needs.native-speech.result == 'success') || github.event_name == 'schedule')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -49,6 +55,12 @@ jobs:
           pattern: whisper-*
           merge-multiple: true
           path: .native-dist
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        if: github.event_name != 'schedule'
+        with:
+          pattern: speech-*
+          merge-multiple: true
+          path: .speech-dist
       - run: VERSION=${{ github.sha }} ./scripts/ci.sh
         if: github.event_name != 'schedule'
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4

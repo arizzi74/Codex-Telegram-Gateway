@@ -492,11 +492,12 @@ async function disablePassword() {
 function audioSettings(value) {
   if (typeof value?.enabled !== 'boolean' || !['base', 'small'].includes(value.model) ||
       !Number.isInteger(value.threads) || value.threads < 1 || value.threads > 32 || typeof value.reply_with_audio !== 'boolean' ||
-      (value.tts_voice !== undefined && !['auto', 'italian', 'english'].includes(value.tts_voice))) return null;
-  return { enabled: value.enabled, model: value.model, threads: value.threads, reply_with_audio: value.reply_with_audio, tts_voice: value.tts_voice || 'auto' };
+      (value.tts_voice !== undefined && !['auto', 'italian', 'english'].includes(value.tts_voice)) ||
+      (value.tts_engine !== undefined && !['', 'piper', 'qwen3'].includes(value.tts_engine))) return null;
+  return { enabled: value.enabled, model: value.model, threads: value.threads, reply_with_audio: value.reply_with_audio, tts_voice: value.tts_voice || 'auto', tts_engine: value.tts_engine || '' };
 }
 function sameAudioSettings(a, b) {
-  return !!a && !!b && ['enabled', 'model', 'threads', 'reply_with_audio', 'tts_voice'].every(key => a[key] === b[key]);
+  return !!a && !!b && ['enabled', 'model', 'threads', 'reply_with_audio', 'tts_voice', 'tts_engine'].every(key => a[key] === b[key]);
 }
 function audioDirty() { return !!audioDraft && !sameAudioSettings(audioDraft, audioSnapshot?.settings); }
 function audioBytes(value) {
@@ -537,6 +538,19 @@ function renderAudio() {
   $('audio-reply-help').textContent = audioSnapshot?.tts?.available
     ? 'Send the final text reply and an audio version with the same content.'
     : 'Audio replies require the local speech engine. Voice transcription can be used on its own.';
+  const replies = !!audioDraft?.reply_with_audio;
+  $('audio-engine-wrap').hidden = !replies;
+  $('audio-engine-wrap').disabled = !enabled || busy || !audioSnapshot?.tts?.available;
+  for (const engine of ['piper', 'qwen3']) {
+    const choice = $('audio-engine-' + engine);
+    choice.checked = audioDraft?.tts_engine === engine;
+    choice.required = enabled && replies;
+  }
+  const pendingEngine = $('audio-engine-pending');
+  pendingEngine.hidden = !replies || !!audioDraft?.tts_engine;
+  pendingEngine.textContent = audioSnapshot?.settings.reply_with_audio && !audioSnapshot.settings.tts_engine
+    ? 'The existing Pocket TTS engine remains active. Choose an engine and apply settings to switch. Piper / Miro is recommended for this CPU.'
+    : 'Choose an audio reply engine before applying settings. Piper / Miro is recommended for this CPU.';
   const voice = $('audio-voice');
   const voices = audioSnapshot?.tts?.voices || [];
   voice.replaceChildren();
@@ -547,8 +561,13 @@ function renderAudio() {
     voice.append(option);
   }
   voice.value = audioDraft?.tts_voice || 'auto';
-  voice.disabled = !enabled || busy || !audioSnapshot?.tts?.available || !audioDraft?.reply_with_audio;
-  $('audio-voice-wrap').hidden = !audioSnapshot?.tts?.available || !audioDraft?.reply_with_audio;
+  voice.disabled = !enabled || busy || !audioSnapshot?.tts?.available || !replies;
+  $('audio-voice-wrap').hidden = !replies;
+  $('audio-voice-help').textContent = audioDraft?.tts_engine === 'piper'
+    ? 'Piper / Miro uses an Italian voice for every language. The language preference is saved; English is spoken with an Italian accent.'
+    : audioDraft?.tts_engine === 'qwen3'
+      ? 'Qwen3-TTS supports Italian and English with the same model download. Automatic matching follows the voice note language.'
+      : 'Choose an engine to see its language support. Your language preference is preserved.';
   const resources = $('audio-resources');
   resources.replaceChildren();
   if (ready) {
@@ -558,9 +577,10 @@ function renderAudio() {
     fact(resources, 'Available RAM', audioBytes(audioSnapshot.resources?.memory_available_bytes));
   }
   const operation = audioSnapshot?.operation || {};
+  const appliedWarning = operation.state === 'ready' && operation.message && operation.message !== 'Audio settings saved.' ? operation.message : '';
   const states = { idle: 'Audio settings are ready.', queued: 'Audio setup is queued…', checking: 'Checking local audio files…', verifying: 'Verifying the local speech model…', downloading: 'Downloading audio model files…', warming: 'Checking the local speech voice…', preflight: 'Checking the audio helper and model…', applying: 'Applying audio settings…', ready: 'Audio settings applied.', failed: 'Audio setup failed. Your previous settings remain active.' };
   $('audio-status').textContent = audioSaving ? 'Submitting audio settings…' : ready
-    ? audioNotice || (audioSnapshot.busy || operation.state === 'failed' ? states[operation.state] || 'Setting up audio…' : audioSnapshot.settings.enabled ? 'Voice notes are enabled.' : 'Voice notes are disabled.')
+    ? audioNotice || appliedWarning || (audioSnapshot.busy || operation.state === 'failed' ? states[operation.state] || 'Setting up audio…' : audioSnapshot.settings.enabled ? 'Voice notes are enabled.' : 'Voice notes are disabled.')
     : audioError ? 'Audio settings are unavailable. Refresh to try again.' : 'Loading audio settings…';
   const error = audioError || (operation.state === 'failed' ? operation.message || 'Unable to apply audio settings. Check available disk space and memory, then try again.' : '');
   $('audio-error').textContent = error;
@@ -576,7 +596,7 @@ function renderAudio() {
   if (ready && audioSnapshot.busy && operation.message && operation.state !== 'failed') $('audio-status').textContent += ' ' + operation.message;
   const effective = audioSnapshot?.settings;
   $('audio-effective').textContent = effective ? 'Current settings: ' + (effective.enabled
-    ? `${effective.model === 'small' ? 'Small' : 'Base'} · ${effective.threads} ${effective.threads === 1 ? 'thread' : 'threads'}${effective.reply_with_audio ? ' · text and audio replies' : ''}`
+    ? `${effective.model === 'small' ? 'Small' : 'Base'} · ${effective.threads} ${effective.threads === 1 ? 'thread' : 'threads'}${effective.reply_with_audio ? ' · text and audio replies · ' + ({ piper: 'Piper / Miro', qwen3: 'Qwen3-TTS 1.7B quantized' }[effective.tts_engine] || 'existing Pocket TTS (choose an engine to switch)') : ''}`
     : 'Voice notes disabled.') : '';
   const selectedModel = audioSnapshot?.models?.find(item => item.name === audioDraft?.model);
   $('audio-save').textContent = busy ? 'Applying…' : enabled && selectedModel && !selectedModel.installed ? 'Download and apply' : 'Apply audio settings';
@@ -594,7 +614,8 @@ function acceptAudioSnapshot(value) {
   if (audioPending && !value.busy) {
     if (value.operation?.state === 'ready' && sameAudioSettings(settings, audioPending)) {
       if (sameAudioSettings(audioDraft, audioPending)) audioDraft = { ...settings };
-      audioNotice = 'Audio settings applied.';
+      audioNotice = value.operation?.message && value.operation.message !== 'Audio settings saved.'
+        ? value.operation.message : 'Audio settings applied.';
       audioPending = null;
     } else if (value.operation?.state === 'failed') audioPending = null;
   }
@@ -635,6 +656,8 @@ function editAudio() {
   audioDraft.threads = !audioDraft.enabled && (!Number.isInteger(threads) || threads < 1 || threads > 32)
     ? audioSnapshot.settings.threads : Number.isFinite(threads) ? threads : null;
   audioDraft.reply_with_audio = $('audio-reply').checked;
+  const engine = document.querySelector('input[name="audio-engine"]:checked');
+  if (engine && ['piper', 'qwen3'].includes(engine.value)) audioDraft.tts_engine = engine.value;
   if (['auto', 'italian', 'english'].includes($('audio-voice').value)) audioDraft.tts_voice = $('audio-voice').value;
   audioNotice = '';
   renderAudio();
@@ -854,7 +877,7 @@ $('password-login').addEventListener('click', () => sessionAuth.login('password'
 $('password-edit').addEventListener('click', editPassword);
 $('password-disable').addEventListener('click', disablePassword);
 $('audio-form').addEventListener('submit', saveAudio);
-for (const id of ['audio-enabled', 'audio-model-base', 'audio-model-small', 'audio-reply', 'audio-voice']) $(id).addEventListener('change', editAudio);
+for (const id of ['audio-enabled', 'audio-model-base', 'audio-model-small', 'audio-reply', 'audio-voice', 'audio-engine-piper', 'audio-engine-qwen3']) $(id).addEventListener('change', editAudio);
 $('audio-threads').addEventListener('input', editAudio);
 $('audio-use-recommended').addEventListener('click', () => {
   if (!audioDraft || audioSaving || audioSnapshot?.busy) return;

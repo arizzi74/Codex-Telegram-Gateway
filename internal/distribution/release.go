@@ -45,11 +45,18 @@ func (t Target) Components() []string {
 	return []string{"codex-worker", "codex-local", "codex-whisper"}
 }
 
+// Speech helpers are optional downloads, never installed on workers or bundled
+// into the gateway. Each archive is covered by the signed release manifest.
+func SpeechComponents() []string { return []string{"codex-piper", "codex-qwen-tts"} }
+
 func Assets() []string {
 	names := []string{"install.sh"}
 	for _, target := range Targets() {
 		names = append(names, target.ManagerAsset())
 		for _, binary := range target.Components() {
+			names = append(names, binary+"-"+target.Suffix()+".tar.gz")
+		}
+		for _, binary := range SpeechComponents() {
 			names = append(names, binary+"-"+target.Suffix()+".tar.gz")
 		}
 	}
@@ -357,7 +364,7 @@ func Verify(root, dist string) error {
 	}
 	assets := Assets()
 	if len(hashes) != len(assets) {
-		return errors.New("release manifest must contain exactly fourteen archives, four managers and installer")
+		return errors.New("release manifest must contain exactly twenty-two archives, four managers and installer")
 	}
 	for _, name := range assets {
 		expected, ok := hashes[name]
@@ -376,7 +383,7 @@ func Verify(root, dist string) error {
 	if err != nil {
 		return err
 	}
-	if len(archives) != 14 {
+	if len(archives) != 22 {
 		return errors.New("unexpected or missing platform archive")
 	}
 	sources, err := packagedSources(root)
@@ -395,6 +402,11 @@ func Verify(root, dist string) error {
 		return errors.New("release installer differs from source")
 	}
 	for _, target := range Targets() {
+		for _, binary := range SpeechComponents() {
+			if err := verifySpeechArchive(filepath.Join(dist, binary+"-"+target.Suffix()+".tar.gz"), binary, target); err != nil {
+				return err
+			}
+		}
 		manager, err := os.ReadFile(filepath.Join(dist, target.ManagerAsset()))
 		if err != nil {
 			return err

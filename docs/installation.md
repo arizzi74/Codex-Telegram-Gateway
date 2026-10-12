@@ -783,14 +783,30 @@ Web Push controls and public website with a pinned Playwright/Chromium setup.
 Website publication runs its own browser checks before deploying `site/` to
 GitHub Pages. These are development tools, not installed gateway dependencies.
 
-Each release publishes fourteen component archives (including the Whisper helper
-for Linux/macOS on amd64/arm64), four native manager executables
+Each release publishes fourteen core component archives (including the Whisper helper
+for Linux/macOS on amd64/arm64), eight optional speech-engine archives (Piper and
+Qwen3-TTS on those four platforms), four native manager executables
 (`codex-telegramgw-{linux,darwin}-{amd64,arm64}`), `install.sh`, `SHA256SUMS`, and
-`SHA256SUMS.sigstore.json` (21 files total).
-Every component archive contains the matching native manager and inner checksums.
+`SHA256SUMS.sigstore.json` (29 files total).
+Every core component archive contains the matching native manager and inner checksums.
+Speech archives contain a resident native helper, any bundled runtime libraries,
+license notices, and checksums for every file. They are covered by the same signed
+release manifest and downloaded only when selected in **Admin → Audio support in
+Telegram**. Workers never download speech engines. Models are downloaded separately
+from pinned upstream locations and verified by size and SHA-256.
 Packaging and verification use the Go release tool. Python is used only for
 development checks: historical PostgreSQL migration utilities/tests and native
-Whisper speech tests in CI. It is not required on installed hosts.
+native speech tests in CI. It is not required on installed hosts. Piper uses the
+system C/C++ runtime (Ubuntu 22.04 or an equivalent glibc 2.35 baseline) and bundles ONNX/espeak; Qwen uses a
+self-contained CPU helper. Neither needs Python, FFmpeg, a GPU, or an API key.
+
+Changing the audio-reply engine first downloads and tests the selected model.
+After settings have been saved, the gateway activates it and removes the other
+managed speech engine, its models, and legacy Pocket TTS models. A failed download
+or settings save keeps the previous voice active. Existing Pocket TTS settings
+stay effective until an administrator explicitly selects and saves a new engine.
+The helper stays resident between replies and unloads when audio replies are
+disabled. Transcription models are independent and are not removed by this switch.
 
 The native manager verifies the manifest's Sigstore build attestation before
 accepting its hashes or executing downloaded programs. It requires GitHub's OIDC

@@ -3,10 +3,13 @@
 *.env
 !*.env.example
 !/native/whisper/source.env
+!/native/piper/source.env
+!/native/qwen-tts/source.env
 /config.local.*
 /state/
 /dist/
 /.native-dist/
+/.speech-dist/
 /bin/
 /coverage.out
 *.db

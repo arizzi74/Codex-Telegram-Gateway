@@ -19,6 +19,11 @@ jobs:
     with:
       version: ${{ github.ref_name }}
 
+  native-speech:
+    uses: ./.github/workflows/native-speech.yml
+    with:
+      version: ${{ github.ref_name }}
+
   browser:
     runs-on: ubuntu-latest
     steps:
@@ -32,7 +37,7 @@ jobs:
       - run: npm run test:browser
 
   test-and-build:
-    needs: [browser, native-whisper]
+    needs: [browser, native-whisper, native-speech]
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -49,6 +54,11 @@ jobs:
           pattern: whisper-*
           merge-multiple: true
           path: .native-dist
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: speech-*
+          merge-multiple: true
+          path: .speech-dist
       - name: Validate tag and run all checks
         env:
           RELEASE_TAG: ${{ github.ref_name }}
@@ -122,7 +132,7 @@ jobs:
           verify_dir=$(mktemp -d)
           trap 'rm -rf -- "$verify_dir"' EXIT
           gh release download "$RELEASE_TAG" --dir "$verify_dir"
-          test "$(find "$verify_dir" -type f | wc -l)" -eq 21
+          test "$(find "$verify_dir" -type f | wc -l)" -eq 29
           cmp dist/SHA256SUMS "$verify_dir/SHA256SUMS"
           cmp dist/SHA256SUMS.sigstore.json "$verify_dir/SHA256SUMS.sigstore.json"
           go run ./cmd/release-tool verify-provenance --dist "$verify_dir" --repo "$GH_REPO" --tag "$RELEASE_TAG"

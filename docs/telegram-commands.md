@@ -288,13 +288,19 @@ then sends the final text followed by its voice notes. Long answers can produce
 several voice notes; all are prepared before the text is released. If speech
 generation ultimately fails, the text is sent on its own.
 
-The local speech engine supports Italian and English; choose a language or let
-it match the voice note. Required speech models download when the settings are
-applied: about 215 MiB per language or 430 MiB for automatic matching, in
-addition to Whisper's model storage. The speech helper added about 321 MiB of
-resident RAM in the observed test; actual use depends on the machine and reply.
-Golem's Pocket TTS implementation and the Ogg/Opus encoder run in Go, without
-Python, FFmpeg, a hosted speech API key or a subscription. Generated audio stays
+Choose **Piper / Miro** or **Qwen3-TTS 1.7B quantized** in the Audio panel.
+Piper uses a fast Italian voice, including an Italian accent for English words;
+Qwen supports Italian and English with the same downloaded model pair. Choose
+a language or match the voice note automatically. The panel explains model
+storage, measured memory, speed and quality tradeoffs. These measurements vary
+by hardware and reply content. Miro has noncommercial model terms; its license
+and attribution are preserved with the download.
+
+The selected native helper and models download when settings are applied. A
+successful switch removes the unused managed speech engine and models. Helpers
+stay resident between replies, use the selected CPU thread budget, and require
+no Python, FFmpeg, hosted speech API key or subscription. Ogg/Opus conversion
+continues to run in Go. Generated audio stays
 in memory until upload to Telegram and is not saved in gateway files or its
 database. The option is available when the gateway's local speech engine is
 supported.

@@ -39,6 +39,9 @@ func pinnedAssets() []asset {
 }
 
 func (a asset) url() string {
+	if strings.HasPrefix(a.remote, "https://") {
+		return a.remote
+	}
 	return "https://huggingface.co/" + modelRepository + "/resolve/" + modelRevision + "/languages/" + a.language + "/" + a.remote + "?download=true"
 }
 
@@ -98,6 +101,10 @@ func allowedURL(u *url.URL) bool {
 		return false
 	}
 	host := strings.ToLower(u.Hostname())
+	switch host {
+	case "github.com", "release-assets.githubusercontent.com", "objects.githubusercontent.com", "github-releases.githubusercontent.com":
+		return true
+	}
 	return host == "huggingface.co" || host == "hf.co" || strings.HasSuffix(host, ".hf.co") || host == "cdn-lfs.huggingface.co" || host == "cdn-lfs-us-1.huggingface.co"
 }
 

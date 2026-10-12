@@ -7,14 +7,19 @@ trap 'rm -rf -- "$build_dir"' EXIT
 # Native helpers are built on each target host by the native build matrix.
 # Never silently omit a platform or substitute a Go stub in public releases.
 whisper_dist="${WHISPER_DIST_DIR:-.native-dist}"
+speech_dist="${SPEECH_DIST_DIR:-.speech-dist}"
 for target in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64; do
   cp "$whisper_dist/codex-whisper-${target%/*}-${target#*/}" "$build_dir/"
+  for helper in codex-piper codex-qwen-tts; do
+    cp "$speech_dist/$helper-${target%/*}-${target#*/}.tar.gz" "$build_dir/"
+  done
 done
 # Only this dedicated build-output directory is replaced. Stage inputs first so
 # local builds in dist/whisper remain usable as WHISPER_DIST_DIR.
 rm -rf -- dist
 mkdir -p dist
 cp "$build_dir"/codex-whisper-* dist/
+cp "$build_dir"/*.tar.gz dist/
 CGO_ENABLED=0 go build -trimpath -o "$build_dir/release-tool" ./cmd/release-tool
 for target in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64; do
   target_os="${target%/*}"

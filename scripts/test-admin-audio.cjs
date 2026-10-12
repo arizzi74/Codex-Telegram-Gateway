@@ -88,13 +88,13 @@ async function fixture(browser, width, value = snapshot()) {
     await page.clock.runFor(1100);
     await response;
   }
-  async function finish() {
+  async function finish(message = '') {
     state.audio.settings = { ...state.submitted };
     state.audio.models.find(model => model.name === state.submitted.model).installed = true;
     state.audio.busy = false;
-    state.audio.operation = { state: 'ready', message: '' };
+    state.audio.operation = { state: 'ready', message };
     await poll();
-    await page.waitForFunction(() => document.getElementById('audio-status').textContent === 'Audio settings applied.');
+    await page.waitForFunction(expected => document.getElementById('audio-status').textContent === expected, message || 'Audio settings applied.');
   }
   return { page, state, errors, refresh, poll, finish };
 }
@@ -110,6 +110,7 @@ async function fixture(browser, width, value = snapshot()) {
       assert.equal(await enabled.isChecked(), false);
       assert.equal(await threads.isDisabled(), true, 'Audio options are disabled until enabled');
       assert.equal(await page.locator('#audio-model-small').isDisabled(), true);
+      assert.equal(await page.locator('#audio-engine-wrap').isVisible(), false, 'Engine choices appear only for audio replies');
       assert.match(await page.locator('#audio-resources').innerText(), /8.*Available CPU cores.*8.*Total RAM.*8 GiB/s);
       await enabled.check();
       assert.equal(await page.locator('#audio-model-base').isChecked(), true);
@@ -123,12 +124,25 @@ async function fixture(browser, width, value = snapshot()) {
       await threads.fill('4');
       await page.locator('#audio-reply').check();
       assert.equal(await page.locator('#audio-voice-wrap').isVisible(), true);
+      assert.equal(await page.locator('input[name="audio-engine"]').count(), 2, 'Exactly the two supported engines are offered');
+      assert.equal(await page.locator('input[name="audio-engine"]:checked').count(), 0, 'A recommendation does not silently select an engine');
+      assert.match(await page.locator('#audio-engine-pending').innerText(), /Choose an audio reply engine/);
+      await save.click();
+      assert.equal(state.posts.length, 0, 'Audio replies require an explicit engine selection');
+      await page.locator('#audio-engine-piper').check();
+      assert.match(await page.locator('#audio-voice-help').innerText(), /Italian voice.*English.*Italian accent/);
+      assert.match(await page.locator('#audio-engine-wrap').innerText(), /3\.8 s total for 25\.2 s.*298 MiB.*77 MiB/s);
+      assert.match(await page.locator('#audio-engine-wrap').innerText(), /78 s total for 20\.3 s.*5 GiB.*1\.38 GiB/s);
+      assert.match(await page.locator('#audio-engine-wrap').innerText(), /6 GiB of available RAM.*8 GiB or larger host/);
+      assert.match(await page.locator('#audio-engine-measurements').innerText(), /individual measurements, not averages.*3 threads.*4-core ARM/s);
+      assert.match(await page.locator('#audio-engine-wrap').innerText(), /noncommercial license/);
       await page.locator('#audio-voice').selectOption('italian');
       await refresh();
       assert.equal(await page.locator('#audio-model-small').isChecked(), true);
       assert.equal(await threads.inputValue(), '4');
       assert.equal(await page.locator('#audio-reply').isChecked(), true);
       assert.equal(await page.locator('#audio-voice').inputValue(), 'italian');
+      assert.equal(await page.locator('#audio-engine-piper').isChecked(), true, 'Refresh preserves the selected engine');
       assert.equal(await page.locator('#audio-unsaved').isVisible(), true);
       assert.equal(await save.innerText(), 'Download and apply');
       if (process.env.ADMIN_AUDIO_SCREENSHOT_DIR) {
@@ -137,7 +151,7 @@ async function fixture(browser, width, value = snapshot()) {
       }
       await save.click();
       await page.waitForFunction(() => !document.getElementById('audio-progress-wrap').hidden);
-      assert.deepEqual(state.posts[0], { settings: { enabled: true, model: 'small', threads: 4, reply_with_audio: true, tts_voice: 'italian' }, csrf: 'audio-csrf' });
+      assert.deepEqual(state.posts[0], { settings: { enabled: true, model: 'small', threads: 4, reply_with_audio: true, tts_voice: 'italian', tts_engine: 'piper' }, csrf: 'audio-csrf' });
       assert.equal(await enabled.isDisabled(), true, 'No concurrent audio changes during setup');
       assert.equal(await page.locator('#audio-progress').getAttribute('value'), '25');
       assert.match(await page.locator('#audio-effective').innerText(), /Voice notes disabled/);
@@ -162,6 +176,14 @@ async function fixture(browser, width, value = snapshot()) {
       await page.waitForFunction(() => !document.getElementById('audio-enabled').disabled);
       assert.equal(await enabled.isChecked(), true, 'Saved settings survive a browser reload');
       assert.equal(await threads.inputValue(), '4', 'An existing thread selection is preserved');
+      assert.equal(await page.locator('#audio-engine-piper').isChecked(), true, 'Saved engine selection survives reload');
+      await page.locator('#audio-engine-qwen3').check();
+      assert.equal(await page.locator('#audio-voice').inputValue(), 'italian', 'Switching engine preserves the language preference');
+      assert.match(await page.locator('#audio-voice-help').innerText(), /Italian and English.*same model download/);
+      await refresh();
+      assert.equal(await page.locator('#audio-engine-qwen3').isChecked(), true, 'Refresh keeps an unsaved engine switch');
+      await page.locator('#audio-discard').click();
+      assert.equal(await page.locator('#audio-engine-piper').isChecked(), true, 'Discard restores the active engine');
       await threads.fill('32');
       await page.locator('#audio-use-recommended').click();
       assert.equal(await threads.inputValue(), '7');
@@ -209,6 +231,29 @@ async function fixture(browser, width, value = snapshot()) {
       assert.equal(await page.locator('#audio-threads').inputValue(), cpus === 1 ? '1' : '32', 'Recommended threads stay within limits');
       await page.close();
     }
+    const legacySpeech = snapshot(4);
+    legacySpeech.tts.available = true;
+    legacySpeech.settings = { ...legacySpeech.settings, enabled: true, reply_with_audio: true, tts_voice: 'english' };
+    const legacy = await fixture(browser, 390, legacySpeech);
+    assert.equal(await legacy.page.locator('input[name="audio-engine"]:checked').count(), 0, 'Legacy settings remain visibly unselected');
+    assert.match(await legacy.page.locator('#audio-engine-pending').innerText(), /existing Pocket TTS engine remains active/);
+    assert.match(await legacy.page.locator('#audio-effective').innerText(), /existing Pocket TTS/);
+    await legacy.refresh();
+    assert.equal(legacy.state.posts.length, 0, 'Reading legacy settings never submits a migration');
+    await legacy.page.locator('#audio-threads').fill('2');
+    await legacy.page.locator('#audio-save').click();
+    assert.equal(legacy.state.posts.length, 0, 'An old audio reply preference still requires an explicit engine before switching');
+    await legacy.page.locator('#audio-engine-qwen3').check();
+    await legacy.page.locator('#audio-save').click();
+    await legacy.page.waitForFunction(() => !document.getElementById('audio-progress-wrap').hidden);
+    assert.equal(legacy.state.submitted.tts_engine, 'qwen3');
+    assert.equal(legacy.state.submitted.tts_voice, 'english');
+    const cleanupWarning = 'Audio settings saved. The selected audio reply engine is active, but unused model files could not all be removed.';
+    await legacy.finish(cleanupWarning);
+    assert.match(await legacy.page.locator('#audio-status').innerText(), /selected audio reply engine is active.*could not all be removed/);
+    assert.equal(await legacy.page.locator('#audio-error').isVisible(), false, 'Cleanup warning does not claim activation failed');
+    assert.match(await legacy.page.locator('#audio-effective').innerText(), /Qwen3-TTS 1\.7B quantized/);
+    await legacy.page.close();
     const unavailableSpeech = snapshot();
     unavailableSpeech.settings.enabled = true;
     unavailableSpeech.settings.reply_with_audio = true;

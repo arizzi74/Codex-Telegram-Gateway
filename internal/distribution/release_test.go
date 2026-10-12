@@ -53,6 +53,9 @@ func releaseFixture(t *testing.T) (string, string) {
 		writeTestFile(t, filepath.Join(root, source), []byte("source for "+source+"\n"))
 	}
 	for _, target := range Targets() {
+		for _, helper := range SpeechComponents() {
+			speechFixture(t, dist, helper, target)
+		}
 		writeTestFile(t, filepath.Join(dist, target.ManagerAsset()), nativeFixture(target))
 		writeTestFile(t, filepath.Join(dist, "codex-whisper-"+target.Suffix()), nativeFixture(target))
 		for _, component := range target.Components() {
@@ -121,8 +124,8 @@ func TestReleasePreservesContentsAndNativeMigrationManager(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(hashes) != 19 {
-		t.Fatalf("expected nineteen checksummed assets plus manifest, got %d", len(hashes))
+	if len(hashes) != 27 {
+		t.Fatalf("expected twenty-seven checksummed assets plus manifest, got %d", len(hashes))
 	}
 }
 

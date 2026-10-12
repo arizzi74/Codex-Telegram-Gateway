@@ -57,7 +57,7 @@ func TestAudioHTTPAuthenticationAndInputBoundary(t *testing.T) {
 	if strings.Contains(read.Body.String(), "/usr/local/") || strings.Contains(read.Body.String(), "huggingface.co") {
 		t.Fatal("audio status exposed internal paths or URLs")
 	}
-	for _, invalid := range []string{`{"model":"tiny","threads":2}`, `{"model":"base","threads":33}`, `{"model":"base","threads":0}`, `{"model":"base","threads":2,"url":"https://evil.example/model"}`, `{"model":"base","threads":2,"helper_path":"/bin/evil"}`, `{"model":"base","threads":2} {}`, `{"model":"base","threads":2,"tts_voice":"` + strings.Repeat("x", 5000) + `"}`} {
+	for _, invalid := range []string{`{"model":"tiny","threads":2}`, `{"model":"base","threads":33}`, `{"model":"base","threads":0}`, `{"model":"base","threads":2,"tts_engine":"pocket"}`, `{"model":"base","threads":2,"tts_engine":"../qwen3"}`, `{"model":"base","threads":2,"url":"https://evil.example/model"}`, `{"model":"base","threads":2,"helper_path":"/bin/evil"}`, `{"model":"base","threads":2} {}`, `{"model":"base","threads":2,"tts_voice":"` + strings.Repeat("x", 5000) + `"}`} {
 		got := webUICommandRequestForTest(server, http.MethodPost, "/tgw/api/v1/admin/audio/settings", invalid, token, passkeyTestOrigin, "csrf", "csrf")
 		if got.Code != 400 {
 			t.Fatalf("invalid audio settings accepted: %d %s", got.Code, got.Body.String())

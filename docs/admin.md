@@ -114,22 +114,50 @@ Audio settings are saved on the gateway and survive browser reloads.
 
 When the local speech engine is available, **Reply to voice notes with audio**
 adds an audio version alongside the final text reply to a voice prompt. This
-option is disabled by default; typed prompts continue to receive text. Choose Italian, English,
-or **Match the voice note (Italian or English)**. The required local speech
-models download when you apply the settings. These controls remain disabled
-when audio is disabled or setup is running. Transcription can be enabled
-independently of audio replies.
+option is disabled by default; typed prompts continue to receive text. Checking
+it shows two engine choices:
 
-Audio replies use Golem's Go implementation of Pocket TTS and a Go Ogg/Opus
-encoder. No Python, FFmpeg, hosted speech API key or subscription is required.
-Automatic language matching downloads both stock language models, using about
-430 MiB of disk in addition to the Whisper model; one language uses about
-215 MiB. The speech helper added about 321 MiB of resident RAM in the observed
-test; memory and processing time vary by machine and reply length. The typing
-indicator remains active while all reply audio is prepared. Once ready, the bot
-sends the complete final text first, then the audio. Long audio replies are split
-into voice notes without summarizing the final answer. If speech generation
-ultimately fails, the text is released on its own rather than being withheld.
+| Engine | Quality and languages | One measured sample | Model files |
+| --- | --- | --- | --- |
+| **Piper / Miro** — recommended for this CPU | Fast, clear Italian; English has an Italian accent. The Miro voice has a noncommercial license; check its terms before use. | 3.8 seconds total for 25.2 seconds of audio; 298 MiB peak RAM. | About 77 MiB. |
+| **Qwen3-TTS 1.7B quantized** | Potential for expressive multilingual speech, but slower and needs much more RAM. Technical terms and numbers can still be misread. | About 78 seconds total for 20.3 seconds of audio; 5 GiB peak RAM. | 1.38 GiB: Q4_K_M 1.7B model and Q8 decoder. |
+
+Both measurements used CPU inference with three threads on the four-core ARM
+iaiabox. They are individual samples, not averages or universal requirements.
+The Qwen measurement uses the resident release helper with its optimized CPU
+build: 2.8 seconds to initialize and 74.2 seconds to synthesize the sample. Older
+processors use the portable fallback and can take substantially longer.
+Speed and memory vary with the hardware, text, and reply length. Compare these
+estimates with the gateway resources shown in the panel.
+
+For Qwen3-TTS, an 8 GiB host with roughly 6 GiB of RAM currently available is a
+practical starting budget so the operating system, gateway, and Whisper retain
+headroom beyond the observed 5 GiB speech peak. This is a recommendation,
+not a fixed requirement: concurrent workloads and the text can change the
+memory needed. Piper / Miro leaves much more room on smaller CPU hosts.
+
+Choose **Italian**, **English**, or **Match the voice note (Italian or English)**.
+Qwen3-TTS uses the same model download for both languages. Piper / Miro always
+uses its Italian voice; the language preference is preserved for an engine
+switch. Transcription can be enabled independently of audio replies.
+
+The selected engine downloads and passes a local check before settings are
+saved. Download, validation, and warmup progress appears in the panel. A failed
+download, check, or settings save leaves the previous engine active. After a
+successful save, the gateway activates the selected engine and removes unused
+managed speech models, including the old Pocket TTS language models. Keep
+enough free disk space for both engines while switching. A cleanup failure is
+reported as a warning after the selected engine has been activated.
+
+Existing saved settings without an engine selection keep Pocket TTS active,
+including after a restart. The panel shows a pending engine selection and
+recommends Piper / Miro; select an engine and apply settings to switch explicitly.
+Loading the panel does not download, delete, or migrate anything.
+
+The typing indicator remains active while all reply audio is prepared. Once
+ready, the bot sends the complete final text first, then the audio. Long audio
+replies are split into voice notes without summarizing the final answer. If
+speech generation ultimately fails, the text is sent on its own.
 
 ## Worker enrollment
 

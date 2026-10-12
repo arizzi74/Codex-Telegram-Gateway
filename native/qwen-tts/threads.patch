@@ -1,0 +1,34 @@
+--- a/tools/mtmd/mtmd-audio.h
++++ b/tools/mtmd/mtmd-audio.h
+@@ -138,7 +138,8 @@
+ };
+ 
+ struct mtmd_audio_preprocessor_qwen3tts_spk : mtmd_audio_preprocessor {
+-    mtmd_audio_preprocessor_qwen3tts_spk(const clip_ctx * ctx) : mtmd_audio_preprocessor(ctx) {}
++    int n_threads;
++    mtmd_audio_preprocessor_qwen3tts_spk(const clip_ctx * ctx, int n_threads) : mtmd_audio_preprocessor(ctx), n_threads(n_threads) {}
+     void initialize() override;
+     bool preprocess(const float * samples, size_t n_samples, std::vector<mtmd_audio_mel> & output) const override;
+ 
+--- a/tools/mtmd/mtmd-audio.cpp
++++ b/tools/mtmd/mtmd-audio.cpp
+@@ -936,7 +936,7 @@
+     params.mel_floor        = 1e-5f;
+ 
+     mtmd_audio_mel out;
+-    bool ok = log_mel_spectrogram(padded.data(), (int) padded.size(), 4, params, cache, out);
++    bool ok = log_mel_spectrogram(padded.data(), (int) padded.size(), n_threads, params, cache, out);
+     if (!ok) {
+         return false;
+     }
+--- a/tools/mtmd/mtmd.cpp
++++ b/tools/mtmd/mtmd.cpp
+@@ -1070,7 +1070,7 @@
+                 } break;
+             case PROJECTOR_TYPE_QWEN3TTS_SPKENC:
+                 {
+-                    audio_preproc = std::make_unique<mtmd_audio_preprocessor_qwen3tts_spk>(ctx_a);
++                    audio_preproc = std::make_unique<mtmd_audio_preprocessor_qwen3tts_spk>(ctx_a, n_threads);
+                 } break;
+             case PROJECTOR_TYPE_POCKETTTS_SPKENC:
+                 {

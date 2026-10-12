@@ -65,7 +65,17 @@
           <p id="audio-threads-help" class="muted">Use one fewer available CPU core, with a minimum of 1 and a maximum of 32 threads.</p>
           <label class="audio-toggle"><input id="audio-reply" type="checkbox" aria-describedby="audio-reply-help"><span>Reply to voice notes with audio</span></label>
           <p id="audio-reply-help" class="muted">Keep showing typing while audio is prepared, then send the final text followed by audio with the same content.</p>
-          <div id="audio-voice-wrap" hidden><label for="audio-voice">Audio reply language<select id="audio-voice" aria-describedby="audio-voice-help"></select></label><p id="audio-voice-help" class="muted">The local speech models download when you apply your settings. Allow about 215 MiB per language, or 430 MiB for automatic matching.</p></div>
+          <fieldset id="audio-engine-wrap" hidden>
+            <legend>Audio reply engine</legend>
+            <p id="audio-engine-pending" class="notice" hidden></p>
+            <div class="audio-models">
+              <label class="audio-model"><input id="audio-engine-piper" type="radio" name="audio-engine" value="piper" aria-describedby="audio-piper-description"><span><strong>Piper / Miro <span class="badge good">Recommended for this CPU</span></strong><span id="audio-piper-description" class="muted">Fast, clear Italian. English has an Italian accent.</span><span class="muted">One measured sample: 3.8 s total for 25.2 s of audio · 298 MiB peak RAM · about 77 MiB of models.</span><span class="muted">The Miro voice has a noncommercial license. Check its terms before use.</span></span></label>
+              <label class="audio-model"><input id="audio-engine-qwen3" type="radio" name="audio-engine" value="qwen3" aria-describedby="audio-qwen3-description"><span><strong>Qwen3-TTS 1.7B quantized</strong><span id="audio-qwen3-description" class="muted">Potential for expressive multilingual speech. Slower and needs much more RAM; technical terms and numbers can still be misread.</span><span class="muted">One measured sample: about 78 s total for 20.3 s of audio · 5 GiB peak RAM · 1.38 GiB of models.</span><span class="muted">Q4_K_M 1.7B model with Q8 decoder. Allow about 6 GiB of available RAM; an 8 GiB or larger host is recommended.</span></span></label>
+            </div>
+            <p id="audio-engine-measurements" class="muted">These are individual measurements, not averages: CPU inference with 3 threads on the 4-core ARM iaiabox. Speed and RAM vary with hardware, reply length and text; these are estimates for comparison, not universal requirements. Gateway resources are shown above.</p>
+            <p class="muted">Applying downloads and checks the selected engine before changing active settings. After a successful save, unused managed speech models are removed. Keep enough free disk space for both engines during a switch.</p>
+          </fieldset>
+          <div id="audio-voice-wrap" hidden><label for="audio-voice">Audio reply language<select id="audio-voice" aria-describedby="audio-voice-help"></select></label><p id="audio-voice-help" class="muted"></p></div>
         </fieldset>
         <div id="audio-progress-wrap" hidden><progress id="audio-progress" max="100" aria-label="Audio model download"></progress><p id="audio-progress-text" class="muted"></p></div>
         <p id="audio-effective" class="muted"></p>
