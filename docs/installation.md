@@ -589,13 +589,15 @@ timer only if it was active before the procedure:
     'codex-worker-request-update-*.service' codex-worker.service
   # Catch an updater the old worker recreated while the stop jobs ran.
   systemctl --user stop 'codex-worker-request-update-*.service'
-  "$HOME/.local/bin/codex-telegramgw" update worker --version v0.5.59
+  "$HOME/.local/bin/codex-telegramgw" update worker
 )
 ```
 
 The updater starts the new worker and checks readiness. The command also performs
-normal daily Codex runtime maintenance; `--version` selects the gateway-project
-release, not the Codex runtime version. There is no force-update flag.
+normal daily Codex runtime maintenance. With no `--version`, it installs the
+latest stable gateway-project release. If needed, `--version vMAJOR.MINOR.PATCH`
+selects a gateway-project release, not the Codex runtime version. There is no
+force-update flag.
 Keep the durable update request files: after restart, the worker resumes queued
 requests and reports that it is up to date once it confirms the installed release.
 Do not run another manual updater concurrently. If the command fails, inspect its
