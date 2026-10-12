@@ -1,6 +1,7 @@
 package codexadapter
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -436,7 +437,10 @@ type Thread struct {
 	UpdatedAt      int64
 	Ephemeral      bool
 	ActiveTurnID   string
-	Raw            json.RawMessage
+	// LatestTurn is populated only by ReadThreadState's bounded turn read.
+	LatestTurn *ThreadTurnState
+	SubAgent   *SubAgentIdentity
+	Raw        json.RawMessage
 }
 
 // UserSession reports whether a thread belongs in the user-facing inventory.
@@ -490,6 +494,19 @@ func decodeThread(raw json.RawMessage) (Thread, error) {
 		return Thread{}, err
 	}
 	thread := Thread{ID: wire.ID, SessionID: wire.SessionID, ParentThreadID: wire.ParentThreadID, Source: threadSourceName(wire.Source), ThreadSource: wire.ThreadSource, Name: wire.Name, Preview: wire.Preview, CWD: wire.CWD, Model: wire.Model, ModelProvider: wire.ModelProvider, GitBranch: wire.GitInfo.Branch, Status: statusName(wire.Status), CreatedAt: wire.CreatedAt, UpdatedAt: wire.UpdatedAt, Ephemeral: wire.Ephemeral, Raw: cloneRaw(raw)}
+	// Ambiguous metadata or lifecycle fields must not supply child-recovery
+	// evidence. User-session history does not need this additional projection.
+	if thread.Source == "subAgent" {
+		_, unique := uniqueJSONObject(raw)
+		status := bytes.TrimSpace(wire.Status)
+		if len(status) > 0 && status[0] == '{' {
+			_, statusUnique := uniqueJSONObject(wire.Status)
+			unique = unique && statusUnique
+		}
+		if unique {
+			thread.SubAgent = decodeSubAgentIdentity(wire.Source)
+		}
+	}
 	if thread.ParentThreadID == "" {
 		// Older app-server versions retain spawned-thread ancestry only in
 		// SessionSource, before the top-level parentThreadId projection.

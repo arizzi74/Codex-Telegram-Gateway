@@ -205,6 +205,8 @@ func (a *Agent) prepareUpdate(ctx context.Context, ttl time.Duration) (UpdateLea
 	held := true
 	var proxies []*attachmentProxy
 	nativeQueues := make(map[string][]string)
+	recoveryCandidates := make(map[string]map[string]string)
+	proxyRuntimes := make(map[*attachmentProxy]string)
 	defer func() {
 		if held {
 			for _, proxy := range proxies {
@@ -225,19 +227,23 @@ func (a *Agent) prepareUpdate(ctx context.Context, ttl time.Duration) (UpdateLea
 				a.manager.mu.RUnlock()
 				return UpdateLease{}, errors.New("worker update: runtime attachment admission is not managed")
 			}
-			if err := proxy.pause(); err != nil {
+			candidates, err := proxy.pauseForTerminalSubagentRecovery()
+			if err != nil {
 				a.manager.mu.RUnlock()
 				a.log.Info("worker update blocked by native activity", "reason", err.Error())
 				return UpdateLease{}, err
 			}
 			proxies = append(proxies, proxy)
+			proxyRuntimes[proxy] = runtime.runtime.ID
+			recoveryCandidates[runtime.runtime.ID] = candidates
 			nativeQueues[runtime.runtime.ID] = proxy.queuesToVerify()
 		}
 	}
 	a.manager.mu.RUnlock()
 	// Ask live app servers as well as worker actors. Native CLI turns may belong
 	// to loaded threads outside the gateway's workspace discovery allowlist.
-	if err := a.manager.verifyUpdateIdleWithQueues(ctx, nativeQueues); err != nil {
+	recoveryProofs, err := a.manager.verifyUpdateIdleWithRecovery(ctx, nativeQueues, recoveryCandidates)
+	if err != nil {
 		return UpdateLease{}, err
 	}
 	a.mu.RLock()
@@ -266,7 +272,7 @@ func (a *Agent) prepareUpdate(ctx context.Context, ttl time.Duration) (UpdateLea
 		return UpdateLease{}, err
 	}
 	for _, proxy := range proxies {
-		if err := proxy.confirmIdle(); err != nil {
+		if err := proxy.confirmIdleWithTerminalSubagents(recoveryProofs[proxyRuntimes[proxy]]); err != nil {
 			a.log.Info("worker update idle verification postponed", "reason", err.Error())
 			return UpdateLease{}, err
 		}
@@ -393,70 +399,37 @@ func runtimeRPCUpdateError(status codexadapter.UpdateSafetyStatus) error {
 }
 
 func (m *RuntimeManager) verifyUpdateIdleWithQueues(ctx context.Context, nativeQueues map[string][]string) error {
+	_, err := m.verifyUpdateIdleWithRecovery(ctx, nativeQueues, nil)
+	return err
+}
+
+// Failed internal subagents remain loaded in Codex with a latched systemError.
+// Verify their terminal turn and empty queues behind the same admission fence
+// as ordinary idle checks. The update restart retires them without archiving or
+// deleting their history. Accepted work and uncertain RPC outcomes still block.
+func (m *RuntimeManager) verifyUpdateIdleWithRecovery(ctx context.Context, nativeQueues map[string][]string, candidates map[string]map[string]string) (map[string]map[string]string, error) {
 	m.mu.RLock()
 	runtimes := make([]*managedRuntime, 0, len(m.runtimes))
 	for _, runtime := range m.runtimes {
 		runtimes = append(runtimes, runtime)
 	}
 	m.mu.RUnlock()
+	proofs := make(map[string]map[string]string)
 	for _, runtime := range runtimes {
 		if runtime.client == nil {
 			continue
 		}
 		if err := runtimeRPCUpdateError(runtime.client.UpdateSafety()); err != nil {
-			return err
+			return nil, err
 		}
-		queues := nativeQueues[runtime.runtime.ID]
-		if len(queues) > discoveryLimit {
-			return errors.New("worker update: too many native queues to verify")
+		verified, err := verifyRuntimeUpdateIdle(ctx, runtime.client, nativeQueues[runtime.runtime.ID], candidates[runtime.runtime.ID])
+		if err != nil {
+			return nil, err
 		}
-		// Check queued work before thread state: consuming a queue entry can
-		// start a turn. Include observed queues outside workspace discovery and
-		// retain them across detached native connections until verified empty.
-		for _, threadID := range queues {
-			if err := runtime.client.VerifyThreadQueueIdle(ctx, threadID); err != nil {
-				return errors.New("worker update: native CLI queued work is pending or cannot be verified")
-			}
-		}
-		for _, threadID := range queues {
-			thread, err := runtime.client.ReadThreadState(ctx, threadID)
-			if err != nil || thread.ActiveTurnID != "" || (thread.Status != "idle" && thread.Status != "notLoaded" && thread.Status != "not_loaded") {
-				return errors.New("worker update: a native CLI thread is active or its idle state cannot be verified")
-			}
-		}
-		cursor := ""
-		seen := map[string]bool{}
-		count := 0
-		for {
-			page, err := runtime.client.LoadedThreads(ctx, cursor, discoveryPageSize)
-			if err != nil {
-				return fmt.Errorf("worker update: cannot verify loaded threads: %w", err)
-			}
-			for _, entry := range page.Threads {
-				count++
-				if count > discoveryLimit {
-					return errors.New("worker update: too many loaded threads to verify")
-				}
-				thread, err := runtime.client.ReadThreadState(ctx, entry.ID)
-				if err != nil {
-					return fmt.Errorf("worker update: cannot verify native thread: %w", err)
-				}
-				if thread.ActiveTurnID != "" || (thread.Status != "idle" && thread.Status != "notLoaded" && thread.Status != "not_loaded") {
-					return errors.New("worker update: a native CLI thread is active or its idle state cannot be verified")
-				}
-			}
-			if page.NextCursor == "" {
-				break
-			}
-			if seen[page.NextCursor] {
-				return errors.New("worker update: repeated loaded-thread cursor")
-			}
-			seen[page.NextCursor] = true
-			cursor = page.NextCursor
-		}
+		proofs[runtime.runtime.ID] = verified
 		if err := runtimeRPCUpdateError(runtime.client.UpdateSafety()); err != nil {
-			return err
+			return nil, err
 		}
 	}
-	return nil
+	return proofs, nil
 }

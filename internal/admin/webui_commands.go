@@ -179,7 +179,7 @@ func webUIWorkerBinaryUpdateText(worker registry.WorkerUpdateStatus) string {
 	case "already_queued":
 		return "already queued"
 	case "pending":
-		return "queued; waiting for the worker to finish its update check"
+		return "queued; waiting for the worker to be idle and finish updating"
 	case "completed":
 		return "updated and restarted · " + worker.Version
 	case "up_to_date":

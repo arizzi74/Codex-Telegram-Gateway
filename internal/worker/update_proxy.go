@@ -378,58 +378,125 @@ func (p *attachmentProxy) idleLocked() error {
 // settledLocked permits only recoverable observation gaps. Accepted work with
 // unknown outcomes cannot be cleared by a snapshot of currently idle threads.
 func (p *attachmentProxy) settledLocked() error {
+	_, err := p.settledCandidatesLocked(false)
+	return err
+}
+
+// Only snapshot/status markers associated with an observed systemError may be
+// deferred for terminal-subagent verification. They remain active until exact
+// completion evidence is reconciled; all accepted work remains a hard blocker.
+func (p *attachmentProxy) settledCandidatesLocked(terminalSubagents bool) (map[string]string, error) {
 	if p.closed {
-		return errors.New("worker update: attachment proxy is closed")
+		return nil, errors.New("worker update: attachment proxy is closed")
 	}
 	if p.uncertain {
 		if p.uncertaintyReason != "" {
-			return fmt.Errorf("worker update: native CLI activity could not be verified: %s", p.uncertaintyReason)
+			return nil, fmt.Errorf("worker update: native CLI activity could not be verified: %s", p.uncertaintyReason)
 		}
-		return errors.New("worker update: native CLI activity could not be verified")
+		return nil, errors.New("worker update: native CLI activity could not be verified")
+	}
+	var candidates map[string]string
+	if terminalSubagents {
+		candidates = make(map[string]string)
 	}
 	for session := range p.sessions {
 		if session.initializing {
-			return errors.New("worker update: native CLI connection is still initializing")
+			return nil, errors.New("worker update: native CLI connection is still initializing")
 		}
 		if session.forwarding > 0 {
-			return errors.New("worker update: native CLI requests are still in flight")
+			return nil, errors.New("worker update: native CLI requests are still in flight")
 		}
-		if err := session.activity.settledError(); err != nil {
-			if session.activity.uncertain && session.activity.uncertaintyReason != "" {
-				return fmt.Errorf("%w: %s", err, session.activity.uncertaintyReason)
+		err := session.activity.settledError()
+		if terminalSubagents {
+			var observed map[string]string
+			observed, err = session.activity.terminalSubagentCandidates()
+			if err == nil {
+				for thread, turn := range observed {
+					if other := candidates[thread]; other != "" && turn != "" && other != turn {
+						return nil, errors.New("worker update: native CLI snapshots disagree on the active turn")
+					}
+					if _, exists := candidates[thread]; !exists || turn != "" {
+						candidates[thread] = turn
+					}
+				}
 			}
-			return err
+		}
+		if err != nil {
+			if session.activity.uncertain && session.activity.uncertaintyReason != "" {
+				return nil, fmt.Errorf("%w: %s", err, session.activity.uncertaintyReason)
+			}
+			return nil, err
 		}
 	}
-	return nil
+	return candidates, nil
 }
 
 func (p *attachmentProxy) pause() error {
+	_, err := p.pauseForVerification(false)
+	return err
+}
+
+// pauseForTerminalSubagentRecovery admits only a fenced investigation. The
+// returned thread -> snapshot turn identities must all receive independent
+// terminal-subagent proof before a restart lease can be prepared.
+func (p *attachmentProxy) pauseForTerminalSubagentRecovery() (map[string]string, error) {
+	return p.pauseForVerification(true)
+}
+
+func (p *attachmentProxy) pauseForVerification(terminalSubagents bool) (map[string]string, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if err := p.settledLocked(); err != nil {
-		return err
+	candidates, err := p.settledCandidatesLocked(terminalSubagents)
+	if err != nil {
+		return nil, err
 	}
 	if !p.paused {
 		p.resumed = make(chan struct{})
 		p.paused = true
 		p.pausedEpoch = p.observationEpoch
 	}
-	return nil
+	return candidates, nil
 }
 
 // confirmIdle is called only after live runtime, actor, and durable state checks
 // succeed behind the admission fence. A notification arriving during those
 // checks invalidates that evidence; retry instead of erasing new activity.
 func (p *attachmentProxy) confirmIdle() error {
+	return p.confirmIdleWithProofs(nil, false)
+}
+
+// Proofs identify the latest completed failed turn of an independently
+// verified, quiescent subagent with an empty queue. An idle snapshot or a mere
+// unsubscribe acknowledgement is not proof. Validation is atomic across all
+// sessions, and any backend observation after pausing invalidates every proof.
+func (p *attachmentProxy) confirmIdleWithTerminalSubagents(proofs map[string]string) error {
+	return p.confirmIdleWithProofs(proofs, true)
+}
+
+func (p *attachmentProxy) confirmIdleWithProofs(proofs map[string]string, terminalSubagents bool) error {
 	p.mu.Lock()
 	if !p.paused || p.pausedEpoch != p.observationEpoch {
 		p.mu.Unlock()
 		return errors.New("worker update: native CLI activity changed during idle verification; retry when settled")
 	}
-	if err := p.settledLocked(); err != nil {
+	candidates, err := p.settledCandidatesLocked(terminalSubagents)
+	if err != nil {
 		p.mu.Unlock()
 		return err
+	}
+	for thread, turn := range candidates {
+		if proof := proofs[thread]; proof == "" || (turn != "" && proof != turn) {
+			p.mu.Unlock()
+			return errors.New("worker update: native terminal subagent completion could not be verified")
+		}
+	}
+	if terminalSubagents {
+		for session := range p.sessions {
+			observed, _ := session.activity.terminalSubagentCandidates()
+			for thread := range observed {
+				session.activity.reconcileTerminalSubagent(thread, proofs[thread])
+			}
+		}
 	}
 	p.observationGap = ""
 	p.queueThreads = nil
@@ -437,6 +504,7 @@ func (p *attachmentProxy) confirmIdle() error {
 	for session := range p.sessions {
 		session.activity.observationGap = ""
 		session.activity.queueThreads = nil
+		session.activity.systemErrors = nil
 		if session.frontGone {
 			detached = append(detached, session)
 		}

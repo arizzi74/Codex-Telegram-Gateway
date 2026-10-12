@@ -38,6 +38,7 @@ type Server struct {
 	unavailable   map[string]bool
 	rpcErrors     map[string]rpcError
 	methodResults map[string]json.RawMessage
+	threadResults map[string]map[string]json.RawMessage
 	delays        map[string]time.Duration
 }
 
@@ -104,6 +105,26 @@ func (s *Server) SetMethodResult(method string, result any) error {
 		s.methodResults = map[string]json.RawMessage{}
 	}
 	s.methodResults[method] = encoded
+	return nil
+}
+
+// SetThreadMethodResult overrides one thread-scoped RPC response. It allows
+// family recovery tests to keep the failed child idle while a sibling or
+// descendant owns queued input or a background terminal.
+func (s *Server) SetThreadMethodResult(method, threadID string, result any) error {
+	encoded, err := json.Marshal(result)
+	if err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.threadResults == nil {
+		s.threadResults = map[string]map[string]json.RawMessage{}
+	}
+	if s.threadResults[method] == nil {
+		s.threadResults[method] = map[string]json.RawMessage{}
+	}
+	s.threadResults[method][threadID] = encoded
 	return nil
 }
 
@@ -183,6 +204,10 @@ func (s *Server) serve() {
 			s.mu.Unlock()
 			continue
 		}
+		var threadParams struct {
+			ThreadID string `json:"threadId"`
+		}
+		_ = json.Unmarshal(request.Params, &threadParams)
 		s.mu.Lock()
 		s.calls = append(s.calls, Call{request.Method, append(json.RawMessage(nil), request.Params...)})
 		s.next++
@@ -190,6 +215,9 @@ func (s *Server) serve() {
 		unavailable := s.unavailable[request.Method]
 		rpcFailure, hasRPCFailure := s.rpcErrors[request.Method]
 		methodResult, hasMethodResult := s.methodResults[request.Method]
+		if result, exists := s.threadResults[request.Method][threadParams.ThreadID]; exists {
+			methodResult, hasMethodResult = result, true
+		}
 		delay := s.delays[request.Method]
 		s.mu.Unlock()
 		// JSON-RPC notifications such as initialized have no response ID.

@@ -498,6 +498,12 @@ func workerPrepareFailure(output []byte) string {
 		return "worker update deferred: native CLI approvals or input are pending"
 	case "worker update: native CLI queued work is pending or cannot be verified":
 		return "worker update deferred: native CLI queued work is pending or cannot be verified"
+	case "worker update: background terminals are active or cannot be verified":
+		return "worker update deferred: background terminals are active or cannot be verified"
+	case "worker update: failed subagent ancestry cannot be verified", "worker update: failed subagent turn does not match observed native activity", "worker update: native terminal subagent completion could not be verified":
+		return "worker update deferred: failed subagent completion cannot be verified"
+	case "worker update: failed subagent changed during idle verification", "worker update: native thread changed during failed subagent recovery":
+		return "worker update deferred: activity changed during failed subagent recovery; retrying at the next check"
 	case "worker update: native CLI activity could not be verified":
 		return "worker update deferred: native CLI activity could not be verified"
 	case "worker update: native CLI activity changed during idle verification; retry when settled":
@@ -520,6 +526,8 @@ func workerPrepareFailure(output []byte) string {
 		return "worker update deferred: loaded threads could not be verified"
 	case "worker update: too many native queues to verify":
 		return "worker update deferred: too many native queues to verify"
+	case "worker update: too many native queues or failed subagents to verify", "worker update: too many native threads to verify":
+		return "worker update deferred: too many native threads or queues to verify"
 	case "worker update coordination unavailable; the running worker must support update prepare":
 		return "worker update deferred: the running worker does not provide update coordination"
 	default:

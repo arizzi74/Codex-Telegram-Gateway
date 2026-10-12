@@ -529,6 +529,16 @@ This snapshot describes the RPC guard only. It is not an update reservation or
 proof that active turns, native clients, and durable work are idle; the live
 update preparation still checks those separately.
 
+A stopped internal subagent can remain loaded with Codex's `systemError` status.
+The worker permits an update only after confirming that it is a spawned child,
+its latest turn failed with valid completion evidence, its queue is empty, and
+its parent and every loaded descendant are idle. Native activity is fenced and
+checked again before granting the restart lease. Active turns, pending questions
+or approvals, background work, and unconfirmed requests still block the update.
+The update restart retires the failed child; its saved session history is not
+archived or deleted. Older running workers need the one-time controlled upgrade
+below before they can apply this recovery.
+
 The worker publishes a stable private attachment socket across restarts. Compatible
 Codex TUIs can use their native reconnect/resume handling at that address; the
 gateway never replays prompts or RPCs. If the terminal cannot reconnect, attach

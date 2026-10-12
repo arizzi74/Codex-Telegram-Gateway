@@ -21,9 +21,11 @@ type nativeActivity struct {
 	approvals         map[string]*nativeApproval
 	resolved          map[string]struct{}
 	turns             map[nativeTurn]struct{}
+	snapshotTurns     map[nativeTurn]struct{}
 	completed         map[nativeTurn]struct{}
 	compact           map[string]struct{}
 	threads           map[string]struct{}
+	systemErrors      map[string]struct{}
 	processes         map[string]struct{}
 	exited            map[string]struct{}
 	hooks             map[nativeTurn]struct{}
@@ -88,6 +90,52 @@ func (a *nativeActivity) acceptedWorkError() error {
 	default:
 		return nil
 	}
+}
+
+// terminalSubagentCandidates permits a fenced investigation of observations
+// made by snapshots. Explicitly accepted work still needs its normal lifecycle
+// completion; even a terminal thread snapshot cannot settle requests, approvals,
+// processes, hooks, or compactions. The caller must independently prove that
+// every candidate is a quiescent subagent with a matching completed failed turn.
+func (a *nativeActivity) terminalSubagentCandidates() (map[string]string, error) {
+	if a.uncertain || len(a.requests) > 0 || len(a.approvals) > 0 || len(a.compact) > 0 || len(a.processes) > 0 || len(a.hooks) > 0 {
+		return nil, a.settledError()
+	}
+	candidates := make(map[string]string, len(a.threads)+len(a.snapshotTurns))
+	for thread := range a.threads {
+		if _, failed := a.systemErrors[thread]; !failed || thread == "" {
+			return nil, a.acceptedWorkError()
+		}
+		candidates[thread] = ""
+	}
+	for turn := range a.turns {
+		if _, snapshot := a.snapshotTurns[turn]; !snapshot || turn.thread == "" || turn.turn == "" {
+			return nil, a.acceptedWorkError()
+		}
+		if _, failed := a.systemErrors[turn.thread]; !failed {
+			return nil, a.acceptedWorkError()
+		}
+		if other := candidates[turn.thread]; other != "" && other != turn.turn {
+			return nil, a.acceptedWorkError()
+		}
+		candidates[turn.thread] = turn.turn
+	}
+	return candidates, nil
+}
+
+// reconcileTerminalSubagent consumes only independently verified completion
+// evidence. Candidate validation and the proxy observation epoch must be checked
+// for every session before this mutates any activity.
+func (a *nativeActivity) reconcileTerminalSubagent(thread, turn string) {
+	delete(a.threads, thread)
+	delete(a.systemErrors, thread)
+	key := nativeTurn{thread, turn}
+	delete(a.turns, key)
+	delete(a.snapshotTurns, key)
+	if a.completed == nil {
+		a.completed = make(map[nativeTurn]struct{})
+	}
+	a.completed[key] = struct{}{}
 }
 
 func (a *nativeActivity) queueChanged(thread string) {
@@ -470,10 +518,14 @@ func (a *nativeActivity) startTurn(key nativeTurn) {
 		a.turns = make(map[nativeTurn]struct{})
 	}
 	a.turns[key] = struct{}{}
+	// A lifecycle event or accepted RPC upgrades a snapshot observation to
+	// confirmed work. A later snapshot must never downgrade that protection.
+	delete(a.snapshotTurns, key)
 }
 
 func (a *nativeActivity) finishTurn(key nativeTurn) {
 	delete(a.turns, key)
+	delete(a.snapshotTurns, key)
 	for id, approval := range a.approvals {
 		if approval.parent.thread != "" && approval.parent.turn != "" && approval.parent == key {
 			a.resolveApproval(id)
@@ -527,7 +579,13 @@ func (a *nativeActivity) threadSnapshot(raw json.RawMessage) {
 			}
 			if status == "inProgress" {
 				if _, finished := a.completed[key]; !finished {
-					a.startTurn(key)
+					if _, tracked := a.turns[key]; !tracked {
+						a.startTurn(key)
+						if a.snapshotTurns == nil {
+							a.snapshotTurns = make(map[nativeTurn]struct{})
+						}
+						a.snapshotTurns[key] = struct{}{}
+					}
 				}
 			}
 		}
@@ -550,6 +608,7 @@ func (a *nativeActivity) threadStatus(thread string, raw json.RawMessage) {
 	}
 	switch status {
 	case "active":
+		delete(a.systemErrors, thread)
 		if a.threads == nil {
 			a.threads = make(map[string]struct{})
 		}
@@ -558,12 +617,17 @@ func (a *nativeActivity) threadStatus(thread string, raw json.RawMessage) {
 		// An idle snapshot never cancels an accepted turn that has not yet
 		// published its terminal notification, or pending compaction work.
 		delete(a.threads, thread)
+		delete(a.systemErrors, thread)
 	case "systemError":
-		// Codex could not establish this thread's state. A subsequent idle
-		// notification alone is insufficient: update preparation must obtain a
-		// fresh snapshot after fencing native requests. Existing accepted turns,
-		// approvals, and active markers remain intact until explicitly settled.
+		// A latched error may outlive a failed turn, but this status alone
+		// cannot prove safe retirement. Preparation needs fresh verification
+		// behind the admission fence. Accepted turns, approvals, and active
+		// markers remain intact until explicitly settled.
 		a.requireVerification("native thread reported systemError status")
+		if a.systemErrors == nil {
+			a.systemErrors = make(map[string]struct{})
+		}
+		a.systemErrors[thread] = struct{}{}
 	default:
 		a.markUncertain("unrecognized native thread status")
 	}

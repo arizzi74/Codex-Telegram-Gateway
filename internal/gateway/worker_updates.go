@@ -91,7 +91,7 @@ func (s *Sender) renderWorkerUpdates(response registry.AcceptResult) string {
 		case "already_queued":
 			status = "Already queued"
 		case "pending":
-			status = "Queued; waiting for the worker to finish its update check"
+			status = "Queued; waiting for the worker to be idle and finish updating"
 		case "completed":
 			status = "Updated and restarted · " + worker.Version
 		case "up_to_date":

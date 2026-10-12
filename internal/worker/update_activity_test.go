@@ -309,6 +309,46 @@ func TestNativeActivityUnknownAsyncAcknowledgementsStayUncertain(t *testing.T) {
 	}
 }
 
+func TestNativeActivityTerminalSubagentCandidatesPreserveAcceptedTurns(t *testing.T) {
+	for _, accepted := range []string{"notification", "RPC reply", "before snapshot"} {
+		t.Run(accepted, func(t *testing.T) {
+			var activity nativeActivity
+			snapshot := []byte(`{"method":"thread/started","params":{"thread":{"id":"child","status":{"type":"active"},"turns":[{"id":"turn","status":"inProgress"}]}}}`)
+			if accepted == "before snapshot" {
+				activity.serverMessage(nativeTurnMessage("turn/started", "child", "turn"))
+			}
+			activity.serverMessage(snapshot)
+			activity.serverMessage([]byte(`{"method":"thread/status/changed","params":{"threadId":"child","status":{"type":"systemError"}}}`))
+			if accepted != "before snapshot" {
+				candidates, err := activity.terminalSubagentCandidates()
+				if err != nil || candidates["child"] != "turn" {
+					t.Fatalf("snapshot should permit investigation: %v, %v", candidates, err)
+				}
+			}
+			if accepted == "RPC reply" {
+				activity.clientMessage([]byte(`{"id":1,"method":"turn/start","params":{"threadId":"child"}}`))
+				activity.serverMessage([]byte(`{"id":1,"result":{"turn":{"id":"turn","status":"inProgress"}}}`))
+			} else {
+				activity.serverMessage(nativeTurnMessage("turn/started", "child", "turn"))
+			}
+			activity.serverMessage(snapshot)
+			activity.serverMessage([]byte(`{"method":"thread/status/changed","params":{"threadId":"child","status":{"type":"systemError"}}}`))
+			if _, err := activity.terminalSubagentCandidates(); err == nil {
+				t.Fatal("a later snapshot downgraded accepted work to a recoverable observation")
+			}
+		})
+	}
+}
+
+func TestNativeActivityTerminalSubagentCandidatesRejectConflictingTurns(t *testing.T) {
+	var activity nativeActivity
+	activity.serverMessage([]byte(`{"method":"thread/started","params":{"thread":{"id":"child","status":{"type":"active"},"turns":[{"id":"old","status":"inProgress"},{"id":"new","status":"inProgress"}]}}}`))
+	activity.serverMessage([]byte(`{"method":"thread/status/changed","params":{"threadId":"child","status":{"type":"systemError"}}}`))
+	if _, err := activity.terminalSubagentCandidates(); err == nil {
+		t.Fatal("conflicting snapshot turns must remain blocked")
+	}
+}
+
 func assertNativeIdle(t *testing.T, activity *nativeActivity) {
 	t.Helper()
 	if err := activity.idleError(); err != nil || !activity.idle() {
