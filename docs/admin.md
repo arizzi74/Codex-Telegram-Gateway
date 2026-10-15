@@ -111,6 +111,36 @@ separate administrator or grant another Telegram user access. Chat bindings
 and notifications belong to the bot used to create them, so the same chat can
 use different bot conversations independently.
 
+Open each bot in Telegram, send `/start`, and use `/tgsessions` in that bot to
+choose its session. Changing one bot's selection does not change another's.
+If two bots select the same session, both receive its output; select different
+sessions to keep their conversations separate. `/tgmultisession` is also
+configured separately for each bot chat and is off by default.
+
+Questions and approvals are shared across the bot chats you have opened,
+including chats with another session selected or no selection. Answer from any
+copy without changing either bot's selection. Once a question is answered,
+every delivered copy is edited to show **Question:** and **Answer:** and its
+buttons are removed. For a request containing several questions, each next
+question is sent to all those bot chats too. Disabled bots and disallowed chats
+do not receive these messages.
+
+Each bot has an **Inherit selected session name** checkbox, off by default.
+When enabled, its Telegram display name follows the session selected in the
+gateway owner's private chat, for example **EnkiCodex · CodeNow**. Session
+switches and session renames update the name automatically. Disconnecting the
+session or clearing the checkbox restores the original display name.
+The `@username` and gateway routing identity stay unchanged.
+
+Telegram display names are global to a bot, so selections in groups and topics
+do not rename it. Names are shortened to Telegram's 64-character limit. Updates
+run in the background and retry if Telegram is unavailable or limits requests;
+the console shows pending updates or a name-sync warning. Disabled bots do not
+update their profiles until enabled again. Telegram clients may cache the name.
+This changes the default name; an existing language-specific name configured
+in Telegram can take precedence for users of that language.
+See Telegram's [`setMyName` documentation](https://core.telegram.org/bots/api#setmyname).
+
 Choose **Connect existing bot**, obtain its token from `@BotFather`, and submit
 it in the hidden token field. The gateway verifies the bot identity and
 registers its webhook and command menu. If another application already owns
@@ -145,9 +175,21 @@ new request, or use **Connect existing bot** with the resulting bot's token.
 
 **Disable** stops a bot's gateway access while retaining its configuration and
 local bindings. **Enable** restores it. For an additional bot, **Replace token**
-accepts a replacement token for the same Telegram identity, and **Remove**
-requires confirmation before deleting its local bot records, chat bindings and
-notification subscriptions. Removal keeps worker sessions and project files.
+accepts a replacement token for the same Telegram identity. **Remove**
+opens a dialog with the bot's username and two separate actions:
+
+- **Remove from gateway** confirms deletion of its local bot records, chat
+  bindings and notification subscriptions. Worker sessions and project files
+  remain on disk.
+- **Delete in BotFather** opens Telegram's bot-deletion flow. Select the named
+  bot and confirm there to permanently delete the Telegram bot. The link and
+  username remain available after removing the gateway connection.
+
+The gateway cannot complete Telegram account deletion using a bot token.
+Telegram documents the owner-confirmed
+[BotFather deletion link](https://core.telegram.org/api/bots/managed-bots).
+Removing a gateway connection alone does not delete the bot from Telegram;
+cancelling in BotFather leaves the Telegram bot intact.
 The primary bot can be enabled or disabled; its token and removal remain
 managed by the existing gateway configuration.
 

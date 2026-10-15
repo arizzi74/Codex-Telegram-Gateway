@@ -23,22 +23,27 @@ import (
 )
 
 type managedBotFake struct {
-	mu            sync.Mutex
-	server        *httptest.Server
-	identities    map[string]TelegramUser
-	refreshed     map[string]TelegramUser
-	webhooks      map[string]string
-	managedTokens map[int64]string
-	calls         map[string]int
-	secrets       map[string]string
-	drops         map[string]bool
-	failSet       bool
-	failRefresh   bool
+	mu                sync.Mutex
+	server            *httptest.Server
+	identities        map[string]TelegramUser
+	refreshed         map[string]TelegramUser
+	webhooks          map[string]string
+	managedTokens     map[int64]string
+	calls             map[string]int
+	secrets           map[string]string
+	drops             map[string]bool
+	failSet           bool
+	failRefresh       bool
+	defaultNames      map[string]string
+	nameUpdates       []string
+	nameErrorCode     int
+	nameRetryAfter    int
+	nameApplyThenFail bool
 }
 
 func newManagedBotFake(t *testing.T) *managedBotFake {
 	t.Helper()
-	f := &managedBotFake{identities: map[string]TelegramUser{}, refreshed: map[string]TelegramUser{}, webhooks: map[string]string{}, managedTokens: map[int64]string{}, calls: map[string]int{}, secrets: map[string]string{}, drops: map[string]bool{}}
+	f := &managedBotFake{identities: map[string]TelegramUser{}, refreshed: map[string]TelegramUser{}, webhooks: map[string]string{}, managedTokens: map[int64]string{}, calls: map[string]int{}, secrets: map[string]string{}, drops: map[string]bool{}, defaultNames: map[string]string{}}
 	f.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
 		defer f.mu.Unlock()
@@ -55,10 +60,24 @@ func newManagedBotFake(t *testing.T) *managedBotFake {
 			ChatID  int64    `json:"chat_id"`
 			Allowed []string `json:"allowed_updates"`
 			Drop    bool     `json:"drop_pending_updates"`
+			Name    string   `json:"name"`
 		}
 		_ = json.NewDecoder(r.Body).Decode(&input)
 		var result any = true
 		switch method {
+		case "getMyName":
+			result = map[string]string{"name": f.defaultNames[token]}
+		case "setMyName":
+			if f.nameErrorCode != 0 && !f.nameApplyThenFail {
+				_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error_code": f.nameErrorCode, "description": "name failure " + token + " " + f.secrets[token], "parameters": map[string]any{"retry_after": f.nameRetryAfter}})
+				return
+			}
+			f.defaultNames[token] = input.Name
+			f.nameUpdates = append(f.nameUpdates, input.Name)
+			if f.nameApplyThenFail {
+				_, _ = w.Write([]byte(`{"ok":`))
+				return
+			}
 		case "getChat":
 			identity, exists := f.identities[token]
 			if f.failRefresh || !exists || input.ChatID != identity.ID {
@@ -105,6 +124,7 @@ func (f *managedBotFake) add(id int64, username string, manager bool) string {
 	token := botTestToken(id)
 	f.mu.Lock()
 	f.identities[token] = TelegramUser{ID: id, Username: username, IsBot: true, FirstName: "Test bot", CanManageBots: manager}
+	f.defaultNames[token] = "Test bot"
 	f.managedTokens[id] = token
 	f.mu.Unlock()
 	return token

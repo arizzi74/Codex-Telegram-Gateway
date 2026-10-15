@@ -21,6 +21,45 @@ type QuestionAnswerEdit struct {
 	Answer    string `json:"answer"`
 }
 
+// A Telegram partial answer advances the shared request without another worker
+// event. Notify every remembered destination; AcceptTelegram queues the origin's
+// copy itself. Native partial answers use the worker's reduced request event.
+func enqueuePendingQuestionCopies(ctx context.Context, tx *dbTx, origin IncomingUpdate, result AcceptResult) error {
+	rows, err := tx.Query(ctx, `WITH targets AS (
+        SELECT bot_id,chat_id,message_thread_id FROM telegram_chat_modes
+        UNION SELECT bot_id,chat_id,message_thread_id FROM telegram_bindings
+    ) SELECT bot_id,chat_id,message_thread_id FROM targets
+      WHERE NOT (bot_id=$1 AND chat_id=$2 AND message_thread_id=$3)
+        AND NOT EXISTS(SELECT 1 FROM telegram_bots bot WHERE bot.bot_id=targets.bot_id AND bot.enabled=0)
+        AND NOT EXISTS(SELECT 1 FROM telegram_bot_retirements retired WHERE retired.bot_id=targets.bot_id)
+        AND `+telegramChatAllowedSQL("targets.bot_id", "targets.chat_id"), origin.BotID, origin.ChatID, origin.TopicID)
+	if err != nil {
+		return fmt.Errorf("registry: find pending question destinations: %w", err)
+	}
+	var targets []IncomingUpdate
+	for rows.Next() {
+		var target IncomingUpdate
+		if err := rows.Scan(&target.BotID, &target.ChatID, &target.TopicID); err != nil {
+			rows.Close()
+			return err
+		}
+		targets = append(targets, target)
+	}
+	err = rows.Err()
+	rows.Close()
+	if err != nil {
+		return err
+	}
+	// Rendering resolves each destination bot's configured owner for callbacks.
+	result.UserID, result.ProgressReposition = 0, false
+	for _, target := range targets {
+		if err := queueUIResponse(ctx, tx, target, result); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func preserveInputQuestions(ctx context.Context, tx *dbTx, id uuid.UUID, questions []protocol.Question) error {
 	for _, question := range questions {
 		if strings.TrimSpace(question.ID) == "" {
@@ -59,8 +98,9 @@ func recordInputAnswerSummaries(ctx context.Context, tx *dbTx, id uuid.UUID, ans
 		if question.Secret {
 			answer = "[REDACTED]"
 		}
-		// A fresh Telegram answer after a definitely failed submission may
-		// replace its draft. Replayed worker acknowledgements cannot do so.
+		// A fresh answer after a definitely failed submission may replace its
+		// summary. Native acknowledgements use the merged authoritative draft,
+		// so a replay cannot replace an answer already collected there.
 		if _, err := tx.Exec(ctx, `UPDATE telegram_question_answers SET answer=$3,version=version+1
             WHERE approval_id=$1 AND question_id=$2 AND (answer IS NULL OR ($4 AND answer<>$3))`, id, questionID, answer, replace); err != nil {
 			return err
@@ -84,6 +124,10 @@ func enqueueQuestionAnswerEdits(ctx context.Context, tx *dbTx, id uuid.UUID, bot
         FROM telegram_question_answers summary JOIN bot_message_routes route
           ON route.approval_id=summary.approval_id AND route.question_id=summary.question_id
         WHERE summary.approval_id=$1 AND summary.answer IS NOT NULL
+          AND NOT EXISTS(SELECT 1 FROM approvals current
+            WHERE current.approval_id=summary.approval_id AND current.state='pending' AND current.response_command_id IS NULL
+              AND NOT EXISTS(SELECT 1 FROM json_each(current.input_answers) answer
+                WHERE answer.key=summary.question_id AND json_array_length(answer.value)>0))
           AND NOT EXISTS(SELECT 1 FROM telegram_input_reply_messages helper
             WHERE helper.bot_id=route.bot_id AND helper.chat_id=route.chat_id AND helper.message_id=route.message_id)
           AND ($2='' OR (route.bot_id=$2 AND route.chat_id=$3 AND route.message_id=$4))`, id, bot, chat, message)
@@ -162,9 +206,6 @@ func applyInputAnswered(ctx context.Context, tx *dbTx, workerID, runtimeID, sess
 	if err := json.Unmarshal(answersRaw, &answers); err != nil {
 		return err
 	}
-	if err := recordInputAnswerSummaries(ctx, tx, id, approval.Answers, false); err != nil {
-		return err
-	}
 	for questionID, values := range approval.Answers {
 		if len(answers[questionID]) == 0 && strings.TrimSpace(strings.Join(values, "\n")) != "" {
 			answers[questionID] = values
@@ -174,6 +215,8 @@ func applyInputAnswered(ctx context.Context, tx *dbTx, workerID, runtimeID, sess
 	if err != nil {
 		return err
 	}
-	_, err = tx.Exec(ctx, `UPDATE approvals SET input_answers=$2 WHERE approval_id=$1`, id, string(raw))
-	return err
+	if _, err := tx.Exec(ctx, `UPDATE approvals SET input_answers=$2 WHERE approval_id=$1`, id, string(raw)); err != nil {
+		return err
+	}
+	return recordInputAnswerSummaries(ctx, tx, id, answers, true)
 }

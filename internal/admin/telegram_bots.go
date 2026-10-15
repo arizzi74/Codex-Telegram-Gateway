@@ -2,6 +2,7 @@ package admin
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"strings"
@@ -19,6 +20,7 @@ type TelegramBotManager interface {
 	ConnectTelegramBot(context.Context, string, bool) (gateway.TelegramBotSummary, error)
 	ReplaceTelegramBotToken(context.Context, string, string, bool) (gateway.TelegramBotSummary, error)
 	SetTelegramBotEnabled(context.Context, string, bool) error
+	SetTelegramBotSessionName(context.Context, string, bool) error
 	RemoveTelegramBot(context.Context, string) error
 	CreateManagedTelegramBot(context.Context, string, string, string) (gateway.TelegramManagedBotIntent, error)
 }
@@ -140,16 +142,32 @@ func (s *Server) telegramBotMember(w http.ResponseWriter, r *http.Request) {
 	var err error
 	if r.Method == http.MethodPatch {
 		var input struct {
-			Enabled *bool `json:"enabled"`
+			Enabled            json.RawMessage `json:"enabled"`
+			InheritSessionName json.RawMessage `json:"inherit_session_name"`
 		}
 		if !decodeEnrollmentJSON(w, r, &input, false) {
 			return
 		}
-		if input.Enabled == nil {
+		// Each request changes one setting. Check presence before decoding so
+		// a second, null action cannot disguise an ambiguous request.
+		if (len(input.Enabled) == 0) == (len(input.InheritSessionName) == 0) {
 			bad(w)
 			return
 		}
-		err = s.telegramBots.SetTelegramBotEnabled(ctx, id, *input.Enabled)
+		value := input.Enabled
+		if len(input.InheritSessionName) != 0 {
+			value = input.InheritSessionName
+		}
+		var enabled *bool
+		if json.Unmarshal(value, &enabled) != nil || enabled == nil {
+			bad(w)
+			return
+		}
+		if len(input.InheritSessionName) != 0 {
+			err = s.telegramBots.SetTelegramBotSessionName(ctx, id, *enabled)
+		} else {
+			err = s.telegramBots.SetTelegramBotEnabled(ctx, id, *enabled)
+		}
 	} else {
 		var input struct {
 			Confirmed bool `json:"confirmed"`

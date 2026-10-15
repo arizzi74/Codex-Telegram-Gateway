@@ -196,6 +196,7 @@ func run(args []string, logger *slog.Logger) error {
 		if err != nil {
 			return err
 		}
+		bots.SetBotNameRedactor(redactor)
 		console, err := admin.New(store, admin.Config{Origin: cfg.PublicBaseURL, BotAPI: api, TelegramBots: bots,
 			BotUsername: cfg.Secrets.BotName, AllowedUserCount: len(cfg.AllowedUserIDs),
 			AllowedChatCount: len(cfg.AllowedChatIDs), Redactor: redactor, WebUI: hub, Audio: audioSettings})
@@ -253,6 +254,7 @@ func run(args []string, logger *slog.Logger) error {
 		services.Go(func() {
 			_ = gateway.NewSessionMenus(store, api, logger, gateway.SessionMenuOptions{BotID: cfg.Secrets.BotName, AllowedUserIDs: cfg.AllowedUserIDs, AllowedChatIDs: cfg.AllowedChatIDs, Redactor: redactor, BotResolver: bots}).Run(serviceCtx)
 		})
+		services.Go(func() { bots.RunBotNames(serviceCtx) })
 		defer func() { stopService(); services.Wait() }()
 		errCh := make(chan error, 1)
 		go func() { errCh <- server.ListenAndServe() }()

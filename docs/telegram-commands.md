@@ -490,6 +490,11 @@ not rewritten.
 
 ## Session focus and multisession mode
 
+Each bot keeps its own selected session. Use `/tgsessions` separately in each
+bot conversation; selecting or disconnecting a session in one bot leaves the
+others unchanged. Two bots selecting the same session both receive its output.
+Open a newly connected bot and send `/start` before expecting notifications.
+
 By default, turn progress and completion messages follow the selected session.
 Switching from A to B removes A's temporary messages and restores the latest
 commentary and tool message for B if its turn is running. The **Connected to**
@@ -503,15 +508,19 @@ completion from A stays hidden. Final answers already displayed remain in the ch
 `/tglastmessages` to read a session's saved responses later.
 
 Questions and approvals are an exception: they arrive even when another session
-is selected or the chat is disconnected. Each names its originating session.
+is selected or the chat is disconnected, in every enabled bot chat you have
+opened. Each names its originating session.
 Use its buttons or reply directly to its message; the answer is routed to the
-exact request without changing the selected session. A reply to a question also
+exact request without changing any bot's selected session. Answered questions
+are replaced in every bot with `Question:` and `Answer:`, without buttons.
+If the request has more questions, the next one appears in every bot too.
+A reply to a question also
 works while a new-session wizard is open. A delayed new/fork result cannot replace
 a later selection or undo a disconnect. Explicit command responses, such as a
 requested history page, return to their requesting chat.
 
 `/tgmultisession` toggles multisession mode; `/tgmultisession on` and
-`/tgmultisession off` set it explicitly. The setting is stored per user, chat and
+`/tgmultisession off` set it explicitly. The setting is stored per bot, user, chat and
 topic and survives a restart. When enabled, user sessions can all send progress,
 responses and live CLI user prompts. Accepted Telegram prompts are not echoed.
 Each message starts with the full session name and a stable colored square.

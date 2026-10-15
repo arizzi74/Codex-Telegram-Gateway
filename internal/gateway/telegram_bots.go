@@ -47,17 +47,21 @@ var telegramTokenPattern = regexp.MustCompile(`^[1-9][0-9]{0,18}:[A-Za-z0-9_-]{2
 var telegramUsernamePattern = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_]{3,30}[A-Za-z0-9_]$`)
 
 type TelegramBotSummary struct {
-	ID            string `json:"id"`
-	TelegramID    int64  `json:"telegram_id"`
-	Username      string `json:"username"`
-	DisplayName   string `json:"display_name"`
-	Enabled       bool   `json:"enabled"`
-	Legacy        bool   `json:"legacy"`
-	Managed       bool   `json:"managed"`
-	CanManageBots bool   `json:"can_manage_bots"`
-	WebhookURL    string `json:"webhook_url"`
-	Status        string `json:"status"`
-	Error         string `json:"error,omitempty"`
+	ID                  string `json:"id"`
+	TelegramID          int64  `json:"telegram_id"`
+	Username            string `json:"username"`
+	DisplayName         string `json:"display_name"`
+	Enabled             bool   `json:"enabled"`
+	Legacy              bool   `json:"legacy"`
+	Managed             bool   `json:"managed"`
+	CanManageBots       bool   `json:"can_manage_bots"`
+	WebhookURL          string `json:"webhook_url"`
+	Status              string `json:"status"`
+	Error               string `json:"error,omitempty"`
+	InheritSessionName  bool   `json:"inherit_session_name"`
+	OriginalDisplayName string `json:"original_display_name,omitempty"`
+	NameSyncPending     bool   `json:"name_sync_pending"`
+	NameError           string `json:"name_error,omitempty"`
 }
 
 type TelegramManagedBotIntent struct {
@@ -83,15 +87,18 @@ type telegramManagedRuntime struct {
 // TelegramBotManager owns bot identity, credentials and webhook routing. Every
 // additional bot inherits the one configured owner and the same chat policy.
 type TelegramBotManager struct {
-	store         *registry.Store
-	cfg           config.GatewayConfig
-	log           *slog.Logger
-	voiceSettings VoiceConfiguration
-	aead          cipher.AEAD
-	op            sync.Mutex
-	mu            sync.RWMutex
-	bots          map[string]*telegramManagedRuntime
-	newClient     func(string) *TelegramClient
+	store           *registry.Store
+	cfg             config.GatewayConfig
+	log             *slog.Logger
+	voiceSettings   VoiceConfiguration
+	aead            cipher.AEAD
+	op              sync.Mutex
+	mu              sync.RWMutex
+	bots            map[string]*telegramManagedRuntime
+	botNames        map[string]telegramBotNameState
+	botNamesWake    chan struct{}
+	botNameRedactor *auth.Redactor
+	newClient       func(string) *TelegramClient
 }
 
 func NewTelegramBotManager(ctx context.Context, store *registry.Store, cfg config.GatewayConfig, legacySecret string, logger *slog.Logger, settings ...VoiceConfiguration) (*TelegramBotManager, error) {
@@ -123,7 +130,7 @@ func NewTelegramBotManager(ctx context.Context, store *registry.Store, cfg confi
 	if err != nil {
 		return nil, errors.New("Telegram bot encryption is unavailable")
 	}
-	m := &TelegramBotManager{store: store, cfg: cfg, log: logger, aead: aead, bots: map[string]*telegramManagedRuntime{}, newClient: NewTelegramClient}
+	m := &TelegramBotManager{store: store, cfg: cfg, log: logger, aead: aead, bots: map[string]*telegramManagedRuntime{}, botNames: map[string]telegramBotNameState{}, botNamesWake: make(chan struct{}, 1), newClient: NewTelegramClient}
 	if len(settings) > 0 {
 		m.voiceSettings = settings[0]
 	}
@@ -173,6 +180,13 @@ func NewTelegramBotManager(ctx context.Context, store *registry.Store, cfg confi
 				return nil, errors.New("disabled Telegram bot work could not be retired")
 			}
 		}
+	}
+	preferences, err := store.TelegramBotNamePreferences(ctx)
+	if err != nil {
+		return nil, errors.New("Telegram bot name preferences could not be loaded")
+	}
+	for _, preference := range preferences {
+		m.botNames[preference.BotID] = telegramBotNameState{preference: preference, pending: preference.InheritSessionName || (preference.OriginalDisplayName != nil && (preference.AppliedDisplayName == nil || *preference.AppliedDisplayName != *preference.OriginalDisplayName))}
 	}
 	return m, nil
 }
@@ -316,7 +330,16 @@ func (m *TelegramBotManager) summary(bot *telegramManagedRuntime) TelegramBotSum
 	if b.LastError != "" {
 		status = "error"
 	}
-	return TelegramBotSummary{ID: b.ID, TelegramID: b.TelegramID, Username: b.Username, DisplayName: b.DisplayName, Enabled: b.Enabled, Legacy: b.Legacy, Managed: b.ManagedBy != "", CanManageBots: b.CanManageBots, WebhookURL: m.webhookURL(b), Status: status, Error: b.LastError}
+	name := m.botNameState(b.ID)
+	summary := TelegramBotSummary{ID: b.ID, TelegramID: b.TelegramID, Username: b.Username, DisplayName: b.DisplayName, Enabled: b.Enabled, Legacy: b.Legacy, Managed: b.ManagedBy != "", CanManageBots: b.CanManageBots, WebhookURL: m.webhookURL(b), Status: status, Error: b.LastError, InheritSessionName: name.preference.InheritSessionName, NameSyncPending: name.pending, NameError: name.lastError}
+	if name.preference.OriginalDisplayName != nil {
+		summary.OriginalDisplayName = *name.preference.OriginalDisplayName
+	}
+	// getMe may briefly return an older name after setMyName succeeds.
+	if name.preference.AppliedDisplayName != nil && (name.preference.InheritSessionName || name.pending) {
+		summary.DisplayName = *name.preference.AppliedDisplayName
+	}
+	return summary
 }
 func (m *TelegramBotManager) ListTelegramBots(ctx context.Context) ([]TelegramBotSummary, error) {
 	return m.listTelegramBots(ctx, false)
@@ -602,6 +625,7 @@ func (m *TelegramBotManager) RemoveTelegramBot(ctx context.Context, id string) e
 	}
 	m.mu.Lock()
 	delete(m.bots, id)
+	delete(m.botNames, id)
 	m.mu.Unlock()
 	return nil
 }

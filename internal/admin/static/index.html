@@ -45,6 +45,7 @@
       <p id="bot-error" class="notice error" role="alert" hidden></p>
       <div id="bot-info"><p class="muted">Bot information is not available.</p></div>
       <div id="bot-pending"></div>
+      <div id="bot-removed"></div>
     </section>
     <section id="audio-section" class="card" aria-labelledby="audio-heading">
       <h2 id="audio-heading">Audio</h2>
@@ -135,6 +136,19 @@
     <p id="bot-token-error" class="notice error" role="alert" hidden></p>
     <div class="bot-dialog-actions"><button id="bot-token-submit" type="submit">Connect bot</button><button id="bot-token-cancel" type="button" class="secondary">Cancel</button></div>
   </form>
+</dialog>
+<dialog id="bot-remove-dialog" class="bot-dialog" aria-labelledby="bot-remove-heading" aria-describedby="bot-remove-description">
+  <div class="row bot-dialog-heading"><h2 id="bot-remove-heading">Remove bot</h2><button id="bot-remove-close" type="button" class="secondary" aria-label="Close bot removal dialog">Close</button></div>
+  <p id="bot-remove-description">Removing a bot from this gateway deletes its local bot records, chat bindings and notification subscriptions. Worker sessions and project files will be kept. The bot stays on Telegram until its owner deletes it in BotFather.</p>
+  <p id="bot-remove-status" class="muted" role="status" aria-live="polite"></p>
+  <p id="bot-remove-error" class="notice error" role="alert" hidden></p>
+  <div class="bot-dialog-actions"><button id="bot-remove-confirm" type="button" class="danger">Remove from gateway</button><button id="bot-remove-cancel" type="button" class="secondary">Cancel</button></div>
+  <div class="bot-remove-telegram">
+    <h3>Delete on Telegram</h3>
+    <p id="bot-remove-target"></p>
+    <a id="bot-remove-launch" class="button-link secondary" href="https://t.me/BotFather?start=deletebot" target="_blank" rel="noopener noreferrer">Delete in BotFather</a>
+    <p class="muted">This opens BotFather’s deletion flow. The gateway cannot confirm whether you deleted the bot on Telegram.</p>
+  </div>
 </dialog>
 <dialog id="bot-create-dialog" class="bot-dialog" aria-labelledby="bot-create-heading" aria-describedby="bot-create-description">
   <div class="row bot-dialog-heading"><h2 id="bot-create-heading">Create managed bot</h2><button id="bot-create-close" type="button" class="secondary" aria-label="Close managed bot dialog">Close</button></div>

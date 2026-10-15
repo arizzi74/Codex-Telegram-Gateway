@@ -624,15 +624,27 @@ func acceptInputApproval(ctx context.Context, tx *dbTx, in IncomingUpdate, id uu
 	if err := preserveInputQuestions(ctx, tx, id, approval.Questions); err != nil {
 		return AcceptResult{}, err
 	}
-	if err := recordInputAnswerSummaries(ctx, tx, id, answers, true); err != nil {
-		return AcceptResult{}, err
-	}
 	target.threadID = threadID
 	if !complete {
 		if _, err := tx.Exec(ctx, "UPDATE approvals SET input_answers=$2 WHERE approval_id=$1", id, string(answersJSON)); err != nil {
 			return AcceptResult{}, fmt.Errorf("registry: persist partial input answers: %w", err)
 		}
-		return AcceptResult{View: "input_pending", UserID: in.UserID, SessionID: target.sessionID.String(), RuntimeID: target.runtimeID.String(), ApprovalID: id.String(), QuestionID: nextUnansweredQuestion(approval, answers), ProgressReposition: true}, nil
+		if err := recordInputAnswerSummaries(ctx, tx, id, answers, true); err != nil {
+			return AcceptResult{}, err
+		}
+		result := AcceptResult{View: "input_pending", UserID: in.UserID, SessionID: target.sessionID.String(), RuntimeID: target.runtimeID.String(), ApprovalID: id.String(), QuestionID: nextUnansweredQuestion(approval, answers), ProgressReposition: true}
+		var previousAnswers map[string][]string
+		if err := json.Unmarshal(persistedAnswers, &previousAnswers); err != nil {
+			return AcceptResult{}, err
+		}
+		// Out-of-order answers keep the current question; only advancing to a
+		// different question needs another notification on the other bots.
+		if nextUnansweredQuestion(approval, previousAnswers) != result.QuestionID {
+			if err := enqueuePendingQuestionCopies(ctx, tx, in, result); err != nil {
+				return AcceptResult{}, err
+			}
+		}
+		return result, nil
 	}
 	command, err := createTelegramCommand(ctx, tx, in, target, protocol.InputResponse, target.sessionID.String(), turnID, protocol.Arguments{ApprovalID: id.String(), RequestID: requestID, Answers: answers})
 	if err != nil {
@@ -645,6 +657,9 @@ func acceptInputApproval(ctx context.Context, tx *dbTx, in IncomingUpdate, id uu
 	}
 	if ct.RowsAffected() != 1 {
 		return AcceptResult{}, ErrTelegramTarget
+	}
+	if err := recordInputAnswerSummaries(ctx, tx, id, answers, true); err != nil {
+		return AcceptResult{}, err
 	}
 	return AcceptResult{View: "queued", SessionID: target.sessionID.String(), RuntimeID: target.runtimeID.String(), CommandID: command.ID, ApprovalID: id.String(), ProgressReposition: true}, nil
 }
@@ -708,6 +723,12 @@ func mergeInputAnswer(approval protocol.Approval, persisted json.RawMessage, que
 		}
 	}
 	if !valid {
+		return nil, false, ErrTelegramTarget
+	}
+	// Other bot copies can retain their original callbacks while this request
+	// is partially answered. The first accepted answer remains authoritative.
+	// A definitely failed submission explicitly clears this draft for retry.
+	if len(answers[questionID]) != 0 {
 		return nil, false, ErrTelegramTarget
 	}
 	answers[questionID] = []string{text}

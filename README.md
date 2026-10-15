@@ -300,6 +300,10 @@ latest progress if it is running, after the connection confirmation is delivered
 Only the selected session's turn responses and typing appear by default.
 Questions and approvals from any session still arrive,
 labelled with its name; answering them does not change your selection.
+Each Telegram bot has its own selection: use `/tgsessions` in each bot to follow
+different sessions. Questions are shared across enabled bot chats you have
+opened, and answering from any bot edits every copy to show the question and
+answer. Subsequent questions in the same request are shared as well.
 Use `/tgquestions` (or `/tginput` without arguments) to reopen pending questions
 and approvals from any session that the worker received while running.
 Choose **Open** and then select an option or reply to the question with text.
@@ -340,6 +344,11 @@ The token expires in 15 minutes. The console manages worker enrollment,
 credential rotation, and revocation. It lists user sessions with prompt counts,
 token usage, activity and last messages, and shows the connected Telegram bot's
 identity and webhook status. Subagent sessions are excluded, as in `/tgsessions`.
+Each Telegram bot can optionally inherit the session name selected in your
+private chat, displaying **Original name · Session name**. Disconnection or
+turning the option off restores its original name. The bot-removal dialog also
+links to BotFather's deletion flow; permanent Telegram deletion requires the
+owner's confirmation there. See [Telegram bot settings](docs/admin.md#telegram-bots).
 Passkeys use the hostname from the configured public HTTPS URL as their
 relying-party ID; browser requests must match the full configured origin.
 

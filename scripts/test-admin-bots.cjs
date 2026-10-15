@@ -18,11 +18,11 @@ if (screenshots) fs.mkdirSync(screenshots, { recursive: true });
 async function fixture(browser, width) {
   const page = await browser.newPage({ viewport: { width, height: 900 } });
   const state = {
-    bots: [{ id: primaryID, telegram_id: 12345, username: 'primary_bot', display_name: 'Primary ' + malicious, legacy: true, enabled: true, managed: false, can_manage_bots: false, status: 'connected' }],
+    bots: [{ id: primaryID, telegram_id: 12345, username: 'primary_bot', display_name: 'Primary ' + malicious, original_display_name: 'Primary ' + malicious, inherit_session_name: false, name_sync_pending: false, legacy: true, enabled: true, managed: false, can_manage_bots: false, status: 'connected' }],
     pending: [], reads: 0, profileRefreshes: [], mutations: [], readStatus: 200, refreshStatus: 200, dashboardStatus: 200,
     connectFailure: null, webhookConflict: false, requireReauth: false, credentialCalls: 0,
     invalidCreationURL: false, creationNumber: 0, networkFailure: false, holdNextRead: false,
-    managerCanManageBots: true, managedFailure: false, sessionAgeMillis: 0,
+    managerCanManageBots: true, managedFailure: false, sessionAgeMillis: 0, patchFailure: false,
   };
   const errors = [];
   const messages = [];
@@ -81,7 +81,7 @@ async function fixture(browser, width) {
           } else {
             const bot = state.bots.find(bot => bot.id === payload.replace_id);
             if (bot) bot.status = 'connected';
-            else state.bots.push({ id: additionalID, telegram_id: 54321, username: 'connected_bot', display_name: 'Connected bot', enabled: true, managed: false, can_manage_bots: true, status: 'connected' });
+            else state.bots.push({ id: additionalID, telegram_id: 54321, username: 'connected_bot', display_name: 'Connected bot', original_display_name: 'Connected bot', inherit_session_name: false, name_sync_pending: false, enabled: true, managed: false, can_manage_bots: true, status: 'connected' });
             body = bot || state.bots.at(-1);
           }
         } else if (url.pathname.endsWith('/telegram-bots/managed') && request.method() === 'POST') {
@@ -96,7 +96,12 @@ async function fixture(browser, width) {
           }
         } else {
           const id = decodeURIComponent(url.pathname.split('/').at(-1));
-          if (request.method() === 'PATCH') Object.assign(state.bots.find(bot => bot.id === id), payload);
+          if (request.method() === 'PATCH' && state.patchFailure) return route.fulfill({ status: 502, contentType: 'application/json', body: JSON.stringify({ code: 'telegram_bot_unavailable', message: 'Unsafe upstream error ' + token }) });
+          if (request.method() === 'PATCH') {
+            const bot = state.bots.find(bot => bot.id === id);
+            Object.assign(bot, payload);
+            if ('inherit_session_name' in payload) bot.name_sync_pending = true;
+          }
           else if (request.method() === 'DELETE') { assert.equal(payload.confirmed, true); state.bots = state.bots.filter(bot => bot.id !== id); }
           status = 204;
         }
@@ -148,6 +153,10 @@ async function fixture(browser, width) {
       assert.equal(await card(primaryID).getByRole('link', { name: 'Open Telegram' }).getAttribute('href'), 'https://t.me/primary_bot');
       assert.equal(await page.locator('#bot-info img').count(), 0, 'Bot names are plain text');
       assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true, 'Bot cards fit the viewport');
+      const nameSetting = id => card(id).getByRole('checkbox', { name: 'Inherit selected session name' });
+      assert.equal(await nameSetting(primaryID).isChecked(), false, 'Name inheritance is opt in, including the primary bot');
+      assert.match(await card(primaryID).innerText(), /Original name · Session name; uses your private chat selection/);
+      assert.match(await card(primaryID).innerText(), /default Telegram display name/);
       await refresh();
       assert.equal(state.profileRefreshes.length, 0, 'Ordinary reads keep cached profile semantics');
 
@@ -184,6 +193,34 @@ async function fixture(browser, width) {
       assert.equal(state.mutations.length, beforeConnect + 2, 'Fresh-auth rejection verifies then resubmits once');
       assert.equal(state.credentialCalls, 1);
       assert.equal(await page.locator('#bot-token-dialog').evaluate(dialog => dialog.open), false);
+      state.requireReauth = true;
+      const beforeNameReauth = state.mutations.length;
+      await nameSetting(primaryID).check();
+      await page.waitForFunction(() => !telegramBusy);
+      assert.equal(state.mutations.length, beforeNameReauth + 2, 'Name setting verifies and retries only an explicit fresh-auth rejection');
+      assert.deepEqual(state.mutations.at(-1).payload, { inherit_session_name: true });
+      assert.equal(await nameSetting(primaryID).isChecked(), true);
+      assert.match(await card(primaryID).innerText(), /Name update queued/);
+      state.bots[0].name_sync_pending = false;
+      state.bots[0].display_name = state.bots[0].original_display_name + ' · Selected session';
+      await refresh();
+      assert.match(await card(primaryID).locator('h3').innerText(), /Selected session/);
+      assert.equal(await nameSetting(additionalID).isChecked(), false, 'Each bot has its own preference');
+      await nameSetting(primaryID).uncheck();
+      await page.waitForFunction(() => !telegramBusy);
+      assert.deepEqual(state.mutations.at(-1).payload, { inherit_session_name: false });
+      assert.match(await page.locator('#bot-status').innerText(), /restores the name in the background/);
+      state.bots[0].display_name = state.bots[0].original_display_name;
+      state.bots[0].name_sync_pending = false;
+      await refresh();
+      state.patchFailure = true;
+      const beforeNameFailure = state.mutations.length;
+      await nameSetting(additionalID).check();
+      await page.waitForFunction(() => !telegramBusy);
+      assert.equal(state.mutations.length, beforeNameFailure + 1, 'A name setting failure is never replayed');
+      assert.equal(await nameSetting(additionalID).isChecked(), false, 'Failed setting restores the last known preference');
+      assert.match(await page.locator('#bot-error').innerText(), /Telegram could not complete/);
+      state.patchFailure = false;
       // Return a pre-mutation poll after Disable has already completed. The
       // console must obtain a newer snapshot before finishing the action.
       const readStarted = new Promise(resolve => { state.onReadStarted = resolve; });
@@ -199,9 +236,25 @@ async function fixture(browser, width) {
       await page.waitForFunction(() => document.querySelector('[data-bot-id="11111111-2222-4333-8444-555555555555"]').textContent.includes('Enable'));
       await page.waitForFunction(() => !telegramBusy);
       assert.equal(state.bots.find(bot => bot.id === additionalID).enabled, false);
+      await nameSetting(additionalID).check();
+      await page.waitForFunction(() => !telegramBusy);
+      assert.equal(await nameSetting(additionalID).isChecked(), true, 'A disabled bot can save its name preference');
+      assert.match(await card(additionalID).innerText(), /Name changes resume when this bot is enabled/);
       await card(additionalID).getByRole('button', { name: 'Enable', exact: true }).click();
       await page.waitForFunction(() => !telegramBusy);
       assert.equal(state.bots.find(bot => bot.id === additionalID).enabled, true);
+      state.bots.find(bot => bot.id === additionalID).name_error = 'name_update_unavailable';
+      await refresh();
+      assert.match(await card(additionalID).innerText(), /Telegram has not applied the name change yet/);
+      state.bots.find(bot => bot.id === additionalID).name_error = 'name_webhook_moved';
+      await refresh();
+      assert.match(await card(additionalID).innerText(), /webhook moved.*Reconnect/s);
+      state.bots.find(bot => bot.id === additionalID).name_error = token;
+      await refresh();
+      assert.equal((await card(additionalID).innerText()).includes(token), false, 'Raw name errors are never rendered');
+      state.bots.find(bot => bot.id === additionalID).name_error = '';
+      state.bots.find(bot => bot.id === additionalID).name_sync_pending = false;
+      await refresh();
 
       state.webhookConflict = true;
       await card(additionalID).getByRole('button', { name: 'Replace token', exact: true }).click();
@@ -304,18 +357,37 @@ async function fixture(browser, width) {
       await page.locator('#bot-create-cancel').click();
 
       const beforeRemove = state.mutations.length;
-      page.once('dialog', dialog => dialog.dismiss());
       await card(additionalID).getByRole('button', { name: 'Remove', exact: true }).click();
+      assert.equal(await page.locator('#bot-remove-dialog').evaluate(dialog => dialog.open), true);
+      assert.match(await page.locator('#bot-remove-description').innerText(), /local bot records, chat bindings and notification subscriptions.*Worker sessions and project files will be kept/s);
+      assert.match(await page.locator('#bot-remove-target').innerText(), /@connected_bot.*owner.*select this bot.*confirm deletion/s);
+      assert.equal(await page.locator('#bot-remove-dialog').evaluate(dialog => dialog.scrollWidth <= dialog.clientWidth && dialog.getBoundingClientRect().width <= innerWidth), true);
+      await page.locator('#bot-remove-cancel').click();
       assert.equal(state.mutations.length, beforeRemove, 'Cancelled removal does nothing');
-      let removalConfirmation = '';
-      page.once('dialog', async dialog => { removalConfirmation = dialog.message(); await dialog.accept(); });
       await card(additionalID).getByRole('button', { name: 'Remove', exact: true }).click();
+      if (screenshots) await page.screenshot({ path: path.join(screenshots, 'telegram-bot-remove-' + width + '.png') });
+      await page.locator('#bot-remove-confirm').click();
       await page.waitForFunction(() => !telegramBusy);
-      assert.match(removalConfirmation, /local bot records, chat bindings and notification subscriptions.*Worker sessions and project files will be kept/s);
       assert.equal(await card(additionalID).count(), 0);
       assert.equal(await card(primaryID).count(), 1, 'Removing another bot preserves the primary bot');
       assert.equal(state.mutations.at(-1).method, 'DELETE');
       assert.deepEqual(state.mutations.at(-1).payload, { confirmed: true });
+      assert.equal(await page.locator('#bot-remove-dialog').evaluate(dialog => dialog.open), true, 'Removal keeps Telegram deletion guidance open');
+      assert.equal(await page.locator('#bot-remove-confirm').isVisible(), false, 'A completed removal cannot be submitted again');
+      assert.match(await page.locator('#bot-remove-target').innerText(), /@connected_bot/, 'The target username survives gateway removal');
+      assert.match(await page.locator('#bot-remove-status').innerText(), /Deletion on Telegram is a separate step/);
+      const deleteURL = 'https://t.me/BotFather?start=deletebot';
+      assert.equal(await page.locator('#bot-remove-launch').getAttribute('href'), deleteURL);
+      const deletePopupPromise = page.waitForEvent('popup');
+      await page.locator('#bot-remove-launch').click();
+      const deletePopup = await deletePopupPromise;
+      await deletePopup.waitForLoadState();
+      assert.equal(deletePopup.url(), deleteURL, 'A real click opens the supported BotFather deletion flow');
+      await deletePopup.close();
+      assert.equal(state.mutations.length, beforeRemove + 1, 'BotFather guidance makes no remote deletion request');
+      await page.locator('#bot-remove-cancel').click();
+      assert.match(await page.locator('#bot-removed').innerText(), /@connected_bot.*owner.*select this bot.*confirm deletion/s);
+      assert.equal(await page.locator('#bot-removed').getByRole('link', { name: 'Delete in BotFather' }).getAttribute('href'), deleteURL, 'BotFather remains accessible after the dialog closes');
       assert.ok(state.mutations.every(mutation => mutation.csrf === 'bot-csrf'), 'All bot writes include CSRF');
 
       state.readStatus = 502;
@@ -331,6 +403,7 @@ async function fixture(browser, width) {
       assert.equal(await page.locator('#bot-create-submit').isDisabled(), true);
       assert.match(await page.locator('#bot-manager-help').innerText(), /Connect or enable a bot first/);
       await page.locator('#bot-create-cancel').click();
+      assert.match(await page.locator('#bot-removed').innerText(), /@connected_bot/, 'Opening Create keeps the completed removal guidance');
       assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
       const storage = await page.evaluate(() => JSON.stringify({ local: { ...localStorage }, session: { ...sessionStorage } }));
       assert.equal(storage.includes(token) || storage.includes(replacement), false, 'Tokens never enter browser storage');
@@ -345,9 +418,25 @@ async function fixture(browser, width) {
       assert.equal(await page.locator('#bot-token-dialog').evaluate(dialog => dialog.open), false, 'Expiry closes secret dialogs');
       assert.equal(await page.locator('#bot-token').inputValue(), '');
       assert.equal(await page.locator('.telegram-bot').count(), 0, 'Expiry clears protected bot data');
+      assert.equal(await page.locator('#bot-removed').innerText(), '', 'Expiry clears removed bot guidance');
       assert.deepEqual(errors, []);
       await page.close();
+
+      const expiry = await fixture(browser, width);
+      expiry.state.bots.push({ id: additionalID, username: 'expiry_bot', display_name: 'Expiry bot', enabled: true, status: 'connected' });
+      await expiry.refresh();
+      await expiry.card(additionalID).getByRole('button', { name: 'Remove', exact: true }).click();
+      assert.match(await expiry.page.locator('#bot-remove-target').innerText(), /@expiry_bot/);
+      expiry.state.dashboardStatus = 401;
+      await expiry.page.evaluate(() => load(false));
+      await expiry.page.waitForSelector('#auth:not([hidden])');
+      assert.equal(await expiry.page.locator('#bot-remove-dialog').evaluate(dialog => dialog.open), false, 'Expiry closes the removal dialog');
+      assert.equal(await expiry.page.locator('#bot-remove-target').innerText(), '', 'Expiry clears the retained target username');
+      assert.equal(await expiry.page.evaluate(() => telegramRemovalTarget === null && telegramRemovedBots.length === 0), true, 'Expiry clears removal snapshots');
+      assert.equal(expiry.state.mutations.length, 0, 'Expiring a removal dialog never deletes the bot');
+      assert.deepEqual(expiry.errors, []);
+      await expiry.page.close();
     }
-    console.log('Admin Telegram bot browser checks passed: mobile/desktop cards and dialogs, token privacy, connect/replace/takeover, recent authentication, explicit profile refresh with cached-read races, enable/disable, managed creation and Telegram link, callback polling, expiry, safe rendering, confirmed removal, CSRF, refresh recovery and sign-in expiry.');
+    console.log('Admin Telegram bot browser checks passed: mobile/desktop cards and dialogs, opt-in per-bot session names and queued/offline status, token privacy, connect/replace/takeover, recent authentication, explicit profile refresh with cached-read races, enable/disable, managed creation, callback polling, expiry, safe rendering, confirmed gateway removal and retained BotFather deletion link, CSRF, refresh recovery and sign-in expiry.');
   } finally { await browser.close(); }
 })().catch(error => { console.error(error); process.exitCode = 1; });

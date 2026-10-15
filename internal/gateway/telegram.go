@@ -350,6 +350,37 @@ func (t *TelegramClient) Identity(ctx context.Context) (TelegramUser, error) {
 	return result, err
 }
 
+// GetMyName retrieves the default name; omitting language_code deliberately
+// leaves per-language overrides outside this gateway's name synchronization.
+func (t *TelegramClient) GetMyName(ctx context.Context) (string, error) {
+	var result struct {
+		Name *string `json:"name"`
+	}
+	if err := t.call(ctx, "getMyName", struct{}{}, &result); err != nil {
+		return "", err
+	}
+	if result.Name == nil || !utf8.ValidString(*result.Name) || utf8.RuneCountInString(*result.Name) > 64 {
+		return "", errors.New("invalid Telegram bot name")
+	}
+	return *result.Name, nil
+}
+
+func (t *TelegramClient) SetMyName(ctx context.Context, name string) error {
+	if !utf8.ValidString(name) || utf8.RuneCountInString(name) > 64 {
+		return errors.New("invalid Telegram bot name")
+	}
+	var applied bool
+	if err := t.call(ctx, "setMyName", struct {
+		Name string `json:"name"`
+	}{Name: name}, &applied); err != nil {
+		return err
+	}
+	if !applied {
+		return errors.New("Telegram bot name was not applied")
+	}
+	return nil
+}
+
 // RefreshIdentity first fetches the bot's own full profile. Telegram's getMe
 // response can otherwise retain capabilities from before a BotFather change.
 func (t *TelegramClient) RefreshIdentity(ctx context.Context, botID int64) (TelegramUser, error) {

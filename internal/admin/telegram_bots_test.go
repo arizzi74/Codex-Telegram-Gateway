@@ -50,6 +50,14 @@ func (m *adminTelegramBotsFake) SetTelegramBotEnabled(_ context.Context, id stri
 	m.calls = append(m.calls, action+id)
 	return m.err
 }
+func (m *adminTelegramBotsFake) SetTelegramBotSessionName(_ context.Context, id string, enabled bool) error {
+	action := "original-name:"
+	if enabled {
+		action = "session-name:"
+	}
+	m.calls = append(m.calls, action+id)
+	return m.err
+}
 func (m *adminTelegramBotsFake) RemoveTelegramBot(_ context.Context, id string) error {
 	m.calls = append(m.calls, "remove:"+id)
 	return m.err
@@ -70,6 +78,7 @@ func TestTelegramBotAdminAuthenticationAndValidation(t *testing.T) {
 		{"POST", base + "/refresh", ""},
 		{"POST", base + "/managed", `{"username":"test_bot","name":"Test"}`},
 		{"PATCH", base + "/telegram:123", `{"enabled":false}`},
+		{"PATCH", base + "/telegram:123", `{"inherit_session_name":true}`},
 		{"DELETE", base + "/telegram:123", `{"confirmed":true}`},
 	} {
 		w := webUICommandRequestForTest(s, endpoint.method, endpoint.path, endpoint.body, "", passkeyTestOrigin, "csrf", "csrf")
@@ -100,6 +109,14 @@ func TestTelegramBotAdminAuthenticationAndValidation(t *testing.T) {
 		{"PATCH", base + "/telegram:123", `{}`},
 		{"PATCH", base + "/telegram:123", `{"enabled":null}`},
 		{"PATCH", base + "/telegram:123", `{"enabled":true,"owner_id":42}`},
+		{"PATCH", base + "/telegram:123", `{"inherit_session_name":null}`},
+		{"PATCH", base + "/telegram:123", `{"inherit_session_name":"true"}`},
+		{"PATCH", base + "/telegram:123", `{"inherit_session_name":1}`},
+		{"PATCH", base + "/telegram:123", `{"enabled":"true"}`},
+		{"PATCH", base + "/telegram:123", `{"enabled":true,"inherit_session_name":false}`},
+		{"PATCH", base + "/telegram:123", `{"enabled":null,"inherit_session_name":true}`},
+		{"PATCH", base + "/telegram:123", `{"enabled":false,"inherit_session_name":null}`},
+		{"PATCH", base + "/telegram:123", `{"inherit_session_name":true,"owner_id":42}`},
 		{"DELETE", base + "/telegram:123", `{}`},
 		{"DELETE", base + "/telegram:123", `{"confirmed":false}`},
 		{"DELETE", base + "/telegram:123", `null`},
@@ -119,6 +136,10 @@ func TestTelegramBotAdminAuthenticationAndValidation(t *testing.T) {
 	if w.Code != 403 || !strings.Contains(w.Body.String(), "reauthentication_required") || len(m.calls) != 0 {
 		t.Fatalf("stale authentication reached manager: %d %s", w.Code, w.Body.String())
 	}
+	w = webUICommandRequestForTest(s, "PATCH", base+"/telegram:123", `{"inherit_session_name":true}`, token, passkeyTestOrigin, "csrf", "csrf")
+	if w.Code != 403 || !strings.Contains(w.Body.String(), "reauthentication_required") || len(m.calls) != 0 {
+		t.Fatalf("stale authentication changed bot name setting: %d %s", w.Code, w.Body.String())
+	}
 }
 
 func TestTelegramBotAdminOperationsAndSafeErrors(t *testing.T) {
@@ -135,6 +156,9 @@ func TestTelegramBotAdminOperationsAndSafeErrors(t *testing.T) {
 		{"POST", base + "/managed", `{"manager_id":"primary_bot","username":"test_bot","name":"Test Bot"}`, "create:primary_bot:test_bot:Test Bot", 201},
 		{"PATCH", base + "/telegram:123", `{"enabled":false}`, "disable:telegram:123", 204},
 		{"PATCH", base + "/telegram:123", `{"enabled":true}`, "enable:telegram:123", 204},
+		{"PATCH", base + "/telegram:123", `{"inherit_session_name":true}`, "session-name:telegram:123", 204},
+		{"PATCH", base + "/telegram:123", `{"inherit_session_name":false}`, "original-name:telegram:123", 204},
+		{"PATCH", base + "/primary", `{"inherit_session_name":true}`, "session-name:primary", 204},
 		{"DELETE", base + "/telegram:123", `{"confirmed":true}`, "remove:telegram:123", 204},
 	} {
 		m.calls = nil
