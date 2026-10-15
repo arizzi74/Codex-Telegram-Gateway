@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/iaia/telegramgw/internal/auth"
+	"github.com/iaia/telegramgw/internal/config"
 	"github.com/iaia/telegramgw/internal/registry"
 	"github.com/iaia/telegramgw/internal/telegramcommands"
 )
@@ -28,6 +29,8 @@ type SessionMenuAPI interface {
 
 type SessionMenuOptions struct {
 	BotID                          string
+	BotUsername                    string
+	BotResolver                    TelegramBotResolver
 	AllowedUserIDs, AllowedChatIDs []int64
 	Redactor                       *auth.Redactor
 }
@@ -40,6 +43,9 @@ type SessionMenus struct {
 	log      *slog.Logger
 	verified bool
 	applied  map[sessionMenuKey]string
+	bots     map[string]*SessionMenus
+	resolver TelegramBotResolver
+	synced   bool
 }
 
 func NewSessionMenus(store SessionMenuStore, api SessionMenuAPI, logger *slog.Logger, options SessionMenuOptions) *SessionMenus {
@@ -57,6 +63,12 @@ func (m *SessionMenus) Run(ctx context.Context) error {
 	defer ticker.Stop()
 	for {
 		check, cancel := context.WithTimeout(ctx, 30*time.Second)
+		if m.options.BotResolver != nil {
+			cancel()
+			// Each bot receives its own timeout in flushBots, so one endpoint
+			// cannot consume the request budget for every other bot.
+			check, cancel = context.WithCancel(ctx)
+		}
 		err := m.flush(check)
 		cancel()
 		if err != nil && ctx.Err() == nil {
@@ -71,12 +83,19 @@ func (m *SessionMenus) Run(ctx context.Context) error {
 }
 
 func (m *SessionMenus) flush(ctx context.Context) error {
+	if m.options.BotResolver != nil {
+		return m.flushBots(ctx)
+	}
 	if !m.verified {
 		identity, err := m.api.Identity(ctx)
 		if err != nil {
 			return err
 		}
-		if !strings.EqualFold(identity.Username, strings.TrimPrefix(m.options.BotID, "@")) {
+		username := m.options.BotUsername
+		if username == "" {
+			username = m.options.BotID
+		}
+		if !strings.EqualFold(identity.Username, strings.TrimPrefix(username, "@")) {
 			return errors.New("Telegram menu bot identity mismatch")
 		}
 		m.verified = true
@@ -148,6 +167,13 @@ scopes:
 				}
 			}
 		}
+		if m.resolver != nil {
+			cfg, api, ok := m.resolver.ResolveTelegramBot(m.options.BotID)
+			if !ok || api == nil || api != m.api {
+				continue
+			}
+			allowed = allowed && auth.AuthorizedTelegramUser(key.user, cfg.AllowedUserIDs) && telegramChatAllowed(cfg.AllowedChatIDs, key.chat)
+		}
 		if len(groups[key]) == 0 || !allowed {
 			if m.applied[key] != "off" {
 				if err := m.api.DeleteScopedCommands(ctx, scope); err != nil {
@@ -168,6 +194,48 @@ scopes:
 		m.applied[key] = digest
 	}
 	return errors.Join(scopeErrors...)
+}
+
+func (m *SessionMenus) flushBots(ctx context.Context) error {
+	resolver := m.options.BotResolver
+	if m.bots == nil {
+		m.bots = make(map[string]*SessionMenus)
+	}
+	active := make(map[string]bool)
+	var failures []error
+	for _, id := range resolver.TelegramBotIDs() {
+		cfg, api, ok := resolver.ResolveTelegramBot(id)
+		if !ok || api == nil {
+			continue
+		}
+		active[id] = true
+		options := sessionMenuBotOptions(id, cfg, m.options.Redactor)
+		child := m.bots[id]
+		if child == nil || child.api != api || child.options.BotUsername != options.BotUsername {
+			child = NewSessionMenus(m.store, api, m.log, options)
+			child.resolver = resolver
+			m.bots[id] = child
+		}
+		child.options = options
+		check, cancel := context.WithTimeout(ctx, 15*time.Second)
+		if !child.synced {
+			err := SyncCommandMenu(check, api, options.BotUsername)
+			failures = append(failures, err)
+			child.synced = err == nil
+		}
+		failures = append(failures, child.flush(check))
+		cancel()
+	}
+	for id := range m.bots {
+		if !active[id] {
+			delete(m.bots, id)
+		}
+	}
+	return errors.Join(failures...)
+}
+
+func sessionMenuBotOptions(id string, cfg config.GatewayConfig, redactor *auth.Redactor) SessionMenuOptions {
+	return SessionMenuOptions{BotID: id, BotUsername: telegramBotUsername(cfg), AllowedUserIDs: cfg.AllowedUserIDs, AllowedChatIDs: cfg.AllowedChatIDs, Redactor: redactor}
 }
 
 func containsChat(chats []int64, id int64) bool {

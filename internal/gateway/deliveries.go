@@ -31,6 +31,7 @@ type DeliveryStore interface {
 }
 type SenderOptions struct {
 	BotID          string
+	BotResolver    TelegramBotResolver
 	OwnerID        int64
 	AllowedChatIDs []int64
 	Redactor       *auth.Redactor
@@ -69,7 +70,7 @@ func (s *Sender) Run(ctx context.Context) error {
 	// delay delivery of a final answer or an approval request.
 	var cleanup sync.WaitGroup
 	if store, ok := s.store.(TelegramProgressStore); ok {
-		if api, ok := s.api.(TelegramDeleteAPI); ok {
+		if api, ok := s.api.(TelegramDeleteAPI); ok || s.options.BotResolver != nil {
 			cleanup.Add(1)
 			go func() {
 				defer cleanup.Done()
@@ -113,6 +114,16 @@ func (s *Sender) flush(ctx context.Context) error {
 }
 
 func (s *Sender) sendDelivery(ctx context.Context, row registry.Delivery) error {
+	// Keep one global queue consumer. Each claimed delivery gets its own
+	// rendering identity, authorization policy and API client.
+	if s.options.BotResolver != nil {
+		routed := *s
+		return routed.sendResolvedDelivery(ctx, row)
+	}
+	return s.sendResolvedDelivery(ctx, row)
+}
+
+func (s *Sender) sendResolvedDelivery(ctx context.Context, row registry.Delivery) error {
 	if skip, err := s.skipInvisibleDelivery(ctx, row); err != nil || skip {
 		return err
 	}

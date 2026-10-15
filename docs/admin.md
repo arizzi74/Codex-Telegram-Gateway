@@ -3,7 +3,7 @@
 The administrator console is served at `/tgw/admin/`. Passkeys are available by
 default; an administrator can also enable username/password sign-in for both
 this console and the Codex Web UI. The gateway enables the console with
-the configured public origin and read-only Telegram bot status checks.
+the configured public origin and Telegram bot management.
 `PublicBaseURL` must be the gateway's exact public HTTPS origin, such as
 `https://gateway.example.com`. WebAuthn derives its relying-party ID from that
 origin's hostname; browser requests must match the full configured origin,
@@ -63,6 +63,11 @@ The browser uses these endpoints:
 | `DELETE /tgw/api/v1/admin/sessions/{id}` | Revokes one browser login and its notification subscriptions. |
 | `POST /tgw/api/v1/admin/sessions/revoke-all` | Signs out every browser belonging to the account. |
 | `GET /tgw/api/v1/admin/dashboard` | Returns visible sessions and statistics, workers, runtimes, bot status, and pending counts. |
+| `GET /tgw/api/v1/admin/telegram-bots` | Lists connected bots and pending managed-bot requests without tokens or webhook secrets. |
+| `POST /tgw/api/v1/admin/telegram-bots` | Connects an existing bot with its token, or replaces a token when `replace_id` is supplied. |
+| `POST /tgw/api/v1/admin/telegram-bots/managed` | Creates a managed-bot request and a Telegram confirmation link using `manager_id`, `username` and `name`. |
+| `PATCH /tgw/api/v1/admin/telegram-bots/{id}` | Enables or disables a bot with `{"enabled":true}` or `{"enabled":false}`. |
+| `DELETE /tgw/api/v1/admin/telegram-bots/{id}` | Removes an additional bot and its local records and subscriptions; requires `{"confirmed":true}`. |
 | `GET /tgw/api/v1/admin/audio` | Returns audio settings, gateway CPU/RAM resources, installed models and setup progress. |
 | `POST /tgw/api/v1/admin/audio/settings` | Downloads required models and applies local audio settings asynchronously; requires recent authentication. |
 | `GET, DELETE /tgw/api/v1/admin/passkeys[/{id}]` | Lists credentials or revokes a non-final credential. |
@@ -94,6 +99,61 @@ passkey or the configured password when needed; a rejected or cancelled
 verification performs no mutation.
 Both stages of additional-passkey registration enforce this check. Browser
 session revocation remains available without another authentication prompt.
+
+## Telegram bots
+
+The **Telegram bots** panel shows the configured **Primary** bot and each
+additional **Connected** or **Managed** bot, with its username, connection status
+and **Open Telegram** link. All bots inherit the gateway's existing Telegram
+user/chat access rules and share its workers. Adding a bot does not create a
+separate administrator or grant another Telegram user access. Chat bindings
+and notifications belong to the bot used to create them, so the same chat can
+use different bot conversations independently.
+
+Choose **Connect existing bot**, obtain its token from `@BotFather`, and submit
+it in the hidden token field. The gateway verifies the bot identity and
+registers its webhook and command menu. If another application already owns
+the webhook, the console requires a separate confirmation before moving it;
+that application will stop receiving new Telegram updates. Tokens are cleared
+from the form on submission or close and are never saved in browser storage or
+returned by the bot list API. Errors do not display token values.
+
+Choose **Create managed bot** to create a bot through Telegram without pasting
+its token. Enable **Bot Management Mode** for your chosen manager bot in
+`@BotFather`, select that enabled manager, and enter the new bot's username and
+display name. **Create Telegram link** prepares the request; **Open Telegram
+to create bot** opens Telegram's confirmation page. Keep the requested username
+when confirming so the gateway can match the callback to your request. To use
+a different username, create a new link with that username in the console.
+
+The request allows 15 minutes for automatic connection. Its pending status and
+remaining confirmation window appear in the console, which polls while the
+request is active; **Refresh status** checks immediately. The bot appears in
+the list after Telegram confirms creation and the gateway connects it. The
+gateway confirmation window is separate from Telegram's creation link: an old
+link may still create a bot after automatic connection has expired. Create a
+new request, or use **Connect existing bot** with the resulting bot's token.
+
+**Disable** stops a bot's gateway access while retaining its configuration and
+local bindings. **Enable** restores it. For an additional bot, **Replace token**
+accepts a replacement token for the same Telegram identity, and **Remove**
+requires confirmation before deleting its local bot records, chat bindings and
+notification subscriptions. Removal keeps worker sessions and project files.
+The primary bot can be enabled or disabled; its token and removal remain
+managed by the existing gateway configuration.
+
+If Telegram reports that a managed bot changed owner, the gateway disables it
+and blocks enabling or replacing its token until Telegram verifies the
+configured owner again. You can also remove it and explicitly connect it again
+using its current token. Enabling a disabled bot discards updates Telegram held
+while it was disabled.
+
+All bot changes require authentication within the previous five minutes and
+the usual exact-origin and CSRF checks. If a request fails ambiguously, refresh
+the list to check its outcome before retrying. Additional bot credentials are
+encrypted in SQLite. Back up both the database and its private companion key,
+`<database path>.telegram-bots.key`, together; the key is required to restore
+those bots after a restart or recovery.
 
 ## Audio
 

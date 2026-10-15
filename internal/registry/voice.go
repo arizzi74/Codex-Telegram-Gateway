@@ -588,12 +588,22 @@ func (s *Store) CancelTelegramVoiceJobs(ctx context.Context, botID, code string)
 	if strings.TrimSpace(botID) == "" {
 		return errors.New("registry: Telegram bot ID is required")
 	}
+	return s.cancelVoiceJobs(ctx, "bot_id=$1", []any{botID}, code)
+}
+
+// CancelAllTelegramVoiceJobs applies shared voice settings to every bot,
+// including retired bot IDs which no longer have an active API client.
+func (s *Store) CancelAllTelegramVoiceJobs(ctx context.Context, code string) error {
+	return s.cancelVoiceJobs(ctx, "TRUE", nil, code)
+}
+
+func (s *Store) cancelVoiceJobs(ctx context.Context, predicate string, args []any, code string) error {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback(ctx)
-	if err := cancelTelegramVoiceJobs(ctx, tx, "bot_id=$1", []any{botID}, code); err != nil {
+	if err := cancelTelegramVoiceJobs(ctx, tx, predicate, args, code); err != nil {
 		return err
 	}
 	if err := tx.Commit(ctx); err != nil {

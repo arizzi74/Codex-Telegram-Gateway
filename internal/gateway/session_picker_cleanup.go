@@ -35,6 +35,9 @@ func (s *Sender) sendPickerCleanup(ctx context.Context, row registry.Delivery) (
 	if err != nil {
 		return 0, err
 	}
+	if err := s.authorizeDeliveryDestination(ctx, row, row.ChatID); err != nil {
+		return 0, err
+	}
 	api, ok := s.api.(TelegramDeleteAPI)
 	if !ok {
 		return 0, errors.New("Telegram session picker cleanup unavailable")

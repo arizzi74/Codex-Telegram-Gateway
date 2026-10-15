@@ -23,9 +23,10 @@ const defaultCommandTTL = time.Hour
 const dispatchedCommandRetryAfter = 5 * time.Second
 
 var (
-	ErrTelegramTarget  = errors.New("registry: Telegram target is unavailable")
-	ErrCallbackInvalid = errors.New("registry: callback is invalid, expired, or already used")
-	ErrStaleTurn       = errors.New("registry: active turn is unavailable or changed")
+	ErrTelegramTarget      = errors.New("registry: Telegram target is unavailable")
+	ErrCallbackInvalid     = errors.New("registry: callback is invalid, expired, or already used")
+	ErrStaleTurn           = errors.New("registry: active turn is unavailable or changed")
+	ErrTelegramBotDisabled = errors.New("registry: Telegram bot is disabled or removed")
 )
 
 // IncomingUpdate is the normalized, authenticated Telegram update supplied by
@@ -177,6 +178,23 @@ func (s *Store) AcceptTelegram(ctx context.Context, in IncomingUpdate) (AcceptRe
 		return AcceptResult{}, fmt.Errorf("registry: begin Telegram accept: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	var botAllowed bool
+	if err := tx.QueryRow(ctx, `SELECT NOT EXISTS(SELECT 1 FROM telegram_bots WHERE bot_id=$1 AND enabled=0)
+        AND NOT EXISTS(SELECT 1 FROM telegram_bot_retirements WHERE bot_id=$1)`, in.BotID).Scan(&botAllowed); err != nil {
+		return AcceptResult{}, fmt.Errorf("registry: authorize Telegram bot: %w", err)
+	}
+	if !botAllowed {
+		// A webhook can already be reading its body when an administrator
+		// disables the bot. Record only its update ID so redelivery after a
+		// subsequent enable cannot execute this discarded request.
+		if _, err := tx.Exec(ctx, `INSERT INTO telegram_updates(bot_id,update_id,raw) VALUES($1,$2,'{}') ON CONFLICT DO NOTHING`, in.BotID, in.UpdateID); err != nil {
+			return AcceptResult{}, err
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return AcceptResult{}, err
+		}
+		return AcceptResult{}, ErrTelegramBotDisabled
+	}
 	raw := in.Raw
 	if len(raw) == 0 {
 		raw = json.RawMessage(`{}`)

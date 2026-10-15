@@ -39,9 +39,12 @@
       <article><span>Pending approvals</span><strong id="approvals">—</strong></article>
       <article><span>Queued commands</span><strong id="commands">—</strong></article>
     </div>
-    <section class="card" aria-labelledby="bot-heading">
-      <h2 id="bot-heading">Telegram bot</h2>
+    <section id="telegram-bots-section" class="card" aria-labelledby="bot-heading">
+      <div class="row bot-section-heading"><div><h2 id="bot-heading">Telegram bots</h2><p>Connect another bot or create one through Telegram. All bots use this gateway’s private access rules and share its workers.</p></div><div class="bot-section-actions"><button id="bot-connect" type="button">Connect existing bot</button><button id="bot-create" type="button" class="secondary" disabled>Create managed bot</button></div></div>
+      <p id="bot-status" class="muted" role="status" aria-live="polite"></p>
+      <p id="bot-error" class="notice error" role="alert" hidden></p>
       <div id="bot-info"><p class="muted">Bot information is not available.</p></div>
+      <div id="bot-pending"></div>
     </section>
     <section id="audio-section" class="card" aria-labelledby="audio-heading">
       <h2 id="audio-heading">Audio</h2>
@@ -122,6 +125,39 @@
     </section>
   </section>
 </main>
+<dialog id="bot-token-dialog" class="bot-dialog" aria-labelledby="bot-token-heading" aria-describedby="bot-token-description">
+  <form id="bot-token-form">
+    <div class="row bot-dialog-heading"><h2 id="bot-token-heading">Connect existing bot</h2><button id="bot-token-close" type="button" class="secondary" aria-label="Close bot token dialog">Close</button></div>
+    <p id="bot-token-description">Get the token from @BotFather, then enter it here. The gateway checks the bot and connects its Telegram webhook.</p>
+    <label for="bot-token">Telegram bot token<input id="bot-token" type="password" autocomplete="off" spellcheck="false" autocapitalize="none" required aria-describedby="bot-token-help"></label>
+    <p id="bot-token-help" class="muted">Your token is sent only to this gateway. It is cleared from this form when submitted and is never saved in browser storage.</p>
+    <p id="bot-token-status" class="muted" role="status" aria-live="polite"></p>
+    <p id="bot-token-error" class="notice error" role="alert" hidden></p>
+    <div class="bot-dialog-actions"><button id="bot-token-submit" type="submit">Connect bot</button><button id="bot-token-cancel" type="button" class="secondary">Cancel</button></div>
+  </form>
+</dialog>
+<dialog id="bot-create-dialog" class="bot-dialog" aria-labelledby="bot-create-heading" aria-describedby="bot-create-description">
+  <div class="row bot-dialog-heading"><h2 id="bot-create-heading">Create managed bot</h2><button id="bot-create-close" type="button" class="secondary" aria-label="Close managed bot dialog">Close</button></div>
+  <form id="bot-create-form">
+    <p id="bot-create-description">Enable Bot Management Mode for your manager bot in @BotFather. Choose a username and display name, then confirm in Telegram.</p>
+    <label for="bot-manager">Manager bot<select id="bot-manager" required></select></label>
+    <p id="bot-manager-help" class="muted">Enable Bot Management Mode for your selected manager in @BotFather.</p>
+    <button id="bot-manager-refresh" type="button" class="secondary">Refresh manager bots</button>
+    <label for="bot-create-username">New bot username<input id="bot-create-username" autocomplete="off" spellcheck="false" autocapitalize="none" required pattern="[A-Za-z][A-Za-z0-9_]{4,31}" maxlength="32" placeholder="my_project_bot" aria-describedby="bot-create-username-help"></label>
+    <p id="bot-create-username-help" class="muted">Use 5–32 letters, digits or underscores. Start with a letter and end in “bot”.</p>
+    <label for="bot-create-name">Display name<input id="bot-create-name" autocomplete="off" required maxlength="64" placeholder="My project"></label>
+    <p class="muted">Keep this username in Telegram so the gateway can match your request. To change it, create a new link here. The bot shares this gateway’s allowed owner and workers.</p>
+    <p id="bot-create-status" class="muted" role="status" aria-live="polite"></p>
+    <p id="bot-create-error" class="notice error" role="alert" hidden></p>
+    <div class="bot-dialog-actions"><button id="bot-create-submit" type="submit">Create Telegram link</button><button id="bot-create-cancel" type="button" class="secondary">Cancel</button></div>
+  </form>
+  <div id="bot-create-result" hidden>
+    <p id="bot-create-result-status" role="status" aria-live="polite"></p>
+    <a id="bot-create-launch" class="button-link" target="_blank" rel="noopener noreferrer" hidden>Open Telegram to create bot</a>
+    <p class="muted">Finish in Telegram, then return here. The bot appears after Telegram confirms creation.</p>
+    <div class="bot-dialog-actions"><button id="bot-create-refresh" type="button" class="secondary">Refresh status</button><button id="bot-create-done" type="button" class="secondary">Close</button></div>
+  </div>
+</dialog>
 <dialog id="worker-enrollment" aria-labelledby="enrollment-heading" aria-describedby="enrollment-description">
   <div class="row enrollment-heading"><h2 id="enrollment-heading">Enroll a worker</h2><button id="enrollment-close" class="secondary" aria-label="Close enrollment">Close</button></div>
   <p id="enrollment-description">Run the installer on the worker machine. Enter a display name there, then paste this one-use URL. It expires in 10 minutes. Opening it in a browser does not use it.</p>

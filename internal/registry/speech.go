@@ -422,16 +422,26 @@ func (s *Store) CancelTelegramSpeechJobs(ctx context.Context, botID string) erro
 	if strings.TrimSpace(botID) == "" {
 		return errors.New("registry: Telegram bot ID is required")
 	}
+	return s.cancelSpeechJobs(ctx, "bot_id=$1", []any{botID})
+}
+
+// CancelAllTelegramSpeechJobs releases held text and audio intents for every
+// destination when the shared audio reply setting is disabled.
+func (s *Store) CancelAllTelegramSpeechJobs(ctx context.Context) error {
+	return s.cancelSpeechJobs(ctx, "TRUE", nil)
+}
+
+func (s *Store) cancelSpeechJobs(ctx context.Context, predicate string, args []any) error {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback(ctx)
-	result, err := tx.Exec(ctx, `UPDATE telegram_speech_jobs SET status='cancelled',prepared=0,lease_id=NULL,lease_until=NULL,error_code='speech_disabled',completed_at=`+sqliteNow+` WHERE bot_id=$1 AND status IN ('pending','processing')`, botID)
+	result, err := tx.Exec(ctx, `UPDATE telegram_speech_jobs SET status='cancelled',prepared=0,lease_id=NULL,lease_until=NULL,error_code='speech_disabled',completed_at=`+sqliteNow+` WHERE `+predicate+` AND status IN ('pending','processing')`, args...)
 	if err != nil {
 		return err
 	}
-	flags, err := tx.Exec(ctx, `UPDATE telegram_voice_jobs SET reply_with_audio=0 WHERE bot_id=$1 AND reply_with_audio=1`, botID)
+	flags, err := tx.Exec(ctx, `UPDATE telegram_voice_jobs SET reply_with_audio=0 WHERE `+predicate+` AND reply_with_audio=1`, args...)
 	if err != nil {
 		return err
 	}

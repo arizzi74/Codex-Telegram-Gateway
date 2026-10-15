@@ -183,6 +183,16 @@ func bindCommandSession(ctx context.Context, tx *dbTx, commandID, sessionID uuid
 	if botID == nil || userID == nil || chatID == nil {
 		return nil
 	}
+	// Removing a bot retires the routing of its historical commands without
+	// cancelling worker work. Even after reconnecting the same bot, a late
+	// new/fork result must not recreate one of those removed subscriptions.
+	var retired bool
+	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM telegram_bot_retired_commands WHERE bot_id=$1 AND command_id=$2)`, *botID, commandID).Scan(&retired); err != nil {
+		return fmt.Errorf("registry: check retired Telegram command binding: %w", err)
+	}
+	if retired {
+		return nil
+	}
 	var command protocol.Command
 	if err := json.Unmarshal(payload, &command); err != nil {
 		return fmt.Errorf("registry: decode automatic Telegram binding command: %w", err)

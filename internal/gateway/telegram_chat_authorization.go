@@ -18,6 +18,9 @@ func telegramChatAllowed(chats []int64, chat int64) bool {
 // authorizeDeliveryDestination checks the actual API destination, not only the
 // queue envelope: frozen chunks survive gateway restarts and policy changes.
 func (s *Sender) authorizeDeliveryDestination(ctx context.Context, row registry.Delivery, chat int64) error {
+	if !s.resolveDeliveryBot(row) {
+		return s.suppressUnauthorizedDelivery(ctx, row)
+	}
 	if row.Kind == "picker_cleanup" || row.Kind == "input_reply_cleanup" {
 		return nil // Deleting old content remains safe after access is revoked.
 	}
@@ -35,9 +38,34 @@ func (s *Sender) authorizeDeliveryDestination(ctx context.Context, row registry.
 			}
 		}
 	}
+	// A policy read can block while the bot is disabled or its token changes.
+	// Resolve again at the request boundary, retaining the durable bot ID.
+	if allowed {
+		allowed = s.resolveDeliveryBot(row) && telegramChatAllowed(s.options.AllowedChatIDs, chat)
+	}
 	if allowed {
 		return nil
 	}
+	return s.suppressUnauthorizedDelivery(ctx, row)
+}
+
+func (s *Sender) resolveDeliveryBot(row registry.Delivery) bool {
+	resolver := s.options.BotResolver
+	if resolver == nil {
+		return true
+	}
+	cfg, api, ok := resolver.ResolveTelegramBot(row.BotID)
+	if !ok || api == nil {
+		return false
+	}
+	s.api = api
+	s.options.BotID = row.BotID
+	s.options.OwnerID = cfg.Secrets.WLID
+	s.options.AllowedChatIDs = cfg.AllowedChatIDs
+	return true
+}
+
+func (s *Sender) suppressUnauthorizedDelivery(ctx context.Context, row registry.Delivery) error {
 	store, ok := s.store.(interface {
 		SkipDelivery(context.Context, string) error
 	})

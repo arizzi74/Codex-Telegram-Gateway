@@ -53,10 +53,40 @@ type TelegramSpeechProcessor struct {
 	redactor *auth.Redactor
 	encode   func(context.Context, []float32, int) ([]byte, error)
 	textWait time.Duration
+	resolver TelegramBotResolver
 }
 
 func NewTelegramSpeechProcessor(store TelegramSpeechStore, api TelegramSpeechAPI, engine speechEngine, settings speechConfiguration, cfg config.GatewayConfig, logger *slog.Logger, redactor *auth.Redactor) *TelegramSpeechProcessor {
 	return &TelegramSpeechProcessor{store: store, api: api, engine: engine, settings: settings, cfg: cfg, log: logger, redactor: redactor, encode: voice.EncodeOggOpus, textWait: 5 * time.Minute}
+}
+
+func (p *TelegramSpeechProcessor) WithBotResolver(resolver TelegramBotResolver) *TelegramSpeechProcessor {
+	p.resolver = resolver
+	return p
+}
+
+func (p *TelegramSpeechProcessor) jobBot(job registry.TelegramSpeechJob) (config.GatewayConfig, TelegramSpeechAPI, bool) {
+	if p.resolver != nil {
+		cfg, api, ok := p.resolver.ResolveTelegramBot(job.BotID)
+		return cfg, api, ok && api != nil
+	}
+	return p.cfg, p.api, job.BotID == p.cfg.Secrets.BotName
+}
+
+func (p *TelegramSpeechProcessor) cancelJobs(ctx context.Context) error {
+	if p.resolver == nil {
+		return p.store.CancelTelegramSpeechJobs(ctx, p.cfg.Secrets.BotName)
+	}
+	if store, ok := p.store.(interface {
+		CancelAllTelegramSpeechJobs(context.Context) error
+	}); ok {
+		return store.CancelAllTelegramSpeechJobs(ctx)
+	}
+	var failures []error
+	for _, id := range p.resolver.TelegramBotIDs() {
+		failures = append(failures, p.store.CancelTelegramSpeechJobs(ctx, id))
+	}
+	return errors.Join(failures...)
 }
 
 func (p *TelegramSpeechProcessor) Run(ctx context.Context) {
@@ -68,7 +98,7 @@ func (p *TelegramSpeechProcessor) Run(ctx context.Context) {
 		settings := p.settings.Settings()
 		if !settings.Enabled || !settings.ReplyWithAudio {
 			cancelCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-			err := p.store.CancelTelegramSpeechJobs(cancelCtx, p.cfg.Secrets.BotName)
+			err := p.cancelJobs(cancelCtx)
 			cancel()
 			if err != nil && ctx.Err() == nil {
 				p.log.Warn("Audio reply cancellation deferred")
@@ -143,7 +173,8 @@ func (p *TelegramSpeechProcessor) Run(ctx context.Context) {
 
 func (p *TelegramSpeechProcessor) allowed(ctx context.Context, job registry.TelegramSpeechJob) (bool, error) {
 	settings := p.settings.Settings()
-	if !settings.Enabled || !settings.ReplyWithAudio || job.BotID != p.cfg.Secrets.BotName || !auth.AuthorizedTelegramUser(job.UserID, p.cfg.AllowedUserIDs) || !telegramChatAllowed(p.cfg.AllowedChatIDs, job.ChatID) {
+	cfg, _, ok := p.jobBot(job)
+	if !settings.Enabled || !settings.ReplyWithAudio || !ok || !auth.AuthorizedTelegramUser(job.UserID, cfg.AllowedUserIDs) || !telegramChatAllowed(cfg.AllowedChatIDs, job.ChatID) {
 		return false, nil
 	}
 	checkCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
@@ -262,7 +293,13 @@ func (p *TelegramSpeechProcessor) process(ctx context.Context, job registry.Tele
 			return
 		}
 		sendCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
-		messageID, err := p.api.SendVoice(sendCtx, job.ChatID, job.TopicID, part.data, part.duration)
+		cfg, api, ok := p.jobBot(job)
+		if !ok || !auth.AuthorizedTelegramUser(job.UserID, cfg.AllowedUserIDs) || !telegramChatAllowed(cfg.AllowedChatIDs, job.ChatID) {
+			cancel()
+			fail("speech_cancelled", false)
+			return
+		}
+		messageID, err := api.SendVoice(sendCtx, job.ChatID, job.TopicID, part.data, part.duration)
 		clear(part.data)
 		cancel()
 		if err != nil {
@@ -309,7 +346,7 @@ func (p *TelegramSpeechProcessor) watchSettings(parent context.Context) (context
 			if !settings.Enabled || !settings.ReplyWithAudio {
 				cancel()
 				cancelCtx, stop := context.WithTimeout(context.WithoutCancel(parent), 5*time.Second)
-				err := p.store.CancelTelegramSpeechJobs(cancelCtx, p.cfg.Secrets.BotName)
+				err := p.cancelJobs(cancelCtx)
 				stop()
 				if err != nil {
 					p.log.Warn("Audio reply cancellation deferred")

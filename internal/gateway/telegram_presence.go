@@ -31,6 +31,7 @@ type TelegramChatActionAPI interface {
 
 type PresenceOptions struct {
 	AllowedChatIDs []int64
+	BotResolver    TelegramBotResolver
 }
 
 // Presence periodically renews Telegram's short-lived typing indicator from
@@ -78,7 +79,7 @@ func (p *Presence) flush(ctx context.Context, now time.Time) error {
 	active := make(map[registry.TelegramTypingTarget]struct{}, len(targets))
 	due := make([]registry.TelegramTypingTarget, 0, len(targets))
 	for _, target := range targets {
-		if !telegramChatAllowed(p.options.AllowedChatIDs, target.ChatID) {
+		if _, allowed := p.targetAPI(target); !allowed {
 			continue
 		}
 		active[target] = struct{}{}
@@ -94,7 +95,7 @@ func (p *Presence) flush(ctx context.Context, now time.Time) error {
 			delete(p.last, target)
 		}
 	}
-	if p.api == nil || len(due) == 0 {
+	if (p.api == nil && p.options.BotResolver == nil) || len(due) == 0 {
 		return nil
 	}
 
@@ -122,7 +123,7 @@ func (p *Presence) flush(ctx context.Context, now time.Time) error {
 				}
 			}
 			// Recheck after queueing and visibility reads, at the actual request.
-			if !telegramChatAllowed(p.options.AllowedChatIDs, target.ChatID) {
+			if _, allowed := p.targetAPI(target); !allowed {
 				return
 			}
 			if store, ok := p.store.(telegramChatAuthorizationStore); ok {
@@ -131,11 +132,23 @@ func (p *Presence) flush(ctx context.Context, now time.Time) error {
 					return
 				}
 			}
-			if err := p.api.SendChatAction(requestCtx, ChatAction{ChatID: target.ChatID, TopicID: target.TopicID, Action: "typing"}); err != nil && ctx.Err() == nil {
+			api, allowed := p.targetAPI(target)
+			if !allowed || api == nil {
+				return
+			}
+			if err := api.SendChatAction(requestCtx, ChatAction{ChatID: target.ChatID, TopicID: target.TopicID, Action: "typing"}); err != nil && ctx.Err() == nil {
 				p.log.Debug("Telegram typing indicator unavailable", "chat_id", target.ChatID, "topic_id", target.TopicID, "error", err)
 			}
 		}(target)
 	}
 	group.Wait()
 	return nil
+}
+
+func (p *Presence) targetAPI(target registry.TelegramTypingTarget) (TelegramChatActionAPI, bool) {
+	if resolver := p.options.BotResolver; resolver != nil {
+		cfg, api, ok := resolver.ResolveTelegramBot(target.BotID)
+		return api, ok && api != nil && telegramChatAllowed(cfg.AllowedChatIDs, target.ChatID)
+	}
+	return p.api, telegramChatAllowed(p.options.AllowedChatIDs, target.ChatID)
 }

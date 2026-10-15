@@ -16,11 +16,12 @@ import (
 )
 
 type TelegramUser struct {
-	ID        int64  `json:"id"`
-	Username  string `json:"username"`
-	IsBot     bool   `json:"is_bot"`
-	FirstName string `json:"first_name"`
-	LastName  string `json:"last_name"`
+	ID            int64  `json:"id"`
+	Username      string `json:"username"`
+	IsBot         bool   `json:"is_bot"`
+	FirstName     string `json:"first_name"`
+	LastName      string `json:"last_name"`
+	CanManageBots bool   `json:"can_manage_bots,omitempty"`
 }
 type TelegramChat struct {
 	ID int64 `json:"id"`
@@ -59,9 +60,14 @@ type TelegramCallback struct {
 	Data    string           `json:"data"`
 }
 type TelegramUpdate struct {
-	ID       int64             `json:"update_id"`
-	Message  *TelegramMessage  `json:"message"`
-	Callback *TelegramCallback `json:"callback_query"`
+	ID         int64                      `json:"update_id"`
+	Message    *TelegramMessage           `json:"message"`
+	Callback   *TelegramCallback          `json:"callback_query"`
+	ManagedBot *TelegramManagedBotUpdated `json:"managed_bot,omitempty"`
+}
+type TelegramManagedBotUpdated struct {
+	User TelegramUser `json:"user"`
+	Bot  TelegramUser `json:"bot"`
 }
 type TelegramButton struct {
 	Text string `json:"text"`
@@ -319,7 +325,24 @@ func (t *TelegramClient) GetWebhook(ctx context.Context) (WebhookInfo, error) {
 	return result, err
 }
 func (t *TelegramClient) SetWebhook(ctx context.Context, url, secret string) error {
-	return t.call(ctx, "setWebhook", map[string]any{"url": url, "secret_token": secret, "allowed_updates": []string{"message", "callback_query"}, "drop_pending_updates": false}, nil)
+	return t.setWebhook(ctx, url, secret, false)
+}
+
+// SetWebhookDiscardPending starts an explicitly re-enabled bot without replaying
+// messages Telegram held while the gateway had disabled its webhook.
+func (t *TelegramClient) SetWebhookDiscardPending(ctx context.Context, url, secret string) error {
+	return t.setWebhook(ctx, url, secret, true)
+}
+func (t *TelegramClient) setWebhook(ctx context.Context, url, secret string, dropPending bool) error {
+	return t.call(ctx, "setWebhook", map[string]any{"url": url, "secret_token": secret, "allowed_updates": []string{"message", "callback_query", "managed_bot"}, "drop_pending_updates": dropPending}, nil)
+}
+func (t *TelegramClient) DeleteWebhook(ctx context.Context) error {
+	return t.call(ctx, "deleteWebhook", map[string]any{"drop_pending_updates": false}, nil)
+}
+func (t *TelegramClient) GetManagedBotToken(ctx context.Context, botID int64) (string, error) {
+	var token string
+	err := t.call(ctx, "getManagedBotToken", map[string]any{"user_id": botID}, &token)
+	return token, err
 }
 func (t *TelegramClient) Identity(ctx context.Context) (TelegramUser, error) {
 	var result TelegramUser

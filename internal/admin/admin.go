@@ -38,6 +38,7 @@ var assets embed.FS
 type Config struct {
 	Origin           string
 	BotAPI           BotAPI
+	TelegramBots     TelegramBotManager
 	BotUsername      string
 	AllowedUserCount int
 	AllowedChatCount int
@@ -52,6 +53,7 @@ type Server struct {
 	webauthn       *wa.WebAuthn
 	mux            *http.ServeMux
 	bot            *botMonitor
+	telegramBots   TelegramBotManager
 	redactor       *auth.Redactor
 	loginBegins    *httpguard.Limiter
 	loginFinishes  *httpguard.Limiter
@@ -84,6 +86,7 @@ func New(store *registry.Store, cfg Config) (*Server, error) {
 	s.passwordSlots = make(chan struct{}, 2)
 	s.enrollments = httpguard.NewLimiter(20, 240, time.Minute)
 	s.bot = newBotMonitor(cfg)
+	s.telegramBots = cfg.TelegramBots
 	s.redactor = cfg.Redactor
 	s.webui = cfg.WebUI
 	s.audio = cfg.Audio
@@ -116,6 +119,9 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/tgw/api/v1/admin/passkeys", s.passkeys)
 	s.mux.HandleFunc("/tgw/api/v1/admin/passkeys/", s.passkey)
 	s.mux.HandleFunc("/tgw/api/v1/admin/dashboard", s.dashboard)
+	s.mux.HandleFunc("/tgw/api/v1/admin/telegram-bots", s.telegramBotCollection)
+	s.mux.HandleFunc("/tgw/api/v1/admin/telegram-bots/managed", s.telegramManagedBotCreate)
+	s.mux.HandleFunc("/tgw/api/v1/admin/telegram-bots/", s.telegramBotMember)
 	s.mux.HandleFunc("/tgw/api/v1/admin/workers", s.workers)
 	s.mux.HandleFunc("/tgw/api/v1/admin/workers/", s.worker)
 	s.mux.HandleFunc("/tgw/api/v1/admin/worker-enrollments", s.workerEnrollments)

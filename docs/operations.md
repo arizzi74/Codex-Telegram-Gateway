@@ -189,11 +189,21 @@ contain credentials and conversation data. `integrity_check` must return `ok`,
 and `foreign_key_check` must return no rows. Do not copy just a live `.db` file:
 recent committed data can still be in its `-wal` sidecar.
 
+Additional Telegram bot tokens and webhook secrets are encrypted with a key in
+`<database_path>.telegram-bots.key` (normally
+`/var/lib/codex-gateway/gateway.db.telegram-bots.key`). Back up this file alongside
+the database, retaining mode `0600`, and protect both. The gateway updater includes
+the existing key in its private rollback backup. A database containing added bots
+cannot be opened without its original key; generating a replacement does not
+recover those credentials. The primary bot remains configured in `.botsecrets`.
+
 For restore, stop the gateway, preserve the current database and both sidecars,
 and restore the verified backup with mode `0600` and gateway ownership. Remove
 only the old destination's `-wal` and `-shm` files while every connection is
 closed, then start the gateway and verify `/tgw/readyz` and worker reconnection.
 Workers keep their local Codex processes and durable outboxes running.
+Restore the matching Telegram bot key to `<database_path>.telegram-bots.key` with
+mode `0600` and gateway ownership before starting the gateway.
 
 ## Switching from PostgreSQL
 

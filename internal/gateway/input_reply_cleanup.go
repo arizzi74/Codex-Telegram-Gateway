@@ -37,6 +37,9 @@ func (s *Sender) sendInputReplyCleanup(ctx context.Context, row registry.Deliver
 	if err != nil {
 		return 0, err
 	}
+	if err := s.authorizeDeliveryDestination(ctx, row, row.ChatID); err != nil {
+		return 0, err
+	}
 	api, ok := s.api.(TelegramDeleteAPI)
 	if !ok {
 		return 0, errors.New("Telegram answer prompt cleanup unavailable")

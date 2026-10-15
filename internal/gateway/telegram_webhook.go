@@ -116,7 +116,7 @@ func (h *Webhook) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		command, _, _ := strings.Cut(head, "@")
 		if strings.EqualFold(command, "/tgsteer") {
-			action, _, text, ignore := parseTelegramText(in.Text, h.cfg.Secrets.BotName)
+			action, _, text, ignore := parseTelegramText(in.Text, telegramCommandUsername(h.cfg))
 			if ignore {
 				w.WriteHeader(200)
 				return
@@ -140,7 +140,7 @@ func (h *Webhook) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			in.Action = "media_error"
 		}
 	} else {
-		action, target, text, ignore := parseTelegramText(message.Text, h.cfg.Secrets.BotName)
+		action, target, text, ignore := parseTelegramText(message.Text, telegramCommandUsername(h.cfg))
 		if ignore {
 			w.WriteHeader(200)
 			return
@@ -152,6 +152,10 @@ func (h *Webhook) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
 	_, err = h.acceptTelegramReply(ctx, in)
+	if errors.Is(err, registry.ErrTelegramBotDisabled) {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
 	if err != nil {
 		h.log.Warn("Telegram update could not be persisted", "telegram_update_id", update.ID, "error", err)
 		http.Error(w, "registry unavailable", 503)
@@ -190,6 +194,13 @@ func (h *Webhook) acceptTelegramReply(ctx context.Context, in registry.IncomingU
 		case <-timer.C:
 		}
 	}
+}
+
+func telegramCommandUsername(cfg config.GatewayConfig) string {
+	if cfg.Secrets.BotUsername != "" {
+		return cfg.Secrets.BotUsername
+	}
+	return cfg.Secrets.BotName
 }
 
 func parseTelegramText(text, botName string) (action, target, prompt string, ignore bool) {

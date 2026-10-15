@@ -147,6 +147,9 @@ func inspectUpdateBackup(root *os.Root, name, component string) (updateBackup, e
 		// Whisper is optional and absent from older gateway snapshots.
 		allowed["04-codex-whisper"] = true
 		allowed["gateway.db"] = true
+		// Older backups predate encrypted bot credentials. New backups keep
+		// their separate key with the database for recovery.
+		allowed["gateway.db.telegram-bots.key"] = true
 		// SQLite's backup integrity check can leave WAL/shared-memory files.
 		// They belong to the snapshot and must be retained or removed with it.
 		for _, suffix := range []string{"-wal", "-shm", "-journal"} {
@@ -167,6 +170,9 @@ func inspectUpdateBackup(root *os.Root, name, component string) (updateBackup, e
 		}
 		if !fileInfo.Mode().IsRegular() {
 			return result, fmt.Errorf("snapshot file %q is not a regular file", entry.Name())
+		}
+		if entry.Name() == "gateway.db.telegram-bots.key" && (fileInfo.Size() != 32 || fileInfo.Mode().Perm()&0o077 != 0) {
+			return result, errors.New("Telegram bot key snapshot must be a private 32-byte file")
 		}
 		if entry.Name() == "00-update.json" && fileInfo.Size() > 4*1024*1024 {
 			return result, errors.New("snapshot metadata exceeds size limit")

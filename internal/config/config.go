@@ -105,10 +105,12 @@ type RuntimeProfile struct {
 // BotSecrets are local Telegram identity and token settings. Values are kept
 // out of error strings and callers must not log them.
 type BotSecrets struct {
-	BotName  string
-	BotToken string
-	WLName   string
-	WLID     int64
+	BotName string
+	// BotUsername is the Telegram username; BotName remains the durable routing ID.
+	BotUsername string
+	BotToken    string
+	WLName      string
+	WLID        int64
 }
 
 // LoadGateway reads a JSON gateway config, applies safe defaults, and reads

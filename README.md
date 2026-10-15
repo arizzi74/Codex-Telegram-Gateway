@@ -1,10 +1,15 @@
 # Codex Telegram control plane
 
 A Go gateway and Linux/macOS worker with embedded SQLite storage for controlling local
-Codex sessions through an allowlisted Telegram bot or a responsive browser interface.
+Codex sessions through allowlisted Telegram bots or a responsive browser interface.
 The gateway includes an admin console with passkeys and optional username/password
 sign-in. Workers supervise
 private Codex app-server processes and support local terminal attachment.
+
+The admin console can connect additional Telegram bots by token or create them
+through Telegram's Managed Bots flow. Bots share the gateway owner's access and
+worker inventory while keeping independent chat selections. See
+[Telegram bot management](docs/admin.md).
 
 The browser interface displays Markdown and Mermaid diagrams on desktop and
 mobile, with local rendering, zoom controls and access to the diagram source.
@@ -23,7 +28,7 @@ commands and events travel over that connection.
 
 ```mermaid
 flowchart TB
-  telegram["Telegram"]
+  telegram["Telegram bots · independent chat selections"]
   browser["Web UI in browser"]
   gateway["Go gateway"]
   registry[("SQLite registry")]

@@ -51,6 +51,7 @@ type TelegramVoiceProcessor struct {
 	engine    voiceEngine
 	decode    func(context.Context, io.Reader) ([]float32, error)
 	settings  VoiceConfiguration
+	resolver  TelegramBotResolver
 	newEngine func(config.VoiceConfig) (voiceEngine, error)
 }
 
@@ -59,6 +60,13 @@ func NewTelegramVoiceProcessor(store TelegramVoiceStore, api TelegramVoiceAPI, c
 	if len(settings) > 0 {
 		p.settings = settings[0]
 	}
+	return p
+}
+
+// WithBotResolver routes the shared transcription queue without duplicating
+// the warm engine or creating competing consumers for individual bots.
+func (p *TelegramVoiceProcessor) WithBotResolver(resolver TelegramBotResolver) *TelegramVoiceProcessor {
+	p.resolver = resolver
 	return p
 }
 
@@ -87,7 +95,7 @@ func (p *TelegramVoiceProcessor) Run(ctx context.Context) {
 			initialized = true
 			if !selected.Enabled {
 				cleanupCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-				if err := p.store.CancelTelegramVoiceJobs(cleanupCtx, p.cfg.Secrets.BotName, "voice_cancelled"); err != nil && ctx.Err() == nil {
+				if err := p.cancelJobs(cleanupCtx); err != nil && ctx.Err() == nil {
 					p.log.Warn("Pending voice-note cancellation deferred")
 				}
 				cancel()
@@ -162,18 +170,32 @@ func (p *TelegramVoiceProcessor) Run(ctx context.Context) {
 }
 
 func (p *TelegramVoiceProcessor) authorized(job registry.TelegramVoiceJob) bool {
-	if job.BotID != p.cfg.Secrets.BotName || !auth.AuthorizedTelegramUser(job.UserID, p.cfg.AllowedUserIDs) {
-		return false
+	cfg, _, ok := p.jobBot(job)
+	return ok && auth.AuthorizedTelegramUser(job.UserID, cfg.AllowedUserIDs) && telegramChatAllowed(cfg.AllowedChatIDs, job.ChatID)
+}
+
+func (p *TelegramVoiceProcessor) jobBot(job registry.TelegramVoiceJob) (config.GatewayConfig, TelegramVoiceAPI, bool) {
+	if p.resolver != nil {
+		cfg, api, ok := p.resolver.ResolveTelegramBot(job.BotID)
+		return cfg, api, ok && api != nil
 	}
-	if len(p.cfg.AllowedChatIDs) == 0 {
-		return true
+	return p.cfg, p.api, job.BotID == p.cfg.Secrets.BotName
+}
+
+func (p *TelegramVoiceProcessor) cancelJobs(ctx context.Context) error {
+	if p.resolver == nil {
+		return p.store.CancelTelegramVoiceJobs(ctx, p.cfg.Secrets.BotName, "voice_cancelled")
 	}
-	for _, id := range p.cfg.AllowedChatIDs {
-		if id == job.ChatID {
-			return true
-		}
+	if store, ok := p.store.(interface {
+		CancelAllTelegramVoiceJobs(context.Context, string) error
+	}); ok {
+		return store.CancelAllTelegramVoiceJobs(ctx, "voice_cancelled")
 	}
-	return false
+	var failures []error
+	for _, id := range p.resolver.TelegramBotIDs() {
+		failures = append(failures, p.store.CancelTelegramVoiceJobs(ctx, id, "voice_cancelled"))
+	}
+	return errors.Join(failures...)
 }
 
 func (p *TelegramVoiceProcessor) process(ctx context.Context, job registry.TelegramVoiceJob) {
@@ -193,7 +215,21 @@ func (p *TelegramVoiceProcessor) process(ctx context.Context, job registry.Teleg
 	workCtx, cancel := context.WithTimeout(ctx, 10*time.Minute)
 	defer cancel()
 	downloadCtx, downloadCancel := context.WithTimeout(workCtx, 30*time.Second)
-	data, err := p.api.DownloadVoice(downloadCtx, job.FileID)
+	if store, ok := p.store.(telegramChatAuthorizationStore); ok {
+		allowed, err := store.TelegramChatAllowed(downloadCtx, job.BotID, job.ChatID)
+		if err != nil || !allowed {
+			downloadCancel()
+			fail("voice_unauthorized", err != nil)
+			return
+		}
+	}
+	_, api, ok := p.jobBot(job)
+	if !ok || !p.authorized(job) {
+		downloadCancel()
+		fail("voice_unauthorized", false)
+		return
+	}
+	data, err := api.DownloadVoice(downloadCtx, job.FileID)
 	downloadCancel()
 	if err != nil {
 		code := "voice_download_failed"
@@ -224,6 +260,10 @@ func (p *TelegramVoiceProcessor) process(ctx context.Context, job registry.Teleg
 		return
 	}
 	defer clear(pcm)
+	if !p.authorized(job) {
+		fail("voice_unauthorized", false)
+		return
+	}
 	var release func()
 	if limiter, ok := p.settings.(audioInferenceLimiter); ok {
 		release, err = limiter.AcquireInference(workCtx)

@@ -176,20 +176,27 @@ func run(args []string, logger *slog.Logger) error {
 		defer speechService.Close()
 		audioSettings.SetSpeechSupport(speechService)
 		speechService.SetInferenceLimiter(audioSettings)
-		// Prepared reply audio exists only in memory. Rebuild unfinished replies
-		// after a restart before the text sender can release their final text.
-		recoverCtx, cancelRecovery := context.WithTimeout(ctx, 10*time.Second)
-		err = store.RecoverTelegramSpeech(recoverCtx, cfg.Secrets.BotName)
-		cancelRecovery()
+		bots, err := gateway.NewTelegramBotManager(ctx, store, cfg, secret, logger, audioSettings)
 		if err != nil {
-			return errors.New("could not recover pending Telegram audio replies")
+			return errors.New("could not load Telegram bots; check bot state and encryption key permissions")
 		}
-		mux.Handle("/tgw/api/v1/telegram/webhook", gateway.NewWebhook(store, cfg, secret, api, logger, audioSettings))
-		redactor, err := auth.NewRedactor([]string{regexp.QuoteMeta(cfg.Secrets.BotToken), regexp.QuoteMeta(secret), `cwk_[a-f0-9]+`, `sk-[A-Za-z0-9_-]{16,}`}, "[REDACTED]")
+		// Prepared reply audio exists only in memory. Rebuild unfinished replies
+		// for every enabled bot before the shared sender releases final text.
+		for _, botID := range bots.TelegramBotIDs() {
+			recoverCtx, cancelRecovery := context.WithTimeout(ctx, 10*time.Second)
+			err = store.RecoverTelegramSpeech(recoverCtx, botID)
+			cancelRecovery()
+			if err != nil {
+				return errors.New("could not recover pending Telegram audio replies")
+			}
+		}
+		mux.Handle("/tgw/api/v1/telegram/webhook", bots)
+		mux.Handle("/tgw/api/v1/telegram/bots/", bots)
+		redactor, err := auth.NewRedactor([]string{regexp.QuoteMeta(cfg.Secrets.BotToken), regexp.QuoteMeta(secret), `[0-9]{5,20}:[A-Za-z0-9_-]{20,}`, `cwk_[a-f0-9]+`, `sk-[A-Za-z0-9_-]{16,}`}, "[REDACTED]")
 		if err != nil {
 			return err
 		}
-		console, err := admin.New(store, admin.Config{Origin: cfg.PublicBaseURL, BotAPI: api,
+		console, err := admin.New(store, admin.Config{Origin: cfg.PublicBaseURL, BotAPI: api, TelegramBots: bots,
 			BotUsername: cfg.Secrets.BotName, AllowedUserCount: len(cfg.AllowedUserIDs),
 			AllowedChatCount: len(cfg.AllowedChatIDs), Redactor: redactor, WebUI: hub, Audio: audioSettings})
 		if err != nil {
@@ -201,37 +208,21 @@ func run(args []string, logger *slog.Logger) error {
 		mux.Handle("/tgw/enroll/", console)
 		mux.Handle("/tgw/webui/", console)
 		mux.Handle("/tgw/api/v1/webui/", console)
-		sender := gateway.NewSender(store, api, logger, gateway.SenderOptions{BotID: cfg.Secrets.BotName, OwnerID: cfg.Secrets.WLID, AllowedChatIDs: cfg.AllowedChatIDs, Redactor: redactor})
+		sender := gateway.NewSender(store, api, logger, gateway.SenderOptions{BotID: cfg.Secrets.BotName, OwnerID: cfg.Secrets.WLID, AllowedChatIDs: cfg.AllowedChatIDs, Redactor: redactor, BotResolver: bots})
 		dispatcher := gateway.NewDispatcher(store, hub, logger)
 		server := &http.Server{Addr: cfg.Listen, Handler: mux, ReadHeaderTimeout: cfg.ReadHeaderTimeout, ReadTimeout: 15 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 16 << 10}
 		serviceCtx, stopService := context.WithCancel(ctx)
 		var services sync.WaitGroup
-		services.Go(func() {
-			for serviceCtx.Err() == nil {
-				menuCtx, cancel := context.WithTimeout(serviceCtx, 45*time.Second)
-				err := gateway.SyncCommandMenu(menuCtx, api, cfg.Secrets.BotName)
-				cancel()
-				if err == nil || serviceCtx.Err() != nil {
-					return
-				}
-				logger.Warn("Telegram command menu update deferred; retrying automatically")
-				retry := time.NewTimer(30 * time.Second)
-				select {
-				case <-serviceCtx.Done():
-					retry.Stop()
-					return
-				case <-retry.C:
-				}
-			}
-		})
 		services.Go(func() { hub.Run(serviceCtx) })
 		services.Go(func() { console.RunWebPush(serviceCtx, logger) })
 		services.Go(func() { _ = sender.Run(serviceCtx) })
 		services.Go(func() { _ = dispatcher.Run(serviceCtx) })
 		services.Go(func() { audioSettings.Run(serviceCtx) })
-		services.Go(func() { gateway.NewTelegramVoiceProcessor(store, api, cfg, logger, audioSettings).Run(serviceCtx) })
 		services.Go(func() {
-			gateway.NewTelegramSpeechProcessor(store, api, speechService, audioSettings, cfg, logger, redactor).Run(serviceCtx)
+			gateway.NewTelegramVoiceProcessor(store, api, cfg, logger, audioSettings).WithBotResolver(bots).Run(serviceCtx)
+		})
+		services.Go(func() {
+			gateway.NewTelegramSpeechProcessor(store, api, speechService, audioSettings, cfg, logger, redactor).WithBotResolver(bots).Run(serviceCtx)
 		})
 		services.Go(func() {
 			ticker := time.NewTicker(time.Minute)
@@ -257,10 +248,10 @@ func run(args []string, logger *slog.Logger) error {
 			}
 		})
 		services.Go(func() {
-			_ = gateway.NewPresence(store, api, logger, gateway.PresenceOptions{AllowedChatIDs: cfg.AllowedChatIDs}).Run(serviceCtx)
+			_ = gateway.NewPresence(store, api, logger, gateway.PresenceOptions{AllowedChatIDs: cfg.AllowedChatIDs, BotResolver: bots}).Run(serviceCtx)
 		})
 		services.Go(func() {
-			_ = gateway.NewSessionMenus(store, api, logger, gateway.SessionMenuOptions{BotID: cfg.Secrets.BotName, AllowedUserIDs: cfg.AllowedUserIDs, AllowedChatIDs: cfg.AllowedChatIDs, Redactor: redactor}).Run(serviceCtx)
+			_ = gateway.NewSessionMenus(store, api, logger, gateway.SessionMenuOptions{BotID: cfg.Secrets.BotName, AllowedUserIDs: cfg.AllowedUserIDs, AllowedChatIDs: cfg.AllowedChatIDs, Redactor: redactor, BotResolver: bots}).Run(serviceCtx)
 		})
 		defer func() { stopService(); services.Wait() }()
 		errCh := make(chan error, 1)

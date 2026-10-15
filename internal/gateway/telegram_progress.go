@@ -71,10 +71,6 @@ func (s *Sender) sendProgress(ctx context.Context, row registry.Delivery, messag
 	if !ok {
 		return 0, errors.New("Telegram progress tracking unavailable")
 	}
-	api, ok := s.api.(TelegramFormattedEditAPI)
-	if !ok {
-		return 0, errors.New("Telegram progress editing unavailable")
-	}
 	id, err := store.TelegramProgressTarget(ctx, row.ID)
 	if err != nil {
 		return 0, err
@@ -89,6 +85,10 @@ func (s *Sender) sendProgress(ctx context.Context, row registry.Delivery, messag
 	}
 	if err := s.authorizeDeliveryDestination(ctx, row, message.ChatID); err != nil {
 		return 0, err
+	}
+	api, ok := s.api.(TelegramFormattedEditAPI)
+	if !ok {
+		return 0, errors.New("Telegram progress editing unavailable")
 	}
 	err = api.EditFormatted(ctx, id, message)
 	var telegram *TelegramError
@@ -152,9 +152,21 @@ func (s *Sender) flushDeletions(ctx context.Context, store TelegramProgressStore
 		return err
 	}
 	for _, row := range rows {
+		deleteAPI := api
+		if resolver := s.options.BotResolver; resolver != nil {
+			_, client, ok := resolver.ResolveTelegramBot(row.BotID)
+			if !ok || client == nil {
+				// Retired tokens cannot safely clean up their old messages.
+				if err := store.MarkTelegramDeletionDone(ctx, row.ID); err != nil {
+					return err
+				}
+				continue
+			}
+			deleteAPI = client
+		}
 		// Like sends, only a short lease is held for one external API call.
 		deleteCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
-		err := api.DeleteMessage(deleteCtx, row.ChatID, row.MessageID)
+		err := deleteAPI.DeleteMessage(deleteCtx, row.ChatID, row.MessageID)
 		cancel()
 		if err == nil || telegramMessageAlreadyDeleted(err) {
 			if err := store.MarkTelegramDeletionDone(ctx, row.ID); err != nil {

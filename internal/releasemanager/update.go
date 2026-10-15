@@ -203,6 +203,37 @@ func (database *updateDatabase) validateSourcePaths() error {
 	return nil
 }
 
+// Bot credentials in SQLite require this immutable, separately stored key.
+// Resolve it beneath the already opened data root, even when updating as root.
+func backupTelegramBotKey(database *updateDatabase, backupDir string) error {
+	name := database.rel + ".telegram-bots.key"
+	info, err := database.root.Lstat(name)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil // Gateways without bot management have no key yet.
+	}
+	if err != nil {
+		return err
+	}
+	if !info.Mode().IsRegular() || info.Mode().Perm()&0o077 != 0 || info.Size() != 32 {
+		return errors.New("Telegram bot key must be a private regular 32-byte file")
+	}
+	f, err := database.root.Open(name)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	opened, err := f.Stat()
+	if err != nil || !os.SameFile(info, opened) {
+		return errors.New("Telegram bot key changed during backup")
+	}
+	key, err := io.ReadAll(io.LimitReader(f, 33))
+	defer clear(key)
+	if err != nil || len(key) != 32 {
+		return errors.New("could not read Telegram bot key for backup")
+	}
+	return AtomicWrite(filepath.Join(backupDir, "gateway.db.telegram-bots.key"), key, 0o600, nil)
+}
+
 func randomSuffix() (string, error) {
 	var buf [12]byte
 	if _, err := rand.Read(buf[:]); err != nil {
@@ -834,6 +865,9 @@ func (m *Manager) ApplyUpdate(ctx context.Context, l *Layout, packages map[strin
 		}
 		if database != nil && database.existed {
 			if err := database.validateSourcePaths(); err != nil {
+				return err
+			}
+			if err := backupTelegramBotKey(database, backup); err != nil {
 				return err
 			}
 			if err := backupSQLiteFromRoot(ctx, database, filepath.Join(backup, "gateway.db")); err != nil {

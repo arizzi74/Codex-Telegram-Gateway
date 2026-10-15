@@ -38,6 +38,18 @@ For custom settings, prepare the [JSON configuration](../examples/gateway.json)
 and a private environment file instead. The managed gateway database must be
 under `/var/lib/codex-gateway`.
 
+This initial bot remains the gateway's primary bot. After setup, use
+**Telegram bots** in `/tgw/admin/` to **Connect existing bot** with another
+BotFather token, or **Create managed bot** through a manager with BotFather's
+**Bot Management Mode** enabled. Managed creation opens a Telegram confirmation
+link and allows 15 minutes for the gateway to match the resulting callback;
+keep the requested username when confirming. These additional bots inherit
+the same private Telegram access rules and share the configured workers.
+See [Telegram bot management](admin.md#telegram-bots) for connection, token
+replacement, enable/disable, and removal. Back up the gateway database together
+with its private `<database path>.telegram-bots.key` file to preserve additional
+bot credentials.
+
 For a worker, choose **Enroll worker** in the gateway admin console and copy the
 one-use enrollment URL. It expires after 10 minutes and is redeemed only when
 the installer submits it; opening the URL in a browser does not consume it.
@@ -187,6 +199,8 @@ and command menu, then creates a first administrator's one-time token if needed.
 Open the printed `/tgw/admin/` address, register a passkey within 15 minutes, and
 choose **Enroll worker** to obtain a one-use installation URL. Existing administrator passkeys are
 preserved when completion is rerun.
+You can then connect or create additional bots in **Telegram bots** without
+rerunning installation or changing the primary bot's configuration.
 If an existing gateway predates guided administrator setup, the wizard prints
 `sudo codex-telegramgw update gateway`; run that command when convenient, then
 run `sudo codex-telegramgw finish gateway` again. Existing administrators can
