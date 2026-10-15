@@ -319,6 +319,16 @@ func (m *TelegramBotManager) summary(bot *telegramManagedRuntime) TelegramBotSum
 	return TelegramBotSummary{ID: b.ID, TelegramID: b.TelegramID, Username: b.Username, DisplayName: b.DisplayName, Enabled: b.Enabled, Legacy: b.Legacy, Managed: b.ManagedBy != "", CanManageBots: b.CanManageBots, WebhookURL: m.webhookURL(b), Status: status, Error: b.LastError}
 }
 func (m *TelegramBotManager) ListTelegramBots(ctx context.Context) ([]TelegramBotSummary, error) {
+	return m.listTelegramBots(ctx, false)
+}
+
+// RefreshTelegramBots bypasses the gateway's probe cache and refreshes Telegram's
+// own bot profiles. Background polling continues to use ListTelegramBots.
+func (m *TelegramBotManager) RefreshTelegramBots(ctx context.Context) ([]TelegramBotSummary, error) {
+	return m.listTelegramBots(ctx, true)
+}
+
+func (m *TelegramBotManager) listTelegramBots(ctx context.Context, refresh bool) ([]TelegramBotSummary, error) {
 	m.op.Lock()
 	defer m.op.Unlock()
 	m.mu.RLock()
@@ -329,15 +339,29 @@ func (m *TelegramBotManager) ListTelegramBots(ctx context.Context) ([]TelegramBo
 	m.mu.RUnlock()
 	sort.Strings(ids)
 	out := []TelegramBotSummary{}
-	probeBudget, finishProbes := context.WithTimeout(ctx, 3*time.Second)
+	probeTimeout := 3 * time.Second
+	if refresh {
+		probeTimeout = 15 * time.Second
+	}
+	probeBudget, finishProbes := context.WithTimeout(ctx, probeTimeout)
 	defer finishProbes()
 	for _, id := range ids {
 		bot := m.get(id)
-		if bot.record.Enabled && time.Since(bot.checkedAt) > time.Minute && probeBudget.Err() == nil {
+		if refresh && bot.record.Enabled && probeBudget.Err() != nil {
+			return nil, errors.New("Telegram bot profile refresh timed out")
+		}
+		if bot.record.Enabled && (refresh || time.Since(bot.checkedAt) > time.Minute) && probeBudget.Err() == nil {
 			copy := *bot
 			copy.checkedAt = time.Now()
-			identity, err := bot.client.Identity(probeBudget)
-			if err == nil && identity.IsBot && identity.ID > 0 && (bot.record.TelegramID == 0 || bot.record.TelegramID == identity.ID) {
+			var identity TelegramUser
+			var err error
+			if refresh {
+				identity, err = bot.client.RefreshIdentity(probeBudget, bot.record.TelegramID)
+			} else {
+				identity, err = bot.client.Identity(probeBudget)
+			}
+			verified := err == nil && identity.IsBot && identity.ID > 0 && (bot.record.TelegramID == 0 || bot.record.TelegramID == identity.ID)
+			if verified {
 				copy.record.TelegramID, copy.record.Username, copy.record.DisplayName, copy.record.CanManageBots = identity.ID, identity.Username, identity.FirstName, identity.CanManageBots
 				copy.cfg.Secrets.BotUsername = identity.Username
 				copy.record.UpdatedAt = time.Now().UTC()
@@ -352,6 +376,9 @@ func (m *TelegramBotManager) ListTelegramBots(ctx context.Context) ([]TelegramBo
 			}
 			m.put(&copy)
 			bot = &copy
+			if refresh && !verified {
+				return nil, errors.New("Telegram bot profile could not be refreshed")
+			}
 		}
 		out = append(out, m.summary(bot))
 	}
@@ -594,15 +621,29 @@ func (m *TelegramBotManager) CreateManagedTelegramBot(ctx context.Context, manag
 	if !validTelegramBotUsername(username) || !utf8.ValidString(displayName) || utf8.RuneCountInString(displayName) < 1 || utf8.RuneCountInString(displayName) > 64 {
 		return TelegramManagedBotIntent{}, ErrTelegramBotInvalid
 	}
-	identity, err := bot.client.Identity(ctx)
+	identity, err := bot.client.RefreshIdentity(ctx, bot.record.TelegramID)
 	if err != nil {
 		return TelegramManagedBotIntent{}, errors.New("Telegram manager identity could not be verified")
 	}
-	if !identity.CanManageBots {
-		return TelegramManagedBotIntent{}, ErrTelegramBotManagerUnavailable
-	}
 	if !identity.IsBot || identity.ID != bot.record.TelegramID || !validTelegramBotUsername(identity.Username) {
 		return TelegramManagedBotIntent{}, ErrTelegramBotInvalid
+	}
+	copy := *bot
+	copy.record.CanManageBots = identity.CanManageBots
+	copy.record.Username, copy.record.DisplayName = identity.Username, identity.FirstName
+	copy.record.UpdatedAt = time.Now().UTC()
+	copy.cfg.Secrets.BotUsername = identity.Username
+	copy.checkedAt = time.Now()
+	if copy.record.LastError == "identity_unavailable" {
+		copy.record.LastError = ""
+	}
+	if err := m.store.SaveTelegramBotRecord(ctx, copy.record); err != nil {
+		return TelegramManagedBotIntent{}, errors.New("Telegram manager identity could not be saved")
+	}
+	m.put(&copy)
+	bot = &copy
+	if !identity.CanManageBots {
+		return TelegramManagedBotIntent{}, ErrTelegramBotManagerUnavailable
 	}
 	intents, err := m.store.TelegramManagedBotIntents(ctx)
 	if err != nil {
@@ -624,13 +665,6 @@ func (m *TelegramBotManager) CreateManagedTelegramBot(ctx context.Context, manag
 	if err = m.store.SaveTelegramManagedBotIntent(ctx, intent); err != nil {
 		return TelegramManagedBotIntent{}, errors.New("Telegram creation request could not be saved")
 	}
-	copy := *bot
-	copy.record.CanManageBots = true
-	copy.record.Username = identity.Username
-	copy.cfg.Secrets.BotUsername = identity.Username
-	copy.checkedAt = time.Now()
-	_ = m.store.SaveTelegramBotRecord(ctx, copy.record)
-	m.put(&copy)
 	return telegramManagedIntentSummary(intent), nil
 }
 func telegramManagedIntentSummary(in registry.TelegramManagedBotIntentRecord) TelegramManagedBotIntent {

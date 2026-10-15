@@ -350,6 +350,18 @@ func (t *TelegramClient) Identity(ctx context.Context) (TelegramUser, error) {
 	return result, err
 }
 
+// RefreshIdentity first fetches the bot's own full profile. Telegram's getMe
+// response can otherwise retain capabilities from before a BotFather change.
+func (t *TelegramClient) RefreshIdentity(ctx context.Context, botID int64) (TelegramUser, error) {
+	if botID <= 0 {
+		return TelegramUser{}, errors.New("invalid Telegram bot identity")
+	}
+	if err := t.call(ctx, "getChat", map[string]any{"chat_id": botID}, nil); err != nil {
+		return TelegramUser{}, err
+	}
+	return t.Identity(ctx)
+}
+
 // SplitText uses UTF-16 code units, conservatively respecting Telegram's text
 // limit even for astral Unicode characters. Plain text needs no markup escaping.
 func SplitText(text string, limit int) []string {

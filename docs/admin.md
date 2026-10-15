@@ -64,6 +64,7 @@ The browser uses these endpoints:
 | `POST /tgw/api/v1/admin/sessions/revoke-all` | Signs out every browser belonging to the account. |
 | `GET /tgw/api/v1/admin/dashboard` | Returns visible sessions and statistics, workers, runtimes, bot status, and pending counts. |
 | `GET /tgw/api/v1/admin/telegram-bots` | Lists connected bots and pending managed-bot requests without tokens or webhook secrets. |
+| `POST /tgw/api/v1/admin/telegram-bots/refresh` | Refreshes enabled bots' Telegram profiles and returns bots and pending requests; requires a valid session, exact Origin and CSRF, without recent authentication. |
 | `POST /tgw/api/v1/admin/telegram-bots` | Connects an existing bot with its token, or replaces a token when `replace_id` is supplied. |
 | `POST /tgw/api/v1/admin/telegram-bots/managed` | Creates a managed-bot request and a Telegram confirmation link using `manager_id`, `username` and `name`. |
 | `PATCH /tgw/api/v1/admin/telegram-bots/{id}` | Enables or disables a bot with `{"enabled":true}` or `{"enabled":false}`. |
@@ -126,6 +127,14 @@ to create bot** opens Telegram's confirmation page. Keep the requested username
 when confirming so the gateway can match the callback to your request. To use
 a different username, create a new link with that username in the console.
 
+The gateway refreshes the selected manager's Telegram profile before checking
+Bot Management Mode and creating the link. **Refresh manager bots** explicitly
+refreshes all enabled bots' profiles, including their current management
+capability. Ordinary dashboard and pending-request polling use cached profiles.
+If Telegram still reports that the selected bot cannot manage bots after the
+profile refresh, check that Bot Management Mode is enabled for that bot in
+`@BotFather`, then retry.
+
 The request allows 15 minutes for automatic connection. Its pending status and
 remaining confirmation window appear in the console, which polls while the
 request is active; **Refresh status** checks immediately. The bot appears in
@@ -148,8 +157,10 @@ configured owner again. You can also remove it and explicitly connect it again
 using its current token. Enabling a disabled bot discards updates Telegram held
 while it was disabled.
 
-All bot changes require authentication within the previous five minutes and
-the usual exact-origin and CSRF checks. If a request fails ambiguously, refresh
+All bot configuration changes require authentication within the previous five
+minutes and the usual exact-origin and CSRF checks. Refreshing manager profiles
+uses the current authenticated session and the same Origin and CSRF checks,
+without requiring recent authentication. If a request fails ambiguously, refresh
 the list to check its outcome before retrying. Additional bot credentials are
 encrypted in SQLite. Back up both the database and its private companion key,
 `<database path>.telegram-bots.key`, together; the key is required to restore

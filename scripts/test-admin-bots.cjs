@@ -19,9 +19,10 @@ async function fixture(browser, width) {
   const page = await browser.newPage({ viewport: { width, height: 900 } });
   const state = {
     bots: [{ id: primaryID, telegram_id: 12345, username: 'primary_bot', display_name: 'Primary ' + malicious, legacy: true, enabled: true, managed: false, can_manage_bots: false, status: 'connected' }],
-    pending: [], reads: 0, mutations: [], readStatus: 200, dashboardStatus: 200,
+    pending: [], reads: 0, profileRefreshes: [], mutations: [], readStatus: 200, refreshStatus: 200, dashboardStatus: 200,
     connectFailure: null, webhookConflict: false, requireReauth: false, credentialCalls: 0,
     invalidCreationURL: false, creationNumber: 0, networkFailure: false, holdNextRead: false,
+    managerCanManageBots: true, managedFailure: false, sessionAgeMillis: 0,
   };
   const errors = [];
   const messages = [];
@@ -40,7 +41,7 @@ async function fixture(browser, width) {
     if (url.pathname.startsWith('/tgw/api/')) {
       const now = await page.evaluate(() => Date.now());
       if (url.pathname.endsWith('/login/options')) body = { passkey: true, password: false };
-      else if (url.pathname.endsWith('/admin/session')) body = { authenticated: true, session_id: 'aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa', server_time: new Date(now).toISOString(), expires_at: new Date(now + 8 * 3600000).toISOString(), reauthenticated_at: new Date(now).toISOString() };
+      else if (url.pathname.endsWith('/admin/session')) body = { authenticated: true, session_id: 'aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa', server_time: new Date(now).toISOString(), expires_at: new Date(now + 8 * 3600000).toISOString(), reauthenticated_at: new Date(now - state.sessionAgeMillis).toISOString() };
       else if (url.pathname.endsWith('/login/begin')) body = { ceremony_id: 'test', publicKey: { challenge: 'dGVzdA', rpId: 'admin.test' } };
       else if (url.pathname.endsWith('/login/finish')) { state.credentialCalls++; body = { ok: true }; }
       else if (url.pathname.endsWith('/dashboard')) {
@@ -58,6 +59,13 @@ async function fixture(browser, width) {
           state.holdNextRead = false;
           await new Promise(resolve => { state.releaseRead = resolve; state.onReadStarted(); });
         }
+      } else if (url.pathname.endsWith('/admin/telegram-bots/refresh') && request.method() === 'POST') {
+        state.profileRefreshes.push({ csrf: request.headers()['x-csrf-token'] });
+        status = state.refreshStatus;
+        if (status === 200) {
+          state.bots.filter(bot => bot.enabled !== false).forEach(bot => { bot.can_manage_bots = state.managerCanManageBots; });
+          body = structuredClone({ bots: state.bots, pending: state.pending });
+        } else body = { code: 'telegram_bot_unavailable', message: 'Unsafe upstream failure ' + token };
       } else if (url.pathname.includes('/admin/telegram-bots') && request.method() !== 'GET') {
         const payload = JSON.parse(request.postData() || '{}');
         state.mutations.push({ path: url.pathname, method: request.method(), payload, csrf: request.headers()['x-csrf-token'] });
@@ -77,11 +85,15 @@ async function fixture(browser, width) {
             body = bot || state.bots.at(-1);
           }
         } else if (url.pathname.endsWith('/telegram-bots/managed') && request.method() === 'POST') {
-          state.creationNumber++;
-          body = { id: 'intent-' + state.creationNumber, manager_id: payload.manager_id, requested_username: payload.username, display_name: payload.name,
-            launch_url: state.invalidCreationURL ? 'https://invalid.example/newbot' : 'https://t.me/newbot/primary_bot/' + payload.username + '?name=' + encodeURIComponent(payload.name),
-            expires_at: new Date(now + 15 * 60000).toISOString(), status: 'pending', bot_id: '' };
-          state.pending.push(body);
+          if (state.managedFailure) {
+            status = 409; body = { code: 'telegram_bot_manager_unavailable', message: 'Unsafe upstream failure ' + token };
+          } else {
+            state.creationNumber++;
+            body = { id: 'intent-' + state.creationNumber, manager_id: payload.manager_id, requested_username: payload.username, display_name: payload.name,
+              launch_url: state.invalidCreationURL ? 'https://invalid.example/newbot' : 'https://t.me/newbot/primary_bot/' + payload.username + '?name=' + encodeURIComponent(payload.name),
+              expires_at: new Date(now + 15 * 60000).toISOString(), status: 'pending', bot_id: '' };
+            state.pending.push(body);
+          }
         } else {
           const id = decodeURIComponent(url.pathname.split('/').at(-1));
           if (request.method() === 'PATCH') Object.assign(state.bots.find(bot => bot.id === id), payload);
@@ -136,6 +148,8 @@ async function fixture(browser, width) {
       assert.equal(await card(primaryID).getByRole('link', { name: 'Open Telegram' }).getAttribute('href'), 'https://t.me/primary_bot');
       assert.equal(await page.locator('#bot-info img').count(), 0, 'Bot names are plain text');
       assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true, 'Bot cards fit the viewport');
+      await refresh();
+      assert.equal(state.profileRefreshes.length, 0, 'Ordinary reads keep cached profile semantics');
 
       await page.locator('#bot-connect').click();
       assert.equal(await page.locator('#bot-token').getAttribute('type'), 'password');
@@ -210,6 +224,44 @@ async function fixture(browser, width) {
       await page.locator('#bot-create').click();
       assert.equal(await page.locator('#bot-manager option').count(), 2, 'Enabled bots remain selectable while their capability cache refreshes');
       assert.match(await page.locator('#bot-create-description').innerText(), /Bot Management Mode.*@BotFather/);
+      assert.match(await page.locator('#bot-manager-help').innerText(), /refreshes the selected bot’s Telegram profile/);
+
+      // A cached GET already in flight must not consume the explicit refresh.
+      state.sessionAgeMillis = 6 * 60000;
+      await page.evaluate(async () => { window.failCredentials = true; await sessionAuth.verify('test-stale-session'); });
+      const beforeProfileVerification = state.credentialCalls;
+      const profileReadStarted = new Promise(resolve => { state.onReadStarted = resolve; });
+      state.holdNextRead = true;
+      const oldProfileRead = page.evaluate(() => loadTelegramBots());
+      await profileReadStarted;
+      await page.locator('#bot-manager-refresh').click();
+      assert.equal(state.profileRefreshes.length, 0, 'Explicit refresh waits for the cached GET');
+      state.releaseRead();
+      await oldProfileRead;
+      await page.waitForFunction(() => telegramBots.bots.find(bot => bot.id === 'primary').can_manage_bots === true);
+      assert.equal(state.profileRefreshes.length, 1, 'The manager button sends a profile-refresh POST after the GET');
+      assert.equal(state.profileRefreshes[0].csrf, 'bot-csrf');
+      assert.equal(state.credentialCalls, beforeProfileVerification, 'Profile refresh does not require recent authentication');
+      state.sessionAgeMillis = 0;
+      await page.evaluate(() => { window.failCredentials = false; });
+
+      state.refreshStatus = 502;
+      await page.locator('#bot-manager-refresh').click();
+      await page.waitForFunction(() => !document.getElementById('bot-create-error').hidden);
+      assert.match(await page.locator('#bot-create-error').innerText(), /Unable to refresh Telegram bot profiles/);
+      assert.equal((await page.locator('body').innerText()).includes(token), false, 'Refresh failures never expose raw upstream errors');
+      state.refreshStatus = 200;
+      await page.locator('#bot-manager-refresh').click();
+      await page.waitForFunction(() => document.getElementById('bot-create-error').hidden);
+
+      state.managedFailure = true;
+      await page.locator('#bot-create-username').fill('blocked_bot');
+      await page.locator('#bot-create-name').fill('Blocked bot');
+      await page.locator('#bot-create-submit').click();
+      await page.waitForFunction(() => !telegramBusy);
+      assert.match(await page.locator('#bot-create-error').innerText(), /Telegram still reports.*after refreshing its profile/);
+      assert.doesNotMatch(await page.locator('#bot-create-error').innerText(), /refresh the bot list/i);
+      state.managedFailure = false;
       if (screenshots) await page.screenshot({ path: path.join(screenshots, 'telegram-bot-create-' + width + '.png') });
       await page.locator('#bot-create-cancel').click();
       await create();
@@ -233,6 +285,7 @@ async function fixture(browser, width) {
       assert.match(await card(createdID).innerText(), /Managed.*Same allowed owner and workers/s);
       assert.match(await page.locator('#bot-create-result-status').innerText(), /is connected/);
       assert.equal(await page.locator('#bot-create-launch').isVisible(), false);
+      assert.equal(state.profileRefreshes.length, 3, 'Pending-request polling does not force profile refresh');
       assert.equal(await page.evaluate(() => window.injected), undefined);
       await page.locator('#bot-create-done').click();
 
@@ -295,6 +348,6 @@ async function fixture(browser, width) {
       assert.deepEqual(errors, []);
       await page.close();
     }
-    console.log('Admin Telegram bot browser checks passed: mobile/desktop cards and dialogs, token privacy, connect/replace/takeover, recent authentication, enable/disable, managed creation and Telegram link, callback polling, expiry, safe rendering, confirmed removal, CSRF, refresh recovery and sign-in expiry.');
+    console.log('Admin Telegram bot browser checks passed: mobile/desktop cards and dialogs, token privacy, connect/replace/takeover, recent authentication, explicit profile refresh with cached-read races, enable/disable, managed creation and Telegram link, callback polling, expiry, safe rendering, confirmed removal, CSRF, refresh recovery and sign-in expiry.');
   } finally { await browser.close(); }
 })().catch(error => { console.error(error); process.exitCode = 1; });

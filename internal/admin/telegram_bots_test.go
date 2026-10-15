@@ -2,6 +2,7 @@ package admin
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"strings"
@@ -15,15 +16,21 @@ type adminTelegramBotsFake struct {
 	token    string
 	takeover bool
 	err      error
+	bots     []gateway.TelegramBotSummary
+	pending  []gateway.TelegramManagedBotIntent
 }
 
 func (m *adminTelegramBotsFake) ListTelegramBots(context.Context) ([]gateway.TelegramBotSummary, error) {
 	m.calls = append(m.calls, "list")
-	return nil, m.err
+	return m.bots, m.err
+}
+func (m *adminTelegramBotsFake) RefreshTelegramBots(context.Context) ([]gateway.TelegramBotSummary, error) {
+	m.calls = append(m.calls, "refresh")
+	return m.bots, m.err
 }
 func (m *adminTelegramBotsFake) ListTelegramManagedBotIntents(context.Context) ([]gateway.TelegramManagedBotIntent, error) {
 	m.calls = append(m.calls, "pending")
-	return nil, m.err
+	return m.pending, m.err
 }
 func (m *adminTelegramBotsFake) ConnectTelegramBot(_ context.Context, token string, takeover bool) (gateway.TelegramBotSummary, error) {
 	m.calls = append(m.calls, "connect")
@@ -60,6 +67,7 @@ func TestTelegramBotAdminAuthenticationAndValidation(t *testing.T) {
 	for _, endpoint := range []struct{ method, path, body string }{
 		{"GET", base, ""},
 		{"POST", base, `{"token":"example-token"}`},
+		{"POST", base + "/refresh", ""},
 		{"POST", base + "/managed", `{"username":"test_bot","name":"Test"}`},
 		{"PATCH", base + "/telegram:123", `{"enabled":false}`},
 		{"DELETE", base + "/telegram:123", `{"confirmed":true}`},
@@ -167,5 +175,60 @@ func TestTelegramBotAdminOperationsAndSafeErrors(t *testing.T) {
 		if tc.err == gateway.ErrTelegramBotWebhookConflict && !strings.Contains(w.Body.String(), `"takeover_required":true`) {
 			t.Fatal("webhook takeover was not explicit")
 		}
+		if tc.err == gateway.ErrTelegramBotManagerUnavailable && (!strings.Contains(w.Body.String(), "after refreshing its profile") || strings.Contains(w.Body.String(), "Refresh the list")) {
+			t.Fatal("manager capability error did not explain the refreshed Telegram result")
+		}
+	}
+}
+
+func TestTelegramBotAdminExplicitRefresh(t *testing.T) {
+	s, _, db, token := enrollmentHTTPServer(t, passkeyTestOrigin)
+	m := &adminTelegramBotsFake{}
+	s.telegramBots = m
+	const base = "/tgw/api/v1/admin/telegram-bots"
+	const refresh = base + "/refresh"
+	for _, verb := range []string{http.MethodGet, http.MethodPatch, http.MethodDelete} {
+		w := webUICommandRequestForTest(s, verb, refresh, "", token, passkeyTestOrigin, "csrf", "csrf")
+		if w.Code != http.StatusMethodNotAllowed || w.Header().Get("Allow") != "POST" || len(m.calls) != 0 {
+			t.Fatalf("refresh method %s: %d %s calls=%v", verb, w.Code, w.Body.String(), m.calls)
+		}
+	}
+	if _, err := db.Exec(`UPDATE admin_sessions SET created_at=strftime('%Y-%m-%dT%H:%M:%f','now','-6 minutes') || '000000Z'`); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		method, path string
+		firstCall    string
+	}{
+		{http.MethodGet, base, "list"},
+		{http.MethodPost, refresh, "refresh"},
+	} {
+		m.calls = nil
+		w := webUICommandRequestForTest(s, tc.method, tc.path, "", token, passkeyTestOrigin, "csrf", "csrf")
+		if w.Code != http.StatusOK || w.Header().Get("Cache-Control") != "no-store" || len(m.calls) != 2 || m.calls[0] != tc.firstCall || m.calls[1] != "pending" {
+			t.Fatalf("collection %s: %d %s calls=%v", tc.firstCall, w.Code, w.Body.String(), m.calls)
+		}
+		if !strings.Contains(w.Body.String(), `"bots":[]`) || !strings.Contains(w.Body.String(), `"pending":[]`) {
+			t.Fatalf("empty %s collection: %s", tc.firstCall, w.Body.String())
+		}
+	}
+	m.bots = []gateway.TelegramBotSummary{{ID: "primary", CanManageBots: true}}
+	m.pending = []gateway.TelegramManagedBotIntent{{ID: "request-1"}}
+	w := webUICommandRequestForTest(s, http.MethodPost, refresh, "", token, passkeyTestOrigin, "csrf", "csrf")
+	var result struct {
+		Bots    []gateway.TelegramBotSummary       `json:"bots"`
+		Pending []gateway.TelegramManagedBotIntent `json:"pending"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	if w.Code != http.StatusOK || len(result.Bots) != 1 || !result.Bots[0].CanManageBots || len(result.Pending) != 1 || result.Pending[0].ID != "request-1" {
+		t.Fatalf("refreshed collection: %d %s", w.Code, w.Body.String())
+	}
+	m.err = errors.New("https://api.telegram.org/botsecret-token/getMe /private/key")
+	m.calls = nil
+	w = webUICommandRequestForTest(s, http.MethodPost, refresh, "", token, passkeyTestOrigin, "csrf", "csrf")
+	if w.Code != http.StatusBadGateway || !strings.Contains(w.Body.String(), "telegram_bot_unavailable") || strings.Contains(w.Body.String(), "secret-token") || strings.Contains(w.Body.String(), "/private/") || len(m.calls) != 1 || m.calls[0] != "refresh" {
+		t.Fatalf("unsafe refresh failure: %d %s calls=%v", w.Code, w.Body.String(), m.calls)
 	}
 }

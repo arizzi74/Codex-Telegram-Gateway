@@ -121,6 +121,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/tgw/api/v1/admin/dashboard", s.dashboard)
 	s.mux.HandleFunc("/tgw/api/v1/admin/telegram-bots", s.telegramBotCollection)
 	s.mux.HandleFunc("/tgw/api/v1/admin/telegram-bots/managed", s.telegramManagedBotCreate)
+	s.mux.HandleFunc("/tgw/api/v1/admin/telegram-bots/refresh", s.telegramBotRefresh)
 	s.mux.HandleFunc("/tgw/api/v1/admin/telegram-bots/", s.telegramBotMember)
 	s.mux.HandleFunc("/tgw/api/v1/admin/workers", s.workers)
 	s.mux.HandleFunc("/tgw/api/v1/admin/workers/", s.worker)

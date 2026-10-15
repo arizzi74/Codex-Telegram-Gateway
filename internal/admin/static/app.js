@@ -315,8 +315,8 @@ function renderTelegramManagers() {
   select.disabled = telegramBusy || !managers.length;
   $('bot-create-submit').disabled = telegramBusy || !managers.length;
   $('bot-manager-help').textContent = managers.length
-    ? 'The gateway checks Bot Management Mode when creating the link.'
-    : 'Connect or enable a bot first, then enable its Bot Management Mode in @BotFather and refresh.';
+    ? 'The gateway refreshes the selected bot’s Telegram profile and checks Bot Management Mode when creating the link.'
+    : 'Connect or enable a bot first, then enable its Bot Management Mode in @BotFather.';
 }
 function renderTelegramCreation() {
   if (!$('bot-create-dialog').open || !telegramCreationID) return;
@@ -366,32 +366,39 @@ function scheduleTelegramPoll() {
     else scheduleTelegramPoll();
   }, 3000);
 }
-async function loadTelegramBots(epoch = authEpoch, freshAfterMutation = false) {
+async function loadTelegramBots(epoch = authEpoch, freshAfterMutation = false, refreshMetadata = false) {
   if (!authenticated || rotationPending) return;
   if (telegramLoadingEpoch === epoch) {
-    if (!freshAfterMutation) return;
+    if (!freshAfterMutation && !refreshMetadata) return;
     // A poll that started before the write can return the old list. Wait for
     // that read, then obtain a snapshot that includes the completed mutation.
+    // Explicit profile refreshes must also keep their POST after a cached GET.
     await telegramReadPromise?.catch(() => {});
-    if (epoch === authEpoch && authenticated) return loadTelegramBots(epoch, true);
+    if (epoch === authEpoch && authenticated) return loadTelegramBots(epoch, freshAfterMutation, refreshMetadata);
     return;
   }
   telegramLoadingEpoch = epoch;
   let request;
   try {
-    request = call('/telegram-bots', { cache: 'no-store' });
+    request = refreshMetadata
+      ? call('/telegram-bots/refresh', { method: 'POST', cache: 'no-store' })
+      : call('/telegram-bots', { cache: 'no-store' });
     telegramReadPromise = request;
     const value = await request;
     if (epoch !== authEpoch || !authenticated) return;
     if (!Array.isArray(value?.bots)) return;
     telegramBots = { bots: value.bots, pending: Array.isArray(value.pending) ? value.pending : [] };
     $('bot-error').hidden = true;
+    if (refreshMetadata) $('bot-create-error').hidden = true;
     renderTelegramBots();
   } catch (error) {
     if (epoch !== authEpoch || !authenticated) return;
     if (error.status === 401) { sessionAuth.expire('expired'); return; }
-    $('bot-error').textContent = 'Unable to refresh Telegram bots. Refresh to check their current status.';
-    $('bot-error').hidden = false;
+    const errorID = refreshMetadata && $('bot-create-dialog').open ? 'bot-create-error' : 'bot-error';
+    $(errorID).textContent = refreshMetadata
+      ? 'Unable to refresh Telegram bot profiles. Try Refresh manager bots again.'
+      : 'Unable to refresh Telegram bots. Please try again.';
+    $(errorID).hidden = false;
   } finally {
     if (telegramLoadingEpoch === epoch) telegramLoadingEpoch = null;
     if (telegramReadPromise === request) telegramReadPromise = null;
@@ -406,7 +413,7 @@ function telegramError(error) {
   if (error.status === 404) return 'This bot is no longer available. Refresh the bot list.';
   if (error.code === 'telegram_bot_duplicate') return 'This bot is already connected to the gateway.';
   if (error.code === 'telegram_bot_legacy') return 'The primary bot’s token is managed in the gateway configuration.';
-  if (error.code === 'telegram_bot_manager_unavailable') return 'Enable Bot Management Mode in @BotFather and refresh the bot list before trying again.';
+  if (error.code === 'telegram_bot_manager_unavailable') return 'Telegram still reports that the selected bot cannot manage bots after refreshing its profile. Enable Bot Management Mode for that bot in @BotFather, then try again.';
   if (error.takeoverRequired) return 'This bot already has a Telegram webhook. Reconnect it with its token to confirm moving it to this gateway.';
   if (error.status === 409) return 'The bot’s state changed. Refresh the bot list before trying again.';
   if (error.status === 502) return 'Telegram could not complete the request. Refresh the bot list before retrying.';
@@ -1203,7 +1210,8 @@ $('bot-token-dialog').addEventListener('cancel', event => { if (telegramBusy) ev
 $('bot-create').addEventListener('click', openBotCreate);
 $('bot-create-form').addEventListener('submit', submitBotCreate);
 for (const id of ['bot-create-close', 'bot-create-cancel', 'bot-create-done']) $(id).addEventListener('click', closeBotCreate);
-for (const id of ['bot-create-refresh', 'bot-manager-refresh']) $(id).addEventListener('click', () => loadTelegramBots());
+$('bot-create-refresh').addEventListener('click', () => loadTelegramBots());
+$('bot-manager-refresh').addEventListener('click', () => loadTelegramBots(authEpoch, false, true));
 $('bot-create-dialog').addEventListener('cancel', event => { if (telegramBusy) event.preventDefault(); else closeBotCreate(); });
 $('password-login').addEventListener('click', () => sessionAuth.login('password').catch(() => {}));
 $('password-edit').addEventListener('click', editPassword);

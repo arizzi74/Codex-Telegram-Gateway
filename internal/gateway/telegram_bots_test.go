@@ -26,17 +26,19 @@ type managedBotFake struct {
 	mu            sync.Mutex
 	server        *httptest.Server
 	identities    map[string]TelegramUser
+	refreshed     map[string]TelegramUser
 	webhooks      map[string]string
 	managedTokens map[int64]string
 	calls         map[string]int
 	secrets       map[string]string
 	drops         map[string]bool
 	failSet       bool
+	failRefresh   bool
 }
 
 func newManagedBotFake(t *testing.T) *managedBotFake {
 	t.Helper()
-	f := &managedBotFake{identities: map[string]TelegramUser{}, webhooks: map[string]string{}, managedTokens: map[int64]string{}, calls: map[string]int{}, secrets: map[string]string{}, drops: map[string]bool{}}
+	f := &managedBotFake{identities: map[string]TelegramUser{}, refreshed: map[string]TelegramUser{}, webhooks: map[string]string{}, managedTokens: map[int64]string{}, calls: map[string]int{}, secrets: map[string]string{}, drops: map[string]bool{}}
 	f.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
 		defer f.mu.Unlock()
@@ -50,12 +52,24 @@ func newManagedBotFake(t *testing.T) *managedBotFake {
 			URL     string   `json:"url"`
 			Secret  string   `json:"secret_token"`
 			UserID  int64    `json:"user_id"`
+			ChatID  int64    `json:"chat_id"`
 			Allowed []string `json:"allowed_updates"`
 			Drop    bool     `json:"drop_pending_updates"`
 		}
 		_ = json.NewDecoder(r.Body).Decode(&input)
 		var result any = true
 		switch method {
+		case "getChat":
+			identity, exists := f.identities[token]
+			if f.failRefresh || !exists || input.ChatID != identity.ID {
+				_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error_code": 500, "description": "profile lookup failed " + token})
+				return
+			}
+			if fresh, exists := f.refreshed[token]; exists {
+				f.identities[token] = fresh
+				delete(f.refreshed, token)
+			}
+			result = TelegramChat{ID: input.ChatID}
 		case "getMe":
 			identity, exists := f.identities[token]
 			if !exists {
@@ -527,6 +541,163 @@ func TestTelegramBotListIdentityProbesAreCached(t *testing.T) {
 	}
 	if fake.count("getMe") != 1 {
 		t.Fatal("list polled Telegram repeatedly")
+	}
+	if fake.count("getChat") != 0 {
+		t.Fatal("background polling refreshed Telegram profiles")
+	}
+}
+
+func TestTelegramManagedBotRefreshesCapabilitiesBeforeCreatingIntent(t *testing.T) {
+	for _, test := range []struct {
+		name             string
+		cached, current  bool
+		failRefresh      bool
+		identityMismatch bool
+		wantError        error
+	}{
+		{name: "newly enabled", cached: false, current: true},
+		{name: "newly disabled", cached: true, current: false, wantError: ErrTelegramBotManagerUnavailable},
+		{name: "still disabled", cached: false, current: false, wantError: ErrTelegramBotManagerUnavailable},
+		{name: "profile unavailable", cached: true, current: true, failRefresh: true},
+		{name: "identity mismatch", cached: true, current: true, identityMismatch: true, wantError: ErrTelegramBotInvalid},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			m, store, fake := newTelegramBotManagerTest(t)
+			token := m.cfg.Secrets.BotToken
+			fake.mu.Lock()
+			cached := fake.identities[token]
+			cached.CanManageBots = test.cached
+			fake.identities[token] = cached
+			fresh := cached
+			fresh.CanManageBots = test.current
+			if test.identityMismatch {
+				fresh.ID = 999
+			}
+			fake.refreshed[token] = fresh
+			fake.failRefresh = test.failRefresh
+			fake.mu.Unlock()
+			before, err := m.get(m.cfg.Secrets.BotName).client.Identity(t.Context())
+			if err != nil || before.CanManageBots != test.cached {
+				t.Fatalf("stale capability fixture: %+v %v", before, err)
+			}
+			reads := fake.count("getMe")
+			intent, err := m.CreateManagedTelegramBot(t.Context(), m.cfg.Secrets.BotName, "CreatedBot", "Created")
+			if test.failRefresh {
+				if err == nil || errors.Is(err, ErrTelegramBotManagerUnavailable) || strings.Contains(err.Error(), token) {
+					t.Fatalf("profile failure was hidden, misclassified, or exposed credentials: %v", err)
+				}
+			} else if !errors.Is(err, test.wantError) {
+				t.Fatalf("creation error = %v, want %v", err, test.wantError)
+			}
+			if fake.count("getChat") != 1 {
+				t.Fatal("creation did not perform exactly one profile refresh")
+			}
+			wantReads := reads + 1
+			if test.failRefresh {
+				wantReads = reads
+			}
+			if fake.count("getMe") != wantReads {
+				t.Fatal("creation retried capability reads or reused the stale response")
+			}
+			intents, readErr := store.TelegramManagedBotIntents(t.Context())
+			if readErr != nil {
+				t.Fatal(readErr)
+			}
+			if err != nil {
+				if len(intents) != 0 || fake.count("setWebhook") != 0 {
+					t.Fatal("failed verification created an intent or changed the webhook")
+				}
+			} else if len(intents) != 1 || intent.Status != "pending" || fake.count("setWebhook") != 1 {
+				t.Fatal("refreshed management capability did not allow creation")
+			}
+			if !test.failRefresh && !test.identityMismatch {
+				records, err := store.TelegramBotRecords(t.Context())
+				if err != nil || len(records) != 1 || records[0].CanManageBots != test.current {
+					t.Fatalf("refreshed capability was not saved: %+v %v", records, err)
+				}
+			}
+		})
+	}
+}
+
+func TestTelegramBotExplicitRefreshBypassesCacheAndSkipsDisabledBots(t *testing.T) {
+	m, store, fake := newTelegramBotManagerTest(t)
+	secondary, err := m.ConnectTelegramBot(t.Context(), fake.add(222, "SecondaryBot", false), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := m.SetTelegramBotEnabled(t.Context(), secondary.ID, false); err != nil {
+		t.Fatal(err)
+	}
+	token := m.cfg.Secrets.BotToken
+	fake.mu.Lock()
+	identity := fake.identities[token]
+	identity.CanManageBots = false
+	fake.identities[token] = identity
+	fake.mu.Unlock()
+	if _, err := m.ListTelegramBots(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	reads := fake.count("getMe")
+	fake.mu.Lock()
+	identity.CanManageBots = true
+	fake.refreshed[token] = identity
+	fake.mu.Unlock()
+	bots, err := m.RefreshTelegramBots(t.Context())
+	if err != nil || len(bots) != 2 {
+		t.Fatalf("explicit refresh failed: %+v %v", bots, err)
+	}
+	if fake.count("getChat") != 1 || fake.count("getMe") != reads+1 {
+		t.Fatal("explicit refresh used cached metadata or probed the disabled bot")
+	}
+	for _, bot := range bots {
+		if bot.Legacy && !bot.CanManageBots {
+			t.Fatal("explicit refresh returned the cached capability")
+		}
+		if bot.ID == secondary.ID && bot.Enabled {
+			t.Fatal("profile refresh re-enabled a disabled bot")
+		}
+	}
+	if _, err := m.ListTelegramBots(t.Context()); err != nil || fake.count("getMe") != reads+1 {
+		t.Fatal("subsequent background poll did not retain the refreshed cache")
+	}
+	records, err := store.TelegramBotRecords(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, record := range records {
+		if record.Legacy && !record.CanManageBots {
+			t.Fatal("explicit refresh did not save the capability")
+		}
+	}
+}
+
+func TestTelegramBotExplicitRefreshDoesNotHideFailureOrCancellation(t *testing.T) {
+	for _, cancel := range []bool{false, true} {
+		t.Run(strconv.FormatBool(cancel), func(t *testing.T) {
+			m, _, fake := newTelegramBotManagerTest(t)
+			if _, err := m.ListTelegramBots(t.Context()); err != nil {
+				t.Fatal(err)
+			}
+			fake.mu.Lock()
+			fake.failRefresh = true
+			fake.mu.Unlock()
+			ctx, stop := context.WithCancel(t.Context())
+			defer stop()
+			if cancel {
+				stop()
+			}
+			if bots, err := m.RefreshTelegramBots(ctx); err == nil || bots != nil || strings.Contains(err.Error(), m.cfg.Secrets.BotToken) {
+				t.Fatalf("refresh returned cached success or exposed credentials: %+v %v", bots, err)
+			}
+			wantProfiles := 1
+			if cancel {
+				wantProfiles = 0
+			}
+			if fake.count("getChat") != wantProfiles || fake.count("getMe") != 1 {
+				t.Fatal("failed or cancelled refresh retried or read stale metadata")
+			}
+		})
 	}
 }
 

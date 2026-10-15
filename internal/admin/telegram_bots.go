@@ -14,6 +14,7 @@ import (
 // operations. Credentials are accepted only on writes and never returned.
 type TelegramBotManager interface {
 	ListTelegramBots(context.Context) ([]gateway.TelegramBotSummary, error)
+	RefreshTelegramBots(context.Context) ([]gateway.TelegramBotSummary, error)
 	ListTelegramManagedBotIntents(context.Context) ([]gateway.TelegramManagedBotIntent, error)
 	ConnectTelegramBot(context.Context, string, bool) (gateway.TelegramBotSummary, error)
 	ReplaceTelegramBotToken(context.Context, string, string, bool) (gateway.TelegramBotSummary, error)
@@ -46,18 +47,7 @@ func (s *Server) telegramBotCollection(w http.ResponseWriter, r *http.Request) {
 			telegramBotError(w, err)
 			return
 		}
-		pending, err := s.telegramBots.ListTelegramManagedBotIntents(ctx)
-		if err != nil {
-			telegramBotError(w, err)
-			return
-		}
-		if bots == nil {
-			bots = []gateway.TelegramBotSummary{}
-		}
-		if pending == nil {
-			pending = []gateway.TelegramManagedBotIntent{}
-		}
-		writeJSON(w, http.StatusOK, map[string]any{"bots": bots, "pending": pending})
+		s.writeTelegramBotCollection(w, ctx, bots)
 		return
 	}
 	var input struct {
@@ -87,6 +77,45 @@ func (s *Server) telegramBotCollection(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, status, bot)
+}
+
+func (s *Server) telegramBotRefresh(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", "POST")
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	// Refreshing Telegram metadata does not change bot configuration and does
+	// not require recent authentication, but still requires Origin and CSRF.
+	if _, ok := s.requireAuth(w, r, true); !ok {
+		return
+	}
+	if !s.requireTelegramBots(w) {
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
+	defer cancel()
+	bots, err := s.telegramBots.RefreshTelegramBots(ctx)
+	if err != nil {
+		telegramBotError(w, err)
+		return
+	}
+	s.writeTelegramBotCollection(w, ctx, bots)
+}
+
+func (s *Server) writeTelegramBotCollection(w http.ResponseWriter, ctx context.Context, bots []gateway.TelegramBotSummary) {
+	pending, err := s.telegramBots.ListTelegramManagedBotIntents(ctx)
+	if err != nil {
+		telegramBotError(w, err)
+		return
+	}
+	if bots == nil {
+		bots = []gateway.TelegramBotSummary{}
+	}
+	if pending == nil {
+		pending = []gateway.TelegramManagedBotIntent{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"bots": bots, "pending": pending})
 }
 
 func (s *Server) telegramBotMember(w http.ResponseWriter, r *http.Request) {
@@ -204,7 +233,7 @@ func telegramBotError(w http.ResponseWriter, err error) {
 		writeJSON(w, http.StatusConflict, map[string]any{"code": "telegram_bot_webhook_conflict", "message": "This bot is connected to another webhook. Confirm replacement to connect it here.", "takeover_required": true})
 		return
 	case errors.Is(err, gateway.ErrTelegramBotManagerUnavailable):
-		status, code, message = http.StatusConflict, "telegram_bot_manager_unavailable", "Enable Bot Management Mode for the selected bot in BotFather, then retry."
+		status, code, message = http.StatusConflict, "telegram_bot_manager_unavailable", "Telegram still reports that the selected bot cannot manage bots after refreshing its profile. Enable Bot Management Mode for that bot in BotFather, then retry."
 	case errors.Is(err, gateway.ErrTelegramBotOwnerChanged):
 		status, code, message = http.StatusConflict, "telegram_bot_owner_changed", "This managed bot's owner changed. Wait for Telegram to verify the configured owner again, or remove it and explicitly reconnect it with its current token."
 	}
