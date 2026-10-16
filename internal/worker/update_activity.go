@@ -728,7 +728,7 @@ func nativeReadOnlyRequest(method string) bool {
 func nativeSynchronousRequest(method string) bool {
 	switch method {
 	case "initialize", "server/diagnostics", "thread/list", "thread/loaded/list", "thread/turns/list", "thread/items/list", "thread/search", "thread/searchOccurrences", "thread/timeline/list",
-		"thread/name/set", "thread/metadata/update", "thread/section/move", "thread/settings/update", "thread/memoryMode/set", "thread/goal/get", "thread/goal/clear", "thread/attachment/list", "memory/status",
+		"thread/name/set", "thread/metadata/update", "thread/section/move", "thread/settings/update", "thread/memoryMode/set", "thread/readState/update", "thread/goal/get", "thread/goal/clear", "thread/attachment/list", "memory/status",
 		"thread/archive", "thread/unarchive", "thread/delete", "thread/unsubscribe", "thread/inject_items", "thread/queue/list", "thread/queue/delete", "thread/queue/reorder",
 		"thread/backgroundTerminals/list", "thread/backgroundTerminals/clean", "thread/backgroundTerminals/terminate", "turn/interrupt", "turn/settings/update",
 		"model/list", "modelProvider/capabilities/read", "collaborationMode/list", "experimentalFeature/list", "permissionProfile/list", "experimentalFeature/enablement/set",
@@ -750,7 +750,7 @@ func nativeSynchronousRequest(method string) bool {
 func nativeInformationalNotification(method string) bool {
 	switch method {
 	case "error", "thread/archived", "thread/deleted", "thread/unarchived", "thread/closed", "thread/reverted", "skills/changed", "thread/name/updated", "thread/attachment/updated", "thread/goal/updated", "thread/goal/cleared",
-		"project/changed", "thread/project/updated", "thread/environment/connected", "thread/environment/disconnected", "thread/settings/updated", "thread/tokenUsage/updated",
+		"project/changed", "thread/project/updated", "thread/environment/connected", "thread/environment/disconnected", "thread/settings/updated", "thread/readState/changed", "thread/tokenUsage/updated",
 		"turn/diff/updated", "turn/plan/updated", "item/started", "item/completed", "item/autoApprovalReview/started", "item/autoApprovalReview/completed", "autoApprovalReview/strictReviewRequired",
 		"item/agentMessage/delta", "item/plan/delta", "command/exec/outputDelta", "process/outputDelta", "item/commandExecution/outputDelta", "item/commandExecution/terminalInteraction", "item/fileChange/outputDelta", "item/fileChange/patchUpdated", "item/mcpToolCall/progress",
 		"mcpServer/startupStatus/updated", "mcpServer/oauthLogin/completed", "mcpServer/event/stream/notification", "account/updated", "account/login/completed", "account/rateLimits/updated", "app/list/updated", "remoteControl/status/changed", "fs/changed", "item/reasoning/summaryTextDelta", "item/reasoning/summaryPartAdded", "item/reasoning/textDelta",
