@@ -101,7 +101,7 @@ func (s *Store) ClaimTelegramManagedBotCreation(ctx context.Context, b TelegramB
 		return err
 	}
 	defer tx.Rollback(ctx)
-	tag, err := tx.Exec(ctx, `UPDATE telegram_managed_bot_intents SET status='activating',bot_id=$1 WHERE intent_id=$2 AND manager_id=$3 AND owner_id=$4 AND requested_username=$5 COLLATE NOCASE AND status='pending' AND expires_at>$6`, b.ID, intent, b.ManagedBy, b.OwnerID, b.Username, time.Now().UTC())
+	tag, err := tx.Exec(ctx, `UPDATE telegram_managed_bot_intents SET status='activating',bot_id=$1 WHERE intent_id=$2 AND manager_id=$3 AND owner_id=$4 AND requested_username=$5 COLLATE NOCASE AND status='pending' AND bot_id='' AND expires_at>$6`, b.ID, intent, b.ManagedBy, b.OwnerID, b.Username, time.Now().UTC())
 	if err != nil {
 		return err
 	}
@@ -194,24 +194,29 @@ func (s *Store) SaveTelegramManagedBotIntent(ctx context.Context, in TelegramMan
 		return err
 	}
 	defer tx.Rollback(ctx)
-	if _, err = tx.Exec(ctx, `UPDATE telegram_managed_bot_intents SET status='expired' WHERE status='pending' AND expires_at<=$1`, time.Now().UTC()); err != nil {
+	if err = saveTelegramManagedBotIntent(ctx, tx, in); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+func saveTelegramManagedBotIntent(ctx context.Context, tx *dbTx, in TelegramManagedBotIntentRecord) error {
+	if _, err := tx.Exec(ctx, `UPDATE telegram_managed_bot_intents SET status='expired' WHERE status='pending' AND expires_at<=$1`, time.Now().UTC()); err != nil {
 		return err
 	}
 	if in.Status == "pending" {
 		// SQLite IMMEDIATE transactions serialize this check and insert, even
 		// when separate gateway instances use different manager bots.
 		var reserved bool
-		if err = tx.QueryRow(ctx, telegramManagedBotUsernameReservedSQL, in.RequestedUsername, time.Now().UTC()).Scan(&reserved); err != nil {
+		if err := tx.QueryRow(ctx, telegramManagedBotUsernameReservedSQL, in.RequestedUsername, time.Now().UTC()).Scan(&reserved); err != nil {
 			return err
 		}
 		if reserved {
 			return ErrTelegramBotUsernameReserved
 		}
 	}
-	if _, err = tx.Exec(ctx, `INSERT INTO telegram_managed_bot_intents(intent_id,manager_id,owner_id,requested_username,display_name,launch_url,status,bot_id,created_at,expires_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`, in.ID, in.ManagerID, in.OwnerID, in.RequestedUsername, in.DisplayName, in.LaunchURL, in.Status, in.BotID, in.CreatedAt, in.ExpiresAt); err != nil {
-		return err
-	}
-	return tx.Commit(ctx)
+	_, err := tx.Exec(ctx, `INSERT INTO telegram_managed_bot_intents(intent_id,manager_id,owner_id,requested_username,display_name,launch_url,status,bot_id,created_at,expires_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`, in.ID, in.ManagerID, in.OwnerID, in.RequestedUsername, in.DisplayName, in.LaunchURL, in.Status, in.BotID, in.CreatedAt, in.ExpiresAt)
+	return err
 }
 
 func (s *Store) TelegramManagedBotIntents(ctx context.Context) ([]TelegramManagedBotIntentRecord, error) {

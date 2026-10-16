@@ -166,6 +166,13 @@
     <p class="muted">This opens BotFather’s deletion flow. The gateway cannot confirm whether you deleted the bot on Telegram.</p>
   </div>
 </dialog>
+<dialog id="bot-request-dialog" class="bot-dialog" aria-labelledby="bot-request-heading" aria-describedby="bot-request-description">
+  <div class="row bot-dialog-heading"><h2 id="bot-request-heading">Delete setup request</h2><button id="bot-request-close" type="button" class="secondary" aria-label="Close setup request deletion dialog">Close</button></div>
+  <p id="bot-request-target"></p>
+  <p id="bot-request-description">This removes only the gateway setup request. Any bot already created in Telegram remains on Telegram.</p>
+  <p id="bot-request-error" class="notice error" role="alert" hidden></p>
+  <div class="bot-dialog-actions"><button id="bot-request-confirm" type="button" class="danger">Delete request</button><button id="bot-request-cancel" type="button" class="secondary">Cancel</button></div>
+</dialog>
 <dialog id="bot-create-dialog" class="bot-dialog" aria-labelledby="bot-create-heading" aria-describedby="bot-create-description">
   <div class="row bot-dialog-heading"><h2 id="bot-create-heading">Create managed bot</h2><button id="bot-create-close" type="button" class="secondary" aria-label="Close managed bot dialog">Close</button></div>
   <form id="bot-create-form">

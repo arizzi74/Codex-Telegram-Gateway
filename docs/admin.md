@@ -71,6 +71,8 @@ The browser uses these endpoints:
 | `POST /tgw/api/v1/admin/telegram-bots/refresh` | Refreshes enabled bots' Telegram profiles and returns bots and pending requests; requires a valid session, exact Origin and CSRF, without recent authentication. |
 | `POST /tgw/api/v1/admin/telegram-bots` | Connects an existing bot with its token, or replaces a token when `replace_id` is supplied. |
 | `POST /tgw/api/v1/admin/telegram-bots/managed` | Creates a managed-bot request and a Telegram confirmation link using `manager_id` and `display_name`; the gateway generates and checks the username. The explicit `username`/`name` pair remains supported for existing clients. |
+| `POST /tgw/api/v1/admin/telegram-bots/managed/{id}/retry` | Replaces an expired, unclaimed setup request with a fresh confirmation link; requires `{"confirmed":true}` and recent authentication. |
+| `DELETE /tgw/api/v1/admin/telegram-bots/managed/{id}` | Deletes an unclaimed setup request from the gateway; requires `{"confirmed":true}` and recent authentication. It does not delete a Telegram bot. |
 | `PATCH /tgw/api/v1/admin/telegram-bots/{id}` | Enables or disables a bot with `{"enabled":true}` or `{"enabled":false}`. |
 | `POST /tgw/api/v1/admin/telegram-bots/{id}/profile-photo/reset` | Replaces the bot's profile photo with the purple Gateway icon; requires `{"confirmed":true}`, an enabled bot and recent authentication. |
 | `DELETE /tgw/api/v1/admin/telegram-bots/{id}` | Removes an additional bot and its local records and subscriptions; requires `{"confirmed":true}`. |
@@ -218,8 +220,19 @@ remaining confirmation window appear in the console, which polls while the
 request is active; **Refresh status** checks immediately. The bot appears in
 the list after Telegram confirms creation and the gateway connects it. The
 gateway confirmation window is separate from Telegram's creation link: an old
-link may still create a bot after automatic connection has expired. Create a
-new request, or use **Connect existing bot** with the resulting bot's token.
+link may still create a bot after automatic connection has expired.
+
+An expired, unclaimed request has a **Create new link** button. This checks the
+manager and username again, replaces the old request, and opens a fresh
+15-minute confirmation link. The display name is kept, and a different username
+is selected so the old link cannot match the replacement request. A failed retry
+leaves the old request available for another attempt.
+
+Use **Delete request** to remove an abandoned setup request after confirmation.
+This only removes its gateway record. If you already created the bot in
+Telegram, use **Connect existing bot** with its token instead. A request being
+activated cannot be retried or removed through these controls; manage its bot
+from the connected bot entry.
 
 **Disable** stops a bot's gateway access while retaining its configuration and
 local bindings. **Enable** restores it. For an additional bot, **Replace token**

@@ -642,6 +642,12 @@ func (m *TelegramBotManager) RemoveTelegramBot(ctx context.Context, id string) e
 func (m *TelegramBotManager) CreateManagedTelegramBot(ctx context.Context, managerID, username, displayName string) (TelegramManagedBotIntent, error) {
 	m.op.Lock()
 	defer m.op.Unlock()
+	return m.createManagedTelegramBot(ctx, managerID, username, displayName, "", m.store.SaveTelegramManagedBotIntent)
+}
+
+// createManagedTelegramBot runs with the operation lock held. Retry uses the
+// same identity, username, webhook and lifetime checks with an atomic save.
+func (m *TelegramBotManager) createManagedTelegramBot(ctx context.Context, managerID, username, displayName, excludedUsername string, save func(context.Context, registry.TelegramManagedBotIntentRecord) error) (TelegramManagedBotIntent, error) {
 	if managerID == "" {
 		managerID = m.cfg.Secrets.BotName
 	}
@@ -683,7 +689,7 @@ func (m *TelegramBotManager) CreateManagedTelegramBot(ctx context.Context, manag
 	lookupCtx, cancelLookup := context.WithTimeout(ctx, telegramManagedBotUsernameBudget)
 	defer cancelLookup()
 	if automaticUsername {
-		username, err = m.nextTelegramManagedBotUsername(lookupCtx, displayName, &number, &checks)
+		username, err = m.nextTelegramManagedBotUsername(lookupCtx, displayName, &number, &checks, excludedUsername)
 		if err != nil {
 			return TelegramManagedBotIntent{}, err
 		}
@@ -705,19 +711,19 @@ func (m *TelegramBotManager) CreateManagedTelegramBot(ctx context.Context, manag
 	for {
 		now := time.Now().UTC()
 		intent := registry.TelegramManagedBotIntentRecord{ID: uuid.NewString(), ManagerID: managerID, OwnerID: m.cfg.Secrets.WLID, RequestedUsername: username, DisplayName: displayName, LaunchURL: "https://t.me/newbot/" + identity.Username + "/" + username + "?" + url.Values{"name": {displayName}}.Encode(), Status: "pending", CreatedAt: now, ExpiresAt: now.Add(TelegramManagedBotIntentTTL)}
-		err = m.store.SaveTelegramManagedBotIntent(ctx, intent)
+		err = save(ctx, intent)
 		if err == nil {
 			return telegramManagedIntentSummary(intent), nil
 		}
 		if !errors.Is(err, registry.ErrTelegramBotUsernameReserved) {
-			return TelegramManagedBotIntent{}, errors.New("Telegram creation request could not be saved")
+			return TelegramManagedBotIntent{}, telegramManagedBotIntentError(err, "Telegram creation request could not be saved")
 		}
 		if !automaticUsername {
 			return TelegramManagedBotIntent{}, ErrTelegramBotDuplicate
 		}
 		// Another gateway instance may reserve the checked suggestion before
 		// this transaction. Continue under the original lookup/attempt limits.
-		username, err = m.nextTelegramManagedBotUsername(lookupCtx, displayName, &number, &checks)
+		username, err = m.nextTelegramManagedBotUsername(lookupCtx, displayName, &number, &checks, excludedUsername)
 		if err != nil {
 			return TelegramManagedBotIntent{}, err
 		}

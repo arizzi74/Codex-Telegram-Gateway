@@ -18,6 +18,7 @@ type adminTelegramBotsFake struct {
 	err      error
 	bots     []gateway.TelegramBotSummary
 	pending  []gateway.TelegramManagedBotIntent
+	intent   gateway.TelegramManagedBotIntent
 }
 
 func (m *adminTelegramBotsFake) ListTelegramBots(context.Context) ([]gateway.TelegramBotSummary, error) {
@@ -70,6 +71,14 @@ func (m *adminTelegramBotsFake) CreateManagedTelegramBot(_ context.Context, mana
 	m.calls = append(m.calls, "create:"+managerID+":"+username+":"+name)
 	return gateway.TelegramManagedBotIntent{}, m.err
 }
+func (m *adminTelegramBotsFake) RemoveTelegramManagedBotIntent(_ context.Context, id string) error {
+	m.calls = append(m.calls, "remove-intent:"+id)
+	return m.err
+}
+func (m *adminTelegramBotsFake) RetryTelegramManagedBotIntent(_ context.Context, id string) (gateway.TelegramManagedBotIntent, error) {
+	m.calls = append(m.calls, "retry-intent:"+id)
+	return m.intent, m.err
+}
 
 func TestTelegramBotAdminAuthenticationAndValidation(t *testing.T) {
 	s, _, db, token := enrollmentHTTPServer(t, passkeyTestOrigin)
@@ -81,6 +90,8 @@ func TestTelegramBotAdminAuthenticationAndValidation(t *testing.T) {
 		{"POST", base, `{"token":"example-token"}`},
 		{"POST", base + "/refresh", ""},
 		{"POST", base + "/managed", `{"username":"test_bot","name":"Test"}`},
+		{"DELETE", base + "/managed/request-1", `{"confirmed":true}`},
+		{"POST", base + "/managed/request-1/retry", `{"confirmed":true}`},
 		{"POST", base + "/telegram:123/profile-photo/reset", `{"confirmed":true}`},
 		{"PATCH", base + "/telegram:123", `{"enabled":false}`},
 		{"PATCH", base + "/telegram:123", `{"inherit_session_name":true}`},

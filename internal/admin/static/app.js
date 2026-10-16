@@ -37,9 +37,11 @@ let telegramReadPromise = null;
 let telegramPollTimer = null;
 let telegramBusy = false;
 let telegramSequence = 0;
+let telegramSnapshotVersion = 0;
 let telegramTokenTarget = null;
 let telegramCreationID = '';
 let telegramRemovalTarget = null;
+let telegramPendingRemovalTarget = null;
 let telegramRemovedBots = [];
 const expandedTelegramBots = new Set();
 // Only the built-in web interface and a single canonical session link are
@@ -353,12 +355,22 @@ function telegramCreationURL(pending) {
   return url.href;
 }
 function telegramPendingActive(pending) {
-  return pending.status === 'pending' && Date.parse(pending.expires_at) > Date.now();
+  return !pending.bot_id && pending.status === 'pending' && Date.parse(pending.expires_at) > Date.now();
+}
+function telegramPendingRemovable(pending) {
+  return !pending.bot_id && ['pending', 'expired', 'failed', 'cancelled'].includes(pending.status);
+}
+function telegramPendingRetryable(pending) {
+  return telegramPendingRemovable(pending) && (['expired', 'failed', 'cancelled'].includes(pending.status) ||
+    (pending.status === 'pending' && Date.parse(pending.expires_at) <= Date.now()));
 }
 function telegramPendingText(pending) {
   const username = pending.requested_username ? '@' + pending.requested_username : 'Your new bot';
   if (pending.status === 'connected') return username + ' is connected. It is available in the bot list.';
-  if (pending.status === 'failed') return username + ' could not be connected. Refresh the bot list before trying again.';
+  if (pending.bot_id || pending.status === 'activating') return pending.status === 'failed'
+    ? username + ' was created in Telegram, but could not finish connecting. Use its bot card to check or manage it.'
+    : username + ' has been confirmed by Telegram and is being connected. Use its bot card to check or manage it.';
+  if (pending.status === 'failed') return username + ' could not be connected. Create a new link, or connect the bot with its token if you already created it in Telegram.';
   if (pending.status === 'cancelled') return 'Creation of ' + username + ' was cancelled.';
   if (!telegramPendingActive(pending)) return 'The gateway confirmation window for ' + username + ' expired. Create a new request, or connect the bot with its token if you already created it in Telegram.';
   const minutes = Math.max(1, Math.ceil((Date.parse(pending.expires_at) - Date.now()) / 60000));
@@ -417,7 +429,13 @@ function renderTelegramBots() {
       const link = el('a', 'button-link secondary', 'Continue in Telegram');
       link.href = url; link.target = '_blank'; link.rel = 'noopener noreferrer'; actions.append(link);
     }
+    if (telegramPendingRetryable(pending)) {
+      actions.append(button('Create new link', 'secondary', () => retryTelegramPending(pending.id)));
+      actions.append(button('Connect existing bot', 'secondary', () => openBotToken()));
+    }
+    if (telegramPendingRemovable(pending)) actions.append(button(telegramPendingActive(pending) ? 'Cancel request' : 'Delete request', 'danger', () => openTelegramPendingRemoval(pending.id)));
     actions.append(button('Refresh status', 'secondary', () => loadTelegramBots()));
+    for (const control of actions.querySelectorAll('button')) control.disabled = telegramBusy;
     card.append(actions);
     pendingRoot.append(card);
   }
@@ -428,7 +446,7 @@ function renderTelegramBots() {
 function scheduleTelegramPoll() {
   clearTimeout(telegramPollTimer);
   const namePending = telegramBots?.bots.some(bot => bot.enabled !== false && bot.name_sync_pending && !bot.name_error);
-  if (authenticated && (telegramBots?.pending.some(telegramPendingActive) || namePending)) telegramPollTimer = setTimeout(() => {
+  if (authenticated && (telegramBots?.pending.some(pending => telegramPendingActive(pending) || pending.status === 'activating' || (pending.status === 'pending' && pending.bot_id)) || namePending)) telegramPollTimer = setTimeout(() => {
     if (!rotationPending && !document.hidden) loadTelegramBots();
     else scheduleTelegramPoll();
   }, 3000);
@@ -445,6 +463,7 @@ async function loadTelegramBots(epoch = authEpoch, freshAfterMutation = false, r
     return;
   }
   telegramLoadingEpoch = epoch;
+  const snapshotVersion = telegramSnapshotVersion;
   let request;
   try {
     request = refreshMetadata
@@ -452,14 +471,14 @@ async function loadTelegramBots(epoch = authEpoch, freshAfterMutation = false, r
       : call('/telegram-bots', { cache: 'no-store' });
     telegramReadPromise = request;
     const value = await request;
-    if (epoch !== authEpoch || !authenticated) return;
+    if (epoch !== authEpoch || !authenticated || snapshotVersion !== telegramSnapshotVersion) return;
     if (!Array.isArray(value?.bots)) return;
     telegramBots = { bots: value.bots, pending: Array.isArray(value.pending) ? value.pending : [] };
     $('bot-error').hidden = true;
     if (refreshMetadata) $('bot-create-error').hidden = true;
     renderTelegramBots();
   } catch (error) {
-    if (epoch !== authEpoch || !authenticated) return;
+    if (epoch !== authEpoch || !authenticated || snapshotVersion !== telegramSnapshotVersion) return;
     if (error.status === 401) { sessionAuth.expire('expired'); return; }
     const errorID = refreshMetadata && $('bot-create-dialog').open ? 'bot-create-error' : 'bot-error';
     $(errorID).textContent = refreshMetadata
@@ -477,6 +496,7 @@ function telegramError(error) {
   if (error.name === 'NotAllowedError' || error.name === 'AbortError') return 'Verification was cancelled. Your changes have not been submitted.';
   if (error.status === 400) return 'Check the bot token or the new bot’s display name, then try again.';
   if (error.status === 403) return 'Access denied. Sign in again and retry.';
+  if (error.code === 'telegram_managed_bot_intent_conflict') return 'This request is active or already linked to a bot and cannot be removed or retried. Refresh the list.';
   if (error.status === 404) return 'This bot is no longer available. Refresh the bot list.';
   if (error.code === 'telegram_bot_duplicate') return 'This bot is already connected to the gateway.';
   if (error.code === 'telegram_bot_legacy') return 'The primary bot’s token is managed in the gateway configuration.';
@@ -498,8 +518,9 @@ async function telegramCall(path, opts, current) {
 function updateTelegramBusy() {
   $('bot-connect').disabled = telegramBusy;
   $('bot-create').disabled = telegramBusy;
-  for (const id of ['bot-token', 'bot-token-submit', 'bot-token-close', 'bot-token-cancel', 'bot-create-name', 'bot-create-close', 'bot-create-cancel', 'bot-create-refresh', 'bot-create-done', 'bot-manager-refresh', 'bot-remove-confirm', 'bot-remove-close', 'bot-remove-cancel']) $(id).disabled = telegramBusy;
+  for (const id of ['bot-token', 'bot-token-submit', 'bot-token-close', 'bot-token-cancel', 'bot-create-name', 'bot-create-close', 'bot-create-cancel', 'bot-create-refresh', 'bot-create-done', 'bot-manager-refresh', 'bot-remove-confirm', 'bot-remove-close', 'bot-remove-cancel', 'bot-request-confirm', 'bot-request-close', 'bot-request-cancel']) $(id).disabled = telegramBusy;
   for (const control of $('bot-info').querySelectorAll('button:not(.bot-toggle), input')) control.disabled = telegramBusy || control.dataset.botDisabled === 'true';
+  for (const control of $('bot-pending').querySelectorAll('button')) control.disabled = telegramBusy;
   for (const help of $('bot-info').querySelectorAll('.bot-photo-help')) help.textContent = telegramPhotoResetHelp(help.dataset.botDisabled === 'true');
   renderTelegramManagers();
 }
@@ -668,6 +689,67 @@ async function removeTelegramBot() {
     await loadTelegramBots(authEpoch, true);
   }, 'bot-remove-error');
 }
+function closeTelegramPendingRemoval() {
+  telegramPendingRemovalTarget = null;
+  $('bot-request-target').textContent = '';
+  $('bot-request-error').hidden = true;
+  if ($('bot-request-dialog').open) $('bot-request-dialog').close();
+}
+function openTelegramPendingRemoval(id) {
+  const pending = telegramBots?.pending.find(item => item.id === id);
+  if (telegramBusy || !authenticated || !pending || !telegramPendingRemovable(pending)) return;
+  telegramPendingRemovalTarget = { ...pending };
+  $('bot-request-target').textContent = 'Delete the setup request for ' + (pending.display_name || pending.requested_username || 'this managed bot') + '?';
+  $('bot-request-error').hidden = true;
+  $('bot-request-dialog').showModal();
+  $('bot-request-cancel').focus();
+}
+async function removeTelegramPending() {
+  const pending = telegramPendingRemovalTarget;
+  if (!pending || telegramBusy || !authenticated) return;
+  const latest = telegramBots?.pending.find(item => item.id === pending.id);
+  if (!latest || !telegramPendingRemovable(latest)) { closeTelegramPendingRemoval(); return; }
+  await runTelegramAction(async current => {
+    await telegramCall('/managed/' + encodeURIComponent(pending.id), { method: 'DELETE', body: JSON.stringify({ confirmed: true }) }, current);
+    if (!current() || !authenticated) return;
+    // Discard polls captured before this removal so they cannot restore it.
+    telegramSnapshotVersion++;
+    telegramBots.pending = telegramBots.pending.filter(item => item.id !== pending.id);
+    if (telegramCreationID === pending.id) closeBotCreate();
+    closeTelegramPendingRemoval();
+    $('bot-status').textContent = 'Gateway setup request deleted. Any bot already created in Telegram remains on Telegram.';
+    renderTelegramBots();
+    await loadTelegramBots(authEpoch, true);
+  }, 'bot-request-error');
+}
+function showTelegramCreation(pending, original = pending, replacedID = '') {
+  if (!pending?.id || pending.id === replacedID || !telegramCreationURL(pending) || !telegramPendingActive(pending)) throw new Error('Invalid creation response.');
+  // Keep a replacement visible immediately, even while an older poll finishes.
+  telegramSnapshotVersion++;
+  telegramBots.pending = [...telegramBots.pending.filter(item => item.id !== pending.id && item.id !== replacedID), pending];
+  closeBotCreate();
+  telegramCreationID = pending.id;
+  renderTelegramManagers();
+  $('bot-manager').value = String(original.manager_id || pending.manager_id || '');
+  $('bot-create-name').value = original.display_name || pending.display_name || '';
+  $('bot-create-form').hidden = true;
+  $('bot-create-result').hidden = false;
+  $('bot-create-dialog').showModal();
+  renderTelegramBots();
+  scheduleTelegramPoll();
+}
+async function retryTelegramPending(id) {
+  const pending = telegramBots?.pending.find(item => item.id === id);
+  if (telegramBusy || !authenticated || !pending || !telegramPendingRetryable(pending)) return;
+  await runTelegramAction(async current => {
+    const replacement = await telegramCall('/managed/' + encodeURIComponent(pending.id) + '/retry', { method: 'POST', body: JSON.stringify({ confirmed: true }) }, current);
+    if (!current() || !authenticated) return;
+    showTelegramCreation(replacement, pending, pending.id);
+    $('bot-status').textContent = 'New Telegram creation link ready.';
+    await loadTelegramBots(authEpoch, true);
+    if (current() && authenticated) $('bot-create-launch').focus();
+  });
+}
 function closeBotCreate() {
   telegramCreationID = '';
   $('bot-create-form').reset();
@@ -694,13 +776,7 @@ async function submitBotCreate(event) {
     $('bot-create-status').textContent = 'Checking Telegram username…';
     const pending = await telegramCall('/managed', { method: 'POST', body: JSON.stringify(payload) }, current);
     if (!current() || !authenticated) return;
-    if (!pending?.id || !telegramCreationURL(pending) || !telegramPendingActive(pending)) throw new Error('Invalid creation response.');
-    telegramCreationID = pending.id;
-    telegramBots.pending = [...telegramBots.pending.filter(item => item.id !== pending.id), pending];
-    $('bot-create-form').hidden = true;
-    $('bot-create-result').hidden = false;
-    renderTelegramBots();
-    scheduleTelegramPoll();
+    showTelegramCreation(pending);
     await loadTelegramBots(authEpoch, true);
     $('bot-create-launch').focus();
   }, 'bot-create-error');
@@ -708,6 +784,7 @@ async function submitBotCreate(event) {
 }
 function resetTelegramBots() {
   telegramSequence++;
+  telegramSnapshotVersion++;
   telegramBusy = false;
   telegramBots = null;
   telegramLoadingEpoch = null;
@@ -716,6 +793,7 @@ function resetTelegramBots() {
   closeBotToken();
   closeBotCreate();
   closeBotRemoval();
+  closeTelegramPendingRemoval();
   telegramRemovedBots = [];
   expandedTelegramBots.clear();
   $('bot-removed').replaceChildren();
@@ -1390,6 +1468,9 @@ $('bot-create-dialog').addEventListener('cancel', event => { if (telegramBusy) e
 for (const id of ['bot-remove-close', 'bot-remove-cancel']) $(id).addEventListener('click', closeBotRemoval);
 $('bot-remove-confirm').addEventListener('click', removeTelegramBot);
 $('bot-remove-dialog').addEventListener('cancel', event => { if (telegramBusy) event.preventDefault(); else closeBotRemoval(); });
+for (const id of ['bot-request-close', 'bot-request-cancel']) $(id).addEventListener('click', closeTelegramPendingRemoval);
+$('bot-request-confirm').addEventListener('click', removeTelegramPending);
+$('bot-request-dialog').addEventListener('cancel', event => { if (telegramBusy) event.preventDefault(); else closeTelegramPendingRemoval(); });
 $('password-login').addEventListener('click', () => sessionAuth.login('password').catch(() => {}));
 $('password-edit').addEventListener('click', editPassword);
 $('password-disable').addEventListener('click', disablePassword);
@@ -1468,12 +1549,12 @@ sessionAuth = window.CodexSessionAuth.create({
     authEpoch++; rotationPending = true;
     $('console').inert = true; $('logout').disabled = true;
     $('worker-enrollment').inert = true;
-    $('bot-token-dialog').inert = true; $('bot-create-dialog').inert = true; $('bot-remove-dialog').inert = true;
+    $('bot-token-dialog').inert = true; $('bot-create-dialog').inert = true; $('bot-remove-dialog').inert = true; $('bot-request-dialog').inert = true;
   },
   onAuthenticated: async () => {
     rotationPending = false; $('console').inert = false; $('logout').disabled = false;
     $('worker-enrollment').inert = false;
-    $('bot-token-dialog').inert = false; $('bot-create-dialog').inert = false; $('bot-remove-dialog').inert = false;
+    $('bot-token-dialog').inert = false; $('bot-create-dialog').inert = false; $('bot-remove-dialog').inert = false; $('bot-request-dialog').inert = false;
     authEpoch++; authenticated = true; await load();
   },
   onExpired: lockConsole,
@@ -1489,7 +1570,7 @@ sessionAuth = window.CodexSessionAuth.create({
       }).catch(showError).finally(() => {
         rotationPending = false; $('console').inert = false; $('logout').disabled = false;
         $('worker-enrollment').inert = false;
-        $('bot-token-dialog').inert = false; $('bot-create-dialog').inert = false; $('bot-remove-dialog').inert = false;
+        $('bot-token-dialog').inert = false; $('bot-create-dialog').inert = false; $('bot-remove-dialog').inert = false; $('bot-request-dialog').inert = false;
       });
     }
   },

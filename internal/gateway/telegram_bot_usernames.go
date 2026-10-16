@@ -59,13 +59,16 @@ func telegramManagedBotUsername(displayName string, number int) string {
 // bounded public profile lookup. A missing public profile is provisional:
 // Telegram's authoritative bots.checkUsername method requires a user MTProto
 // session, and Telegram validates the suggestion again during owner confirmation.
-func (m *TelegramBotManager) nextTelegramManagedBotUsername(ctx context.Context, displayName string, number, checks *int) (string, error) {
+func (m *TelegramBotManager) nextTelegramManagedBotUsername(ctx context.Context, displayName string, number, checks *int, excludedUsername ...string) (string, error) {
 	for *number < telegramManagedBotUsernameCandidates {
 		if err := ctx.Err(); err != nil {
 			return "", ErrTelegramBotUsernameUnverified
 		}
 		username := telegramManagedBotUsername(displayName, *number)
 		*number++
+		if len(excludedUsername) > 0 && strings.EqualFold(username, excludedUsername[0]) {
+			continue
+		}
 		reserved, err := m.store.TelegramManagedBotUsernameReserved(ctx, username)
 		if err != nil {
 			return "", errors.New("Telegram username reservations could not be read")

@@ -24,6 +24,7 @@ async function fixture(browser, width) {
     invalidCreationURL: false, creationNumber: 0, creationUsername: 'created_2_bot', networkFailure: false, holdNextRead: false,
     managerCanManageBots: true, managedFailure: false, sessionAgeMillis: 0, patchFailure: false,
     profileResets: [], profileResetFailure: null, holdNextProfileReset: false,
+    retryFailure: null, deleteRequestFailure: null, holdNextRetry: false, holdNextRequestDelete: false,
   };
   const errors = [];
   const messages = [];
@@ -114,6 +115,42 @@ async function fixture(browser, width) {
               await new Promise(resolve => { state.releaseManagedCreate = resolve; state.onManagedCreateStarted(); });
             }
           }
+        } else if (/\/telegram-bots\/managed\/[^/]+\/retry$/.test(url.pathname) && request.method() === 'POST') {
+          assert.deepEqual(payload, { confirmed: true });
+          const id = decodeURIComponent(url.pathname.split('/').at(-2));
+          const original = state.pending.find(item => item.id === id);
+          if (state.retryFailure) {
+            status = state.retryFailure.status; body = { code: state.retryFailure.code, message: 'Unsafe retry error ' + token };
+          } else if (!original || original.bot_id || original.status === 'activating') {
+            status = 409; body = { code: 'telegram_managed_bot_intent_conflict', message: 'Unsafe claimed error ' + token };
+          } else {
+            state.creationNumber++;
+            body = { ...original, id: 'intent-' + state.creationNumber, status: 'pending', bot_id: '',
+              requested_username: 'retry_' + state.creationNumber + '_bot', expires_at: new Date(now + 15 * 60000).toISOString(),
+              launch_url: 'https://t.me/newbot/primary_bot/retry_' + state.creationNumber + '_bot?name=' + encodeURIComponent(original.display_name) };
+            state.pending = [...state.pending.filter(item => item.id !== id), body];
+            status = 201;
+          }
+          if (state.holdNextRetry) {
+            state.holdNextRetry = false;
+            await new Promise(resolve => { state.releaseRetry = resolve; state.onRetryStarted(); });
+          }
+        } else if (/\/telegram-bots\/managed\/[^/]+$/.test(url.pathname) && request.method() === 'DELETE') {
+          assert.deepEqual(payload, { confirmed: true });
+          const id = decodeURIComponent(url.pathname.split('/').at(-1));
+          const original = state.pending.find(item => item.id === id);
+          if (state.deleteRequestFailure) {
+            status = state.deleteRequestFailure.status; body = { code: state.deleteRequestFailure.code, message: 'Unsafe deletion error ' + token };
+          } else if (!original || original.bot_id || original.status === 'activating') {
+            status = 409; body = { code: 'telegram_managed_bot_intent_conflict', message: 'Unsafe claimed error ' + token };
+          } else {
+            state.pending = state.pending.filter(item => item.id !== id);
+            status = 204;
+          }
+          if (state.holdNextRequestDelete) {
+            state.holdNextRequestDelete = false;
+            await new Promise(resolve => { state.releaseRequestDelete = resolve; state.onRequestDeleteStarted(); });
+          }
         } else {
           const id = decodeURIComponent(url.pathname.split('/').at(-1));
           if (request.method() === 'PATCH' && state.patchFailure) return route.fulfill({ status: 502, contentType: 'application/json', body: JSON.stringify({ code: 'telegram_bot_unavailable', message: 'Unsafe upstream error ' + token }) });
@@ -162,6 +199,194 @@ async function fixture(browser, width) {
     await page.waitForFunction(() => !telegramBusy);
   }
   return { page, state, errors, messages, externalRequests, card, refresh, tokenSubmit, create };
+}
+
+async function checkPendingRecovery(browser, width) {
+  const { page, state, errors, messages, externalRequests, card, refresh, create } = await fixture(browser, width);
+  const pendingCard = id => page.locator('[data-pending-id="' + id + '"]');
+  await create('Second Agent ' + malicious, 'second_agent_bot');
+  const original = structuredClone(state.pending.at(-1));
+  await page.locator('#bot-create-done').click();
+  assert.equal(await pendingCard(original.id).getByRole('button', { name: 'Create new link', exact: true }).count(), 0, 'An active setup request cannot be retried');
+  const beforeCancelledDelete = state.mutations.length;
+  await pendingCard(original.id).getByRole('button', { name: 'Cancel request', exact: true }).click();
+  assert.match(await page.locator('#bot-request-target').innerText(), /Second Agent/);
+  assert.match(await page.locator('#bot-request-description').innerText(), /only the gateway setup request.*Any bot already created in Telegram remains/s);
+  assert.equal(await page.locator('#bot-request-dialog').evaluate(dialog => dialog.scrollWidth <= dialog.clientWidth && dialog.getBoundingClientRect().width <= innerWidth), true, 'Request deletion fits the viewport');
+  await page.locator('#bot-request-cancel').click();
+  assert.equal(state.mutations.length, beforeCancelledDelete, 'Cancelling setup-request deletion sends no mutation');
+
+  state.pending[0].expires_at = new Date(await page.evaluate(() => Date.now()) + 1000).toISOString();
+  await page.clock.runFor(3100);
+  await pendingCard(original.id).getByRole('button', { name: 'Create new link', exact: true }).waitFor();
+  assert.match(await pendingCard(original.id).innerText(), /confirmation window.*expired/);
+  assert.equal(await pendingCard(original.id).getByRole('link', { name: 'Continue in Telegram' }).count(), 0, 'Expired requests never expose the old Telegram link');
+  assert.equal(await pendingCard(original.id).getByRole('button', { name: 'Delete request', exact: true }).isEnabled(), true);
+  const beforeConnectShortcut = state.mutations.length;
+  await pendingCard(original.id).getByRole('button', { name: 'Connect existing bot', exact: true }).click();
+  assert.equal(await page.locator('#bot-token-dialog').evaluate(dialog => dialog.open), true, 'Expired requests can recover a bot created in Telegram with its token');
+  assert.equal(state.mutations.length, beforeConnectShortcut, 'The token shortcut only opens the connection form');
+  await page.locator('#bot-token-cancel').click();
+
+  const expiredAt = new Date(await page.evaluate(() => Date.now()) - 1000).toISOString();
+  for (const status of ['expired', 'failed', 'cancelled']) state.pending.push({ ...original, id: 'recover-' + status, status, expires_at: expiredAt, bot_id: undefined });
+  for (const [id, status, bot_id] of [['activating', 'activating', ''], ['claimed-failed', 'failed', createdID], ['claimed-pending', 'pending', createdID]]) {
+    state.pending.push({ ...original, id, status, expires_at: expiredAt, bot_id });
+  }
+  state.bots.push({ id: createdID, username: 'claimed_bot', display_name: 'Claimed bot', enabled: true, managed: true, status: 'connected' });
+  await refresh();
+  for (const status of ['expired', 'failed', 'cancelled']) {
+    assert.equal(await pendingCard('recover-' + status).getByRole('button', { name: 'Create new link', exact: true }).isEnabled(), true, status + ' unclaimed requests can be retried without a bot_id field');
+    assert.equal(await pendingCard('recover-' + status).getByRole('button', { name: 'Delete request', exact: true }).isEnabled(), true);
+  }
+  for (const id of ['activating', 'claimed-failed', 'claimed-pending']) {
+    assert.deepEqual(await pendingCard(id).getByRole('button').allTextContents(), ['Refresh status'], 'Claimed and activating requests expose no recovery mutations');
+    assert.match(await pendingCard(id).innerText(), /Use its bot card/);
+    assert.doesNotMatch(await pendingCard(id).innerText(), /expired/, 'Activation does not inherit the old link’s expiry guidance');
+  }
+  assert.equal(await card(createdID).count(), 1, 'Claimed requests are managed through their actual bot card');
+
+  state.retryFailure = { status: 502, code: 'telegram_bot_unavailable' };
+  const beforeRetryFailure = state.mutations.length;
+  await pendingCard(original.id).getByRole('button', { name: 'Create new link', exact: true }).click();
+  await page.waitForFunction(() => !telegramBusy);
+  assert.equal(state.mutations.length, beforeRetryFailure + 1, 'A failed retry is never automatically replayed');
+  assert.equal(await pendingCard(original.id).count(), 1, 'A retry failure preserves the old request');
+  assert.equal(await page.locator('#bot-create-dialog').evaluate(dialog => dialog.open), false, 'A failed retry cannot show an old creation link');
+  assert.match(await page.locator('#bot-error').innerText(), /Telegram could not complete/);
+  state.retryFailure = null;
+  state.networkFailure = true;
+  const beforeRetryNetworkFailure = state.mutations.length;
+  await pendingCard(original.id).getByRole('button', { name: 'Create new link', exact: true }).click();
+  await page.waitForFunction(() => !telegramBusy);
+  assert.equal(state.mutations.length, beforeRetryNetworkFailure + 1, 'An ambiguous retry failure is not replayed');
+  assert.equal(await pendingCard(original.id).count(), 1);
+  state.networkFailure = false;
+  state.requireReauth = true;
+  await page.evaluate(() => { window.failCredentials = true; });
+  const beforeRetryVerificationCancel = state.mutations.length;
+  await pendingCard(original.id).getByRole('button', { name: 'Create new link', exact: true }).click();
+  await page.waitForFunction(() => !telegramBusy);
+  assert.equal(state.mutations.length, beforeRetryVerificationCancel + 1, 'Cancelled verification keeps the old request and does not replay retry');
+  assert.equal(await pendingCard(original.id).count(), 1);
+  assert.match(await page.locator('#bot-error').innerText(), /Verification was cancelled/);
+  await page.evaluate(() => { window.failCredentials = false; });
+
+  const readStarted = new Promise(resolve => { state.onReadStarted = resolve; });
+  state.holdNextRead = true;
+  const staleRead = page.evaluate(() => loadTelegramBots());
+  await readStarted;
+  const retryStarted = new Promise(resolve => { state.onRetryStarted = resolve; });
+  state.holdNextRetry = true;
+  state.requireReauth = true;
+  const beforeRetry = state.mutations.length;
+  const beforeRetryCredentials = state.credentialCalls;
+  await pendingCard(original.id).getByRole('button', { name: 'Create new link', exact: true }).click();
+  await retryStarted;
+  assert.equal(await pendingCard(original.id).getByRole('button', { name: 'Create new link', exact: true }).isDisabled(), true, 'A retry locks itself');
+  assert.equal(await pendingCard('recover-failed').getByRole('button', { name: 'Delete request', exact: true }).isDisabled(), true, 'A retry locks other setup-request mutations');
+  assert.equal(await pendingCard('recover-cancelled').getByRole('button', { name: 'Refresh status' }).isDisabled(), true, 'Pending refresh controls share the busy state');
+  await page.evaluate(id => retryTelegramPending(id), original.id);
+  assert.equal(state.mutations.length, beforeRetry + 2, 'Only the explicit fresh-auth rejection resubmits retry; duplicate clicks cannot');
+  assert.equal(state.credentialCalls, beforeRetryCredentials + 1, 'Retry performs fresh authentication when required');
+  state.releaseRetry();
+  await page.waitForFunction(oldID => telegramCreationID && telegramCreationID !== oldID, original.id);
+  const replacement = structuredClone(state.pending.find(item => item.id.startsWith('intent-')));
+  assert.notEqual(replacement.id, original.id, 'Retry creates a fresh intent ID');
+  assert.equal(await pendingCard(original.id).count(), 0, 'Retry replaces the old request immediately');
+  assert.equal(await page.locator('#bot-create-dialog').evaluate(dialog => dialog.open), true);
+  assert.equal(await page.locator('#bot-create-result').isVisible(), true, 'Retry opens the existing creation result');
+  assert.equal(await page.locator('#bot-manager').inputValue(), original.manager_id, 'Retry retains the original manager');
+  assert.equal(await page.locator('#bot-create-name').inputValue(), original.display_name, 'Retry retains the original display name');
+  assert.match(await page.locator('#bot-create-result-status').innerText(), /Waiting for Telegram.*15 minutes/);
+  assert.equal(await page.locator('#bot-create-launch').getAttribute('href'), replacement.launch_url);
+  assert.equal(await page.locator('#bot-create-dialog').evaluate(dialog => dialog.scrollWidth <= dialog.clientWidth && dialog.getBoundingClientRect().width <= innerWidth), true, 'The retry result fits the viewport');
+  await page.evaluate(oldID => {
+    window.restoredOldRequest = false;
+    new MutationObserver(() => { if ([...document.querySelectorAll('[data-pending-id]')].some(node => node.dataset.pendingId === oldID)) window.restoredOldRequest = true; }).observe(document.getElementById('bot-pending'), { childList: true, subtree: true });
+  }, original.id);
+  state.releaseRead();
+  await staleRead;
+  await page.waitForFunction(() => !telegramBusy);
+  assert.equal(await page.evaluate(() => window.restoredOldRequest), false, 'An older poll cannot restore a replaced request, even temporarily');
+  await page.locator('#bot-create-done').click();
+
+  await pendingCard('recover-failed').getByRole('button', { name: 'Delete request', exact: true }).click();
+  state.requireReauth = true;
+  await page.evaluate(() => { window.failCredentials = true; });
+  const beforeDeleteVerificationCancel = state.mutations.length;
+  await page.locator('#bot-request-confirm').click();
+  await page.waitForFunction(() => !telegramBusy);
+  assert.equal(state.mutations.length, beforeDeleteVerificationCancel + 1, 'Cancelled fresh authentication does not replay deletion');
+  assert.equal(await pendingCard('recover-failed').count(), 1);
+  assert.match(await page.locator('#bot-request-error').innerText(), /Verification was cancelled/);
+  await page.evaluate(() => { window.failCredentials = false; });
+  state.deleteRequestFailure = { status: 409, code: 'telegram_managed_bot_intent_conflict' };
+  await page.locator('#bot-request-confirm').click();
+  await page.waitForFunction(() => !telegramBusy);
+  assert.match(await page.locator('#bot-request-error').innerText(), /already linked to a bot.*Refresh the list/);
+  assert.equal(await pendingCard('recover-failed').count(), 1, 'A rejected deletion preserves the request');
+  state.deleteRequestFailure = null;
+  await page.locator('#bot-request-cancel').click();
+
+  const deleteReadStarted = new Promise(resolve => { state.onReadStarted = resolve; });
+  state.readStatus = 502;
+  state.holdNextRead = true;
+  const staleDeleteRead = page.evaluate(() => loadTelegramBots());
+  await deleteReadStarted;
+  state.readStatus = 200;
+  await pendingCard('recover-cancelled').getByRole('button', { name: 'Delete request', exact: true }).click();
+  const deleteStarted = new Promise(resolve => { state.onRequestDeleteStarted = resolve; });
+  state.holdNextRequestDelete = true;
+  state.requireReauth = true;
+  const beforeDelete = state.mutations.length;
+  const beforeDeleteCredentials = state.credentialCalls;
+  const botsBeforeDelete = structuredClone(state.bots);
+  await page.locator('#bot-request-confirm').click();
+  await deleteStarted;
+  assert.equal(await page.locator('#bot-request-confirm').isDisabled(), true, 'A confirmed deletion cannot be submitted twice');
+  assert.equal(await pendingCard(replacement.id).getByRole('button', { name: 'Cancel request', exact: true }).isDisabled(), true, 'Deleting a request locks other pending actions');
+  assert.equal(state.mutations.length, beforeDelete + 2, 'Deletion retries only the explicit fresh-auth rejection');
+  assert.equal(state.credentialCalls, beforeDeleteCredentials + 1);
+  state.releaseRequestDelete();
+  await page.waitForFunction(() => !telegramBots.pending.some(item => item.id === 'recover-cancelled'));
+  await page.evaluate(() => {
+    window.restoredDeletedRequest = false;
+    window.staleDeletionError = false;
+    new MutationObserver(() => { if (document.querySelector('[data-pending-id="recover-cancelled"]')) window.restoredDeletedRequest = true; }).observe(document.getElementById('bot-pending'), { childList: true, subtree: true });
+    new MutationObserver(() => { if (!document.getElementById('bot-error').hidden) window.staleDeletionError = true; }).observe(document.getElementById('bot-error'), { attributes: true, childList: true });
+  });
+  state.releaseRead();
+  await staleDeleteRead;
+  await page.waitForFunction(() => !telegramBusy);
+  assert.equal(await page.evaluate(() => window.restoredDeletedRequest), false, 'An older poll cannot restore a deleted request');
+  assert.equal(await page.evaluate(() => window.staleDeletionError), false, 'An old failed poll cannot overlay the successful deletion with an error');
+  assert.equal(await page.locator('#bot-request-dialog').evaluate(dialog => dialog.open), false);
+  assert.equal(await pendingCard('recover-cancelled').count(), 0);
+  assert.deepEqual(state.bots, botsBeforeDelete, 'Deleting a setup request preserves connected bots');
+  assert.match(await page.locator('#bot-status').innerText(), /setup request deleted.*Any bot already created in Telegram remains/s);
+  assert.equal(state.mutations.at(-1).path, '/tgw/api/v1/admin/telegram-bots/managed/recover-cancelled');
+  assert.equal(state.mutations.at(-1).method, 'DELETE');
+  assert.deepEqual(state.mutations.at(-1).payload, { confirmed: true });
+  assert.ok(state.mutations.every(mutation => mutation.csrf === 'bot-csrf'), 'Retry and request deletion always include CSRF');
+  assert.equal(externalRequests.length, 0, 'Request recovery never silently launches Telegram');
+  assert.equal(await page.locator('#bot-pending img').count(), 0, 'Setup names remain plain text');
+  assert.equal((await page.locator('body').innerText()).includes(token), false, 'Recovery errors never expose upstream tokens');
+  assert.equal(messages.some(message => message.includes(token)), false);
+  assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true, 'Recovery controls fit the viewport');
+
+  await pendingCard(replacement.id).getByRole('button', { name: 'Cancel request', exact: true }).click();
+  const beforeExpiry = state.mutations.length;
+  state.dashboardStatus = 401;
+  await page.evaluate(() => load(false));
+  await page.waitForSelector('#auth:not([hidden])');
+  assert.equal(await page.locator('#bot-request-dialog').evaluate(dialog => dialog.open), false, 'Sign-out closes setup-request confirmation');
+  assert.equal(await page.locator('#bot-request-target').innerText(), '');
+  assert.equal(await page.evaluate(() => telegramPendingRemovalTarget === null && telegramCreationID === ''), true, 'Sign-out clears request targets and creation links');
+  assert.equal(await page.locator('#bot-pending').innerText(), '');
+  assert.equal(state.mutations.length, beforeExpiry, 'Sign-out never submits pending request deletion');
+  assert.deepEqual(errors, []);
+  await page.close();
 }
 
 (async () => {
@@ -597,7 +822,8 @@ async function fixture(browser, width) {
       assert.equal(expiry.state.mutations.length, 0, 'Expiring a removal dialog never deletes the bot');
       assert.deepEqual(expiry.errors, []);
       await expiry.page.close();
+      await checkPendingRecovery(browser, width);
     }
-    console.log('Admin Telegram bot browser checks passed: mobile/desktop collapsed sections and bot cards, confirmed profile-photo reset/cancel/disabled/busy/error/fresh-auth behavior, attention indicators, opt-in session names, token privacy, connect/replace/takeover, profile refresh, managed creation/polling/expiry, safe rendering, gateway removal/BotFather guidance, CSRF, refresh recovery and sign-in expiry.');
+    console.log('Admin Telegram bot browser checks passed: mobile/desktop collapsed sections and bot cards, confirmed profile-photo reset/cancel/disabled/busy/error/fresh-auth behavior, attention indicators, opt-in session names, token privacy, connect/replace/takeover, profile refresh, managed creation/polling/expiry, expired request retry/delete/token recovery, claimed-request safety, stale polls, safe rendering, gateway removal/BotFather guidance, CSRF, refresh recovery and sign-in expiry.');
   } finally { await browser.close(); }
 })().catch(error => { console.error(error); process.exitCode = 1; });

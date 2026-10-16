@@ -24,6 +24,8 @@ type TelegramBotManager interface {
 	ResetTelegramBotProfilePhoto(context.Context, string) error
 	RemoveTelegramBot(context.Context, string) error
 	CreateManagedTelegramBot(context.Context, string, string, string) (gateway.TelegramManagedBotIntent, error)
+	RemoveTelegramManagedBotIntent(context.Context, string) error
+	RetryTelegramManagedBotIntent(context.Context, string) (gateway.TelegramManagedBotIntent, error)
 }
 
 func (s *Server) telegramBotCollection(w http.ResponseWriter, r *http.Request) {
@@ -278,6 +280,63 @@ func (s *Server) telegramBotProfilePhotoReset(w http.ResponseWriter, r *http.Req
 	writeJSON(w, http.StatusNoContent, nil)
 }
 
+func (s *Server) telegramManagedBotIntentRemove(w http.ResponseWriter, r *http.Request) {
+	s.telegramManagedBotIntentAction(w, r, false)
+}
+
+func (s *Server) telegramManagedBotIntentRetry(w http.ResponseWriter, r *http.Request) {
+	s.telegramManagedBotIntentAction(w, r, true)
+}
+
+func (s *Server) telegramManagedBotIntentAction(w http.ResponseWriter, r *http.Request, retry bool) {
+	verb := http.MethodDelete
+	if retry {
+		verb = http.MethodPost
+	}
+	if r.Method != verb {
+		w.Header().Set("Allow", verb)
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if _, ok := s.requireFreshAuth(w, r); !ok {
+		return
+	}
+	if !s.requireTelegramBots(w) {
+		return
+	}
+	id := r.PathValue("id")
+	if !validTelegramBotID(id) {
+		bad(w)
+		return
+	}
+	var input struct {
+		Confirmed bool `json:"confirmed"`
+	}
+	if !decodeEnrollmentJSON(w, r, &input, false) {
+		return
+	}
+	if !input.Confirmed {
+		bad(w)
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
+	defer cancel()
+	if retry {
+		intent, err := s.telegramBots.RetryTelegramManagedBotIntent(ctx, id)
+		if err != nil {
+			telegramBotError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusCreated, intent)
+		return
+	}
+	if err := s.telegramBots.RemoveTelegramManagedBotIntent(ctx, id); err != nil {
+		telegramBotError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusNoContent, nil)
+}
+
 func validTelegramBotID(id string) bool {
 	return id != "" && len(id) <= 160 && !strings.ContainsAny(id, "/\\?#\x00\r\n\t ")
 }
@@ -299,6 +358,8 @@ func telegramBotError(w http.ResponseWriter, err error) {
 		status, code, message = http.StatusBadRequest, "invalid_telegram_bot", "Check the bot token, username, and display name."
 	case errors.Is(err, gateway.ErrTelegramBotNotFound):
 		status, code, message = http.StatusNotFound, "telegram_bot_not_found", "This bot is no longer connected. Refresh the list."
+	case errors.Is(err, gateway.ErrTelegramManagedBotIntentConflict):
+		status, code, message = http.StatusConflict, "telegram_managed_bot_intent_conflict", "This request is active or already linked to a bot and cannot be removed or retried. Refresh the list."
 	case errors.Is(err, gateway.ErrTelegramBotDuplicate):
 		status, code, message = http.StatusConflict, "telegram_bot_duplicate", "This bot is already connected or has a pending creation request."
 	case errors.Is(err, gateway.ErrTelegramBotLegacy):
