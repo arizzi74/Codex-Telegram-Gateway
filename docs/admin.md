@@ -133,13 +133,22 @@ updates across open browser views. Group and forum-topic selections remain
 independent. `/tgmultisession` is configured separately for each bot chat and
 is off by default.
 
-Questions and approvals are shared across the bot chats you have opened,
-including chats with another session selected or no selection. Answer from any
-copy without changing either bot's selection. Once a question is answered,
-every delivered copy is edited to show **Question:** and **Answer:** and its
-buttons are removed. For a request containing several questions, each next
-question is sent to all those bot chats too. Disabled bots and disallowed chats
-do not receive these messages.
+Each bot has a **Broadcast session questions to all bots** checkbox, off by
+default. When a session has a selected bot, its questions and approvals are sent
+only to that bot. Enable the checkbox on the selected bot to notify all enabled
+bot chats you have opened, including chats following other sessions or no
+session. The selected bot's setting controls broadcasting; other bots' checkbox
+values do not prevent them from receiving a broadcast. A session with no
+selected bot always notifies all eligible bot chats. Disabled bots and
+disallowed chats do not receive these messages.
+
+Answer from any delivered copy without changing either bot's selection. Once a
+question is answered, every delivered copy is edited to show **Question:** and
+**Answer:** and its buttons are removed. For a request containing several
+questions, each next question follows the same routing rule. You can still use
+`/tgquestions` to open a pending request from any session manually. The preference
+survives restarts, profile refreshes and token replacements; new bots default to
+off.
 
 Each bot has an **Inherit selected session name** checkbox, off by default.
 When enabled, its Telegram display name follows the session selected in the

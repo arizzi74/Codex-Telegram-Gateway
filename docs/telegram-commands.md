@@ -511,13 +511,17 @@ confirmation is being retried. A subsequent
 completion from A stays hidden. Final answers already displayed remain in the chat; use
 `/tglastmessages` to read a session's saved responses later.
 
-Questions and approvals are an exception: they arrive even when another session
-is selected or the chat is disconnected, in every enabled bot chat you have
-opened. Each names its originating session.
+Questions and approvals name their originating session and go only to its
+selected bot by default. Enable **Broadcast session questions to all bots** in
+that bot's Admin configuration to notify every enabled bot chat you have opened,
+including chats with another session selected or no selection. The setting is
+off by default. If the originating session has no selected bot, all eligible bot
+chats receive the request anyway. Disabled bots and disallowed chats are excluded.
 Use its buttons or reply directly to its message; the answer is routed to the
 exact request without changing any bot's selected session. Answered questions
-are replaced in every bot with `Question:` and `Answer:`, without buttons.
-If the request has more questions, the next one appears in every bot too.
+are replaced in every delivered copy with `Question:` and `Answer:`, without buttons.
+If the request has more questions, the next one follows the same routing rule.
+A pending request can still be opened manually through `/tgquestions` in any bot.
 A reply to a question also
 works while a new-session wizard is open. A delayed new/fork result cannot replace
 a later selection or undo a disconnect. Explicit command responses, such as a

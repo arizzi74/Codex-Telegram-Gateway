@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -30,7 +31,7 @@ type crossBotQuestions struct {
 	apis                        map[string]*questionSyncAPI
 }
 
-func newCrossBotQuestions(t *testing.T) *crossBotQuestions {
+func newCrossBotQuestions(t *testing.T, ownerPrivate ...bool) *crossBotQuestions {
 	t.Helper()
 	ctx := t.Context()
 	env := &crossBotQuestions{t: t, store: testRegistry(t), connection: uuid.New(), runtime: uuid.New(), first: uuid.New(), second: uuid.New(), apis: make(map[string]*questionSyncAPI)}
@@ -82,6 +83,7 @@ func newCrossBotQuestions(t *testing.T) *crossBotQuestions {
 	}))
 	t.Cleanup(server.Close)
 	resolver := &routingResolver{bots: make(map[string]routingBot)}
+	privateConnections := len(ownerPrivate) > 0 && ownerPrivate[0]
 	for index, bot := range []string{"first", "second"} {
 		env.apis[bot] = &questionSyncAPI{live: make(map[int64]SendMessage)}
 		now := time.Now().UTC()
@@ -90,7 +92,11 @@ func newCrossBotQuestions(t *testing.T) *crossBotQuestions {
 		}
 		api := NewTelegramClient(bot)
 		api.endpoint, api.http = server.URL, server.Client()
-		resolver.bots[bot] = routingBot{cfg: config.GatewayConfig{Secrets: config.BotSecrets{WLID: 10}, AllowedChatIDs: []int64{20}}, api: api}
+		allowedChats := []int64{20}
+		if privateConnections {
+			allowedChats = []int64{10, 20}
+		}
+		resolver.bots[bot] = routingBot{cfg: config.GatewayConfig{Secrets: config.BotSecrets{WLID: 10}, AllowedChatIDs: allowedChats}, api: api}
 	}
 	env.sender = NewSender(env.store, nil, nil, SenderOptions{BotResolver: resolver})
 	for _, session := range []uuid.UUID{env.first, env.second} {
@@ -102,9 +108,170 @@ func newCrossBotQuestions(t *testing.T) *crossBotQuestions {
 		if err != nil || result.ErrorCode != "" {
 			t.Fatalf("select %s: %+v %v", bot, result, err)
 		}
+		if privateConnections {
+			if _, err := env.store.SetWebUITelegramBot(ctx, selected, bot); err != nil {
+				t.Fatalf("connect owner-private %s: %v", bot, err)
+			}
+		}
 	}
 	env.flush()
 	return env
+}
+
+type deliveredQuestionCopy struct {
+	bot     string
+	id      int64
+	message SendMessage
+}
+
+func (e *crossBotQuestions) questionCopies(prompt string) []deliveredQuestionCopy {
+	e.t.Helper()
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	var copies []deliveredQuestionCopy
+	for bot, api := range e.apis {
+		for id, message := range api.live {
+			if strings.Contains(message.Text, prompt) {
+				copies = append(copies, deliveredQuestionCopy{bot: bot, id: id, message: message})
+			}
+		}
+	}
+	return copies
+}
+
+func TestConnectedQuestionBotControlsRenderedDeliveryAndAllCopiesSettle(t *testing.T) {
+	for _, tc := range []struct {
+		name                                 string
+		connected, sourceFlag, recipientFlag bool
+		want                                 []string
+	}{
+		{name: "connected default off", connected: true, want: []string{"first/10", "first/20"}},
+		{name: "recipient opt in cannot broaden", connected: true, recipientFlag: true, want: []string{"first/10", "first/20"}},
+		{name: "source opt in broadcasts to recipient default off", connected: true, sourceFlag: true, want: []string{"first/10", "first/20", "second/10", "second/20"}},
+		{name: "unconnected session broadcasts by default", want: []string{"first/20", "second/20"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			env := newCrossBotQuestions(t, tc.connected)
+			ctx := t.Context()
+			for bot, enabled := range map[string]bool{"first": tc.sourceFlag, "second": tc.recipientFlag} {
+				if enabled {
+					if err := env.store.SetTelegramBotBroadcastQuestions(ctx, bot, true); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			const prompt = "Continue with the selected option?"
+			approval := protocol.Approval{ID: uuid.NewString(), RequestID: "async:connected", ThreadID: env.first.String(), Type: "user_input", Async: true,
+				Questions: []protocol.Question{{ID: "question", Prompt: prompt, Options: []string{"Yes", "No"}}}}
+			env.emit(env.first, "user_input_requested", approval)
+			env.flush()
+			copies := env.questionCopies(prompt)
+			got := []string{}
+			var answer deliveredQuestionCopy
+			for _, copy := range copies {
+				got = append(got, fmt.Sprintf("%s/%d", copy.bot, copy.message.ChatID))
+				if copy.message.ChatID == 20 && (answer.bot == "" || copy.bot == "second") {
+					answer = copy
+				}
+			}
+			slices.Sort(got)
+			slices.Sort(tc.want)
+			if !slices.Equal(got, tc.want) {
+				t.Fatalf("rendered question destinations=%v, want %v", got, tc.want)
+			}
+			// Copies delivered while broadcast was enabled must settle even
+			// after it is disabled, and remain answerable from the other bot.
+			if tc.sourceFlag {
+				if err := env.store.SetTelegramBotBroadcastQuestions(ctx, "first", false); err != nil {
+					t.Fatal(err)
+				}
+			}
+			accepted, err := env.store.AcceptTelegram(ctx, registry.IncomingUpdate{BotID: answer.bot, UpdateID: 2, UserID: 10, ChatID: answer.message.ChatID,
+				CallbackToken: questionButton(t, answer.message, "Yes"), CallbackMessageID: answer.id})
+			if err != nil || accepted.CommandID == "" || accepted.SessionID != env.first.String() {
+				t.Fatalf("answer delivered copy: %+v %v", accepted, err)
+			}
+			env.flush()
+			for _, copy := range copies {
+				env.assertAnswer(copy.bot, copy.id, prompt, "Yes")
+			}
+			commands, err := env.store.PendingCommandsForWorker(ctx, env.worker, 10)
+			if err != nil || len(commands) != 1 || commands[0].Operation != protocol.InputResponse {
+				t.Fatalf("expected one accepted response: %+v %v", commands, err)
+			}
+			env.assertSelections()
+		})
+	}
+}
+
+func TestConnectedQuestionNativePartialUsesCurrentSourcePreference(t *testing.T) {
+	env := newCrossBotQuestions(t, true)
+	ctx := t.Context()
+	if err := env.store.SetTelegramBotBroadcastQuestions(ctx, "first", true); err != nil {
+		t.Fatal(err)
+	}
+	approval := protocol.Approval{ID: uuid.NewString(), RequestID: "async:connected-native", ThreadID: env.first.String(), Type: "user_input", Async: true,
+		Questions: []protocol.Question{{ID: "first", Prompt: "Initial connected question?"}, {ID: "second", Prompt: "Remaining connected question?"}}}
+	env.emit(env.first, "user_input_requested", approval)
+	env.flush()
+	copies := env.questionCopies("Initial connected question?")
+	if len(copies) != 4 {
+		t.Fatalf("initial broadcast copies=%+v", copies)
+	}
+	if err := env.store.SetTelegramBotBroadcastQuestions(ctx, "first", false); err != nil {
+		t.Fatal(err)
+	}
+	approval.Answers = map[string][]string{"first": {"Native answer"}}
+	env.emit(env.first, "user_input_answered", approval)
+	approval.Questions = approval.Questions[1:]
+	env.emit(env.first, "user_input_requested", approval)
+	env.flush()
+	for _, copy := range copies {
+		env.assertAnswer(copy.bot, copy.id, "Initial connected question?", "Native answer")
+	}
+	next := env.questionCopies("Remaining connected question?")
+	if len(next) != 2 {
+		t.Fatalf("remaining source question copies=%+v", next)
+	}
+	for _, copy := range next {
+		if copy.bot != "first" {
+			t.Fatalf("native partial question escaped connected bot: %+v", copy)
+		}
+	}
+	env.assertSelections()
+}
+
+func TestConnectedQuestionQueuedBroadcastStopsBeforeSend(t *testing.T) {
+	env := newCrossBotQuestions(t, true)
+	ctx := t.Context()
+	if err := env.store.SetTelegramBotBroadcastQuestions(ctx, "first", true); err != nil {
+		t.Fatal(err)
+	}
+	const prompt = "Question queued before broadcast was disabled?"
+	approval := protocol.Approval{ID: uuid.NewString(), RequestID: "async:queued-connected", ThreadID: env.first.String(), Type: "user_input", Async: true,
+		Questions: []protocol.Question{{ID: "question", Prompt: prompt}}}
+	env.emit(env.first, "user_input_requested", approval)
+	leased, err := env.store.ClaimDeliveries(ctx, 100)
+	if err != nil || len(leased) != 4 {
+		t.Fatalf("initial broadcast leases=%+v %v", leased, err)
+	}
+	if err := env.store.SetTelegramBotBroadcastQuestions(ctx, "first", false); err != nil {
+		t.Fatal(err)
+	}
+	for _, delivery := range leased {
+		if err := env.sender.sendDelivery(ctx, delivery); err != nil {
+			t.Fatal(err)
+		}
+	}
+	copies := env.questionCopies(prompt)
+	if len(copies) != 2 {
+		t.Fatalf("revalidated question copies=%+v", copies)
+	}
+	for _, copy := range copies {
+		if copy.bot != "first" {
+			t.Fatalf("leased broadcast escaped flag off: %+v", copy)
+		}
+	}
 }
 
 func (e *crossBotQuestions) emit(session uuid.UUID, kind string, value any) protocol.Event {

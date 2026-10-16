@@ -59,6 +59,14 @@ func (m *adminTelegramBotsFake) SetTelegramBotSessionName(_ context.Context, id 
 	m.calls = append(m.calls, action+id)
 	return m.err
 }
+func (m *adminTelegramBotsFake) SetTelegramBotBroadcastQuestions(_ context.Context, id string, enabled bool) error {
+	action := "local-questions:"
+	if enabled {
+		action = "broadcast-questions:"
+	}
+	m.calls = append(m.calls, action+id)
+	return m.err
+}
 func (m *adminTelegramBotsFake) ResetTelegramBotProfilePhoto(_ context.Context, id string) error {
 	m.calls = append(m.calls, "reset-photo:"+id)
 	return m.err
@@ -95,6 +103,7 @@ func TestTelegramBotAdminAuthenticationAndValidation(t *testing.T) {
 		{"POST", base + "/telegram:123/profile-photo/reset", `{"confirmed":true}`},
 		{"PATCH", base + "/telegram:123", `{"enabled":false}`},
 		{"PATCH", base + "/telegram:123", `{"inherit_session_name":true}`},
+		{"PATCH", base + "/telegram:123", `{"broadcast_questions":true}`},
 		{"DELETE", base + "/telegram:123", `{"confirmed":true}`},
 	} {
 		w := webUICommandRequestForTest(s, endpoint.method, endpoint.path, endpoint.body, "", passkeyTestOrigin, "csrf", "csrf")
@@ -150,6 +159,25 @@ func TestTelegramBotAdminAuthenticationAndValidation(t *testing.T) {
 		{"PATCH", base + "/telegram:123", `{"enabled":null,"inherit_session_name":true}`},
 		{"PATCH", base + "/telegram:123", `{"enabled":false,"inherit_session_name":null}`},
 		{"PATCH", base + "/telegram:123", `{"inherit_session_name":true,"owner_id":42}`},
+		{"PATCH", base + "/telegram:123", `{"broadcast_questions":null}`},
+		{"PATCH", base + "/telegram:123", `{"broadcast_questions":"true"}`},
+		{"PATCH", base + "/telegram:123", `{"broadcast_questions":1}`},
+		{"PATCH", base + "/telegram:123", `{"broadcast_questions":[]}`},
+		{"PATCH", base + "/telegram:123", `{"broadcast_questions":{}}`},
+		{"PATCH", base + "/telegram:123", `{"broadcast_questions":true,"owner_id":42}`},
+		{"PATCH", base + "/telegram:123", `{"broadcast_questions":true,"enabled":false}`},
+		{"PATCH", base + "/telegram:123", `{"broadcast_questions":false,"inherit_session_name":true}`},
+		{"PATCH", base + "/telegram:123", `{"broadcast_questions":true,"enabled":null}`},
+		{"PATCH", base + "/telegram:123", `{"broadcast_questions":true,"inherit_session_name":null}`},
+		{"PATCH", base + "/telegram:123", `{"broadcast_questions":null,"enabled":true}`},
+		{"PATCH", base + "/telegram:123", `{"broadcast_questions":null,"inherit_session_name":true}`},
+		{"PATCH", base + "/telegram:123", `{"broadcast_questions":true,"enabled":true,"inherit_session_name":true}`},
+		{"PATCH", base + "/telegram:123", `{"broadcast_questions":true,"broadcast_questions":false}`},
+		{"PATCH", base + "/telegram:123", `{"enabled":true,"enabled":false}`},
+		{"PATCH", base + "/telegram:123", `{"inherit_session_name":true,"inherit_session_name":false}`},
+		{"PATCH", base + "/telegram:123", `{"broadcast_questions":true} {}`},
+		{"PATCH", base + "/telegram:123", `{"broadcast_questions":tru}`},
+		{"PATCH", base + "/telegram:123", `null`},
 		{"DELETE", base + "/telegram:123", `{}`},
 		{"DELETE", base + "/telegram:123", `{"confirmed":false}`},
 		{"DELETE", base + "/telegram:123", `null`},
@@ -177,6 +205,10 @@ func TestTelegramBotAdminAuthenticationAndValidation(t *testing.T) {
 	if w.Code != 403 || !strings.Contains(w.Body.String(), "reauthentication_required") || len(m.calls) != 0 {
 		t.Fatalf("stale authentication reset bot photo: %d %s", w.Code, w.Body.String())
 	}
+	w = webUICommandRequestForTest(s, "PATCH", base+"/telegram:123", `{"broadcast_questions":true}`, token, passkeyTestOrigin, "csrf", "csrf")
+	if w.Code != 403 || !strings.Contains(w.Body.String(), "reauthentication_required") || len(m.calls) != 0 {
+		t.Fatalf("stale authentication changed question routing: %d %s", w.Code, w.Body.String())
+	}
 }
 
 func TestTelegramBotAdminOperationsAndSafeErrors(t *testing.T) {
@@ -198,6 +230,9 @@ func TestTelegramBotAdminOperationsAndSafeErrors(t *testing.T) {
 		{"PATCH", base + "/telegram:123", `{"inherit_session_name":true}`, "session-name:telegram:123", 204},
 		{"PATCH", base + "/telegram:123", `{"inherit_session_name":false}`, "original-name:telegram:123", 204},
 		{"PATCH", base + "/primary", `{"inherit_session_name":true}`, "session-name:primary", 204},
+		{"PATCH", base + "/telegram:123", `{"broadcast_questions":true}`, "broadcast-questions:telegram:123", 204},
+		{"PATCH", base + "/telegram:123", `{"broadcast_questions":false}`, "local-questions:telegram:123", 204},
+		{"PATCH", base + "/primary", `{"broadcast_questions":true}`, "broadcast-questions:primary", 204},
 		{"POST", base + "/telegram:123/profile-photo/reset", `{"confirmed":true}`, "reset-photo:telegram:123", 204},
 		{"POST", base + "/primary/profile-photo/reset", `{"confirmed":true}`, "reset-photo:primary", 204},
 		{"DELETE", base + "/telegram:123", `{"confirmed":true}`, "remove:telegram:123", 204},

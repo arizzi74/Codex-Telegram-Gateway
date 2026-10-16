@@ -261,8 +261,8 @@ func reconcileTelegramSelection(ctx context.Context, tx *dbTx, in IncomingUpdate
 }
 
 // SuppressTelegramDelivery rechecks visibility after queueing and immediately
-// before each Telegram API call. Private command responses and questions retain
-// their frozen destinations, independently of the current selection.
+// before each Telegram API call. Private command responses retain their frozen
+// destinations; automatic questions use the current connected bot's policy.
 func (s *Store) SuppressTelegramDelivery(ctx context.Context, id string) (bool, error) {
 	if suppress, err := s.suppressInputReplyHelper(ctx, id); err != nil || suppress {
 		return suppress, err
@@ -271,7 +271,7 @@ func (s *Store) SuppressTelegramDelivery(ctx context.Context, id string) (bool, 
 		return suppress, err
 	}
 	var suppress, awaitingSelection, awaitingReposition, awaitingPickerCleanup, awaitingProgressOrder, awaitingSpeech bool
-	err := s.pool.QueryRow(ctx, `SELECT delivery.status IN ('cancelled','sent') OR delivery.visibility_revoked=1 OR NOT `+eventVisibleSQL()+`,
+	err := s.pool.QueryRow(ctx, `SELECT delivery.status IN ('cancelled','sent') OR delivery.visibility_revoked=1 OR NOT `+eventVisibleSQL()+` OR NOT `+automaticQuestionDeliveryAllowedSQL()+`,
         delivery.kind IN ('agent_progress_message','tool_progress_message') AND `+pendingSelectionConfirmationSQL+`,
         delivery.kind IN ('agent_progress_message','tool_progress_message') AND `+pendingProgressRepositionSQL+`,
         `+pendingPickerCleanupSQL+`,

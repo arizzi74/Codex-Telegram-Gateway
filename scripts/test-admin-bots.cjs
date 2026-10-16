@@ -23,6 +23,7 @@ async function fixture(browser, width) {
     connectFailure: null, webhookConflict: false, requireReauth: false, credentialCalls: 0,
     invalidCreationURL: false, creationNumber: 0, creationUsername: 'created_2_bot', networkFailure: false, holdNextRead: false,
     managerCanManageBots: true, managedFailure: false, sessionAgeMillis: 0, patchFailure: false,
+    holdNextSession: false,
     profileResets: [], profileResetFailure: null, holdNextProfileReset: false,
     retryFailure: null, deleteRequestFailure: null, holdNextRetry: false, holdNextRequestDelete: false,
   };
@@ -43,7 +44,13 @@ async function fixture(browser, width) {
     if (url.pathname.startsWith('/tgw/api/')) {
       const now = await page.evaluate(() => Date.now());
       if (url.pathname.endsWith('/login/options')) body = { passkey: true, password: false };
-      else if (url.pathname.endsWith('/admin/session')) body = { authenticated: true, session_id: 'aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa', server_time: new Date(now).toISOString(), expires_at: new Date(now + 8 * 3600000).toISOString(), reauthenticated_at: new Date(now - state.sessionAgeMillis).toISOString() };
+      else if (url.pathname.endsWith('/admin/session')) {
+        body = { authenticated: true, session_id: 'aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa', server_time: new Date(now).toISOString(), expires_at: new Date(now + 8 * 3600000).toISOString(), reauthenticated_at: new Date(now - state.sessionAgeMillis).toISOString() };
+        if (state.holdNextSession) {
+          state.holdNextSession = false;
+          await new Promise(resolve => { state.releaseSession = resolve; state.onSessionStarted(); });
+        }
+      }
       else if (url.pathname.endsWith('/login/begin')) body = { ceremony_id: 'test', publicKey: { challenge: 'dGVzdA', rpId: 'admin.test' } };
       else if (url.pathname.endsWith('/login/finish')) { state.credentialCalls++; body = { ok: true }; }
       else if (url.pathname.endsWith('/dashboard')) {
@@ -199,6 +206,125 @@ async function fixture(browser, width) {
     await page.waitForFunction(() => !telegramBusy);
   }
   return { page, state, errors, messages, externalRequests, card, refresh, tokenSubmit, create };
+}
+
+async function checkQuestionBroadcast(browser, width) {
+  const { page, state, errors, externalRequests, card, refresh } = await fixture(browser, width);
+  state.bots.push(
+    { id: additionalID, username: 'connected_bot', display_name: 'Connected bot', enabled: true, inherit_session_name: true, broadcast_questions: false, status: 'connected' },
+    { id: createdID, username: 'managed_bot', display_name: 'Managed bot', enabled: true, managed: true, broadcast_questions: true, status: 'connected' },
+  );
+  await refresh();
+  const broadcastSetting = id => card(id).getByRole('checkbox', { name: 'Broadcast session questions to all bots', exact: true });
+  const nameSetting = id => card(id).getByRole('checkbox', { name: 'Inherit selected session name', exact: true });
+  async function openBots() {
+    for (const id of [primaryID, additionalID, createdID]) await card(id).locator('.bot-toggle').click();
+  }
+  await openBots();
+  assert.equal(await broadcastSetting(primaryID).isChecked(), false, 'Missing broadcast preference is off for the primary bot');
+  assert.equal(await broadcastSetting(additionalID).isChecked(), false, 'An explicit false broadcast preference is off');
+  assert.equal(await broadcastSetting(createdID).isChecked(), true, 'A managed bot displays its saved broadcast preference');
+  assert.equal(await nameSetting(additionalID).isChecked(), true, 'Name inheritance remains an independent preference');
+  const helpID = await broadcastSetting(primaryID).getAttribute('aria-describedby');
+  assert.equal(await page.locator('#' + helpID).innerText(), 'By default, questions from this bot’s selected session are sent only to this bot. Enable to notify all enabled bots. Sessions with no assigned bot always notify all bots.');
+
+  state.requireReauth = true;
+  const beforeEnable = state.mutations.length;
+  const beforeCredentials = state.credentialCalls;
+  await card(primaryID).getByText('Broadcast session questions to all bots', { exact: true }).click();
+  await page.waitForFunction(() => !telegramBusy);
+  assert.equal(state.mutations.length, beforeEnable + 2, 'An explicit fresh-auth rejection verifies and retries the broadcast change once');
+  assert.equal(state.credentialCalls, beforeCredentials + 1);
+  assert.equal(state.mutations.at(-1).path, '/tgw/api/v1/admin/telegram-bots/primary');
+  assert.equal(state.mutations.at(-1).method, 'PATCH');
+  assert.deepEqual(state.mutations.at(-1).payload, { broadcast_questions: true }, 'Broadcast changes send only their own field');
+  assert.equal(await broadcastSetting(primaryID).isChecked(), true, 'Clicking the real label saves the primary bot preference');
+  assert.equal(await broadcastSetting(additionalID).isChecked(), false, 'Changing the source bot leaves another bot preference off');
+  assert.equal(await broadcastSetting(createdID).isChecked(), true, 'Changing the source bot preserves another bot preference on');
+  assert.equal(await nameSetting(primaryID).isChecked(), false, 'Broadcast changes do not enable name inheritance');
+  assert.equal(await nameSetting(additionalID).isChecked(), true, 'Broadcast changes preserve other bots’ name inheritance');
+  assert.match(await page.locator('#bot-status').innerText(), /this bot’s selected session will notify all enabled bots/);
+  await refresh();
+  assert.equal(await broadcastSetting(primaryID).isChecked(), true, 'Refresh uses the saved broadcast preference');
+
+  await page.reload();
+  await page.waitForSelector('[data-bot-id="primary"]', { state: 'attached' });
+  await page.locator('#telegram-bots-section > summary').click();
+  await openBots();
+  assert.equal(await broadcastSetting(primaryID).isChecked(), true, 'Reload retains the primary bot saved preference');
+  assert.equal(await broadcastSetting(additionalID).isChecked(), false, 'Reload retains another bot saved false preference');
+  assert.equal(await broadcastSetting(createdID).isChecked(), true, 'Reload retains an independent managed bot preference');
+
+  await broadcastSetting(primaryID).uncheck();
+  await page.waitForFunction(() => !telegramBusy);
+  assert.deepEqual(state.mutations.at(-1).payload, { broadcast_questions: false });
+  assert.match(await page.locator('#bot-status').innerText(), /this bot’s selected session will notify only this bot/);
+  await broadcastSetting(additionalID).check();
+  await page.waitForFunction(() => !telegramBusy);
+  assert.equal(state.mutations.at(-1).path, '/tgw/api/v1/admin/telegram-bots/' + additionalID);
+  assert.deepEqual(state.mutations.at(-1).payload, { broadcast_questions: true });
+  assert.equal(await nameSetting(additionalID).isChecked(), true, 'Saving broadcast leaves the same bot’s name preference enabled');
+
+  state.patchFailure = true;
+  const beforeFailure = state.mutations.length;
+  await broadcastSetting(additionalID).uncheck();
+  await page.waitForFunction(() => !telegramBusy);
+  assert.equal(state.mutations.length, beforeFailure + 1, 'An ordinary broadcast save failure is never replayed');
+  assert.equal(await broadcastSetting(additionalID).isChecked(), true, 'A failed broadcast save restores the saved choice');
+  assert.match(await page.locator('#bot-error').innerText(), /Telegram could not complete/);
+  assert.equal((await page.locator('body').innerText()).includes(token), false, 'Broadcast errors never expose raw upstream text');
+  state.patchFailure = false;
+
+  state.sessionAgeMillis = 6 * 60000;
+  await page.evaluate(() => { window.failCredentials = true; });
+  const beforeAuthFailure = state.mutations.length;
+  await broadcastSetting(additionalID).uncheck();
+  await page.waitForFunction(() => !telegramBusy);
+  assert.equal(state.mutations.length, beforeAuthFailure, 'Cancelled fresh authentication prevents the broadcast mutation');
+  assert.equal(await broadcastSetting(additionalID).isChecked(), true, 'Authentication failure restores the saved choice');
+  assert.match(await page.locator('#bot-error').innerText(), /Verification was cancelled/);
+  state.sessionAgeMillis = 0;
+  state.requireReauth = true;
+  const beforeReauthCancel = state.mutations.length;
+  await broadcastSetting(additionalID).uncheck();
+  await page.waitForFunction(() => !telegramBusy);
+  assert.equal(state.mutations.length, beforeReauthCancel + 1, 'Cancelled verification after rejection does not replay the broadcast mutation');
+  assert.equal(await broadcastSetting(additionalID).isChecked(), true);
+  await page.evaluate(() => { window.failCredentials = false; });
+
+  const sessionStarted = new Promise(resolve => { state.onSessionStarted = resolve; });
+  state.holdNextSession = true;
+  await page.evaluate(() => {
+    const toggle = toggleTelegramBotQuestionBroadcast;
+    toggleTelegramBotQuestionBroadcast = (...args) => {
+      window.questionBroadcastSave = toggle(...args);
+      return window.questionBroadcastSave;
+    };
+  });
+  const beforeLateAuth = state.mutations.length;
+  await broadcastSetting(primaryID).check();
+  await sessionStarted;
+  assert.equal(await broadcastSetting(primaryID).isDisabled(), true, 'A pending broadcast save cannot be submitted twice');
+  assert.equal(await broadcastSetting(additionalID).isDisabled(), true, 'A broadcast save locks other bots’ settings');
+  assert.equal(await nameSetting(primaryID).isDisabled(), true, 'A broadcast save also locks name inheritance');
+  await page.evaluate(() => sessionAuth.expire('expired'));
+  await page.waitForSelector('#auth:not([hidden])');
+  await page.evaluate(() => sessionAuth.verify('test-new-session'));
+  await page.waitForSelector('[data-bot-id="primary"]', { state: 'attached' });
+  await card(primaryID).locator('.bot-toggle').click();
+  state.releaseSession();
+  await page.evaluate(() => window.questionBroadcastSave);
+  assert.equal(state.mutations.length, beforeLateAuth, 'Late authentication from the old console cannot save into the new sign-in');
+  assert.equal(await broadcastSetting(primaryID).isChecked(), false, 'The new sign-in displays the persisted choice');
+  assert.equal(await broadcastSetting(primaryID).isEnabled(), true, 'An old action cannot leave the new console busy');
+  assert.equal(await broadcastSetting(primaryID).evaluate(input => input === document.activeElement), false, 'An old action cannot move focus in the new console');
+  assert.equal(await page.locator('#bot-error').isVisible(), false, 'An old authentication result cannot show an error in the new console');
+  assert.equal(await page.locator('#bot-status').innerText(), '');
+  assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true, 'Question settings and helper text fit the viewport');
+  assert.ok(state.mutations.every(mutation => mutation.csrf === 'bot-csrf'), 'All question broadcast writes include CSRF');
+  assert.equal(externalRequests.length, 0, 'Question preferences use only the gateway API');
+  assert.deepEqual(errors, []);
+  await page.close();
 }
 
 async function checkPendingRecovery(browser, width) {
@@ -823,7 +949,8 @@ async function checkPendingRecovery(browser, width) {
       assert.deepEqual(expiry.errors, []);
       await expiry.page.close();
       await checkPendingRecovery(browser, width);
+      await checkQuestionBroadcast(browser, width);
     }
-    console.log('Admin Telegram bot browser checks passed: mobile/desktop collapsed sections and bot cards, confirmed profile-photo reset/cancel/disabled/busy/error/fresh-auth behavior, attention indicators, opt-in session names, token privacy, connect/replace/takeover, profile refresh, managed creation/polling/expiry, expired request retry/delete/token recovery, claimed-request safety, stale polls, safe rendering, gateway removal/BotFather guidance, CSRF, refresh recovery and sign-in expiry.');
+    console.log('Admin Telegram bot browser checks passed: mobile/desktop collapsed sections and bot cards, confirmed profile-photo reset/cancel/disabled/busy/error/fresh-auth behavior, attention indicators, opt-in session names, per-bot question broadcast defaults/persistence/auth guards/error rollback, token privacy, connect/replace/takeover, profile refresh, managed creation/polling/expiry, expired request retry/delete/token recovery, claimed-request safety, stale polls, safe rendering, gateway removal/BotFather guidance, CSRF, refresh recovery and sign-in expiry.');
   } finally { await browser.close(); }
 })().catch(error => { console.error(error); process.exitCode = 1; });

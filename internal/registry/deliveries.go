@@ -91,6 +91,14 @@ func (s *Store) ClaimDeliveries(ctx context.Context, limit int) ([]Delivery, err
 	if err := reconcilePendingInputReplyHelpers(ctx, tx); err != nil {
 		return nil, err
 	}
+	// Revalidate automatic questions against the current connected bot and its
+	// preference, including work queued before a setting or selection changed.
+	if _, err := tx.Exec(ctx, `UPDATE telegram_deliveries AS delivery
+        SET visibility_revoked=1,status=CASE WHEN status IN ('pending','failed') THEN 'cancelled' ELSE status END,last_error=NULL
+        WHERE status IN ('pending','failed','sending') AND visibility_revoked=0
+          AND `+automaticQuestionDeliverySQL+` AND NOT `+automaticQuestionDeliveryAllowedSQL()); err != nil {
+		return nil, err
+	}
 	if _, err := tx.Exec(ctx, `UPDATE telegram_deliveries SET status='cancelled' WHERE status IN ('pending','failed','sending') AND visibility_revoked=1 AND (status IN ('pending','failed') OR (status='sending' AND next_attempt_at<=`+sqliteNow+`))`); err != nil {
 		return nil, err
 	}

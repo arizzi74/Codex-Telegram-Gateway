@@ -58,6 +58,7 @@ type TelegramBotSummary struct {
 	WebhookURL          string `json:"webhook_url"`
 	Status              string `json:"status"`
 	Error               string `json:"error,omitempty"`
+	BroadcastQuestions  bool   `json:"broadcast_questions"`
 	InheritSessionName  bool   `json:"inherit_session_name"`
 	OriginalDisplayName string `json:"original_display_name,omitempty"`
 	NameSyncPending     bool   `json:"name_sync_pending"`
@@ -410,6 +411,9 @@ func (m *TelegramBotManager) listTelegramBots(ctx context.Context, refresh bool)
 		}
 		out = append(out, m.summary(bot))
 	}
+	if err := m.applyTelegramBotQuestionPreferences(ctx, out); err != nil {
+		return nil, err
+	}
 	return out, nil
 }
 
@@ -504,7 +508,11 @@ func (m *TelegramBotManager) connect(ctx context.Context, record registry.Telegr
 		return m.summary(bot), errors.New("Telegram bot activation could not be saved")
 	}
 	m.put(&copy)
-	return m.summary(&copy), nil
+	summaries := []TelegramBotSummary{m.summary(&copy)}
+	if err := m.applyTelegramBotQuestionPreferences(ctx, summaries); err != nil {
+		return TelegramBotSummary{}, err
+	}
+	return summaries[0], nil
 }
 
 func (m *TelegramBotManager) ReplaceTelegramBotToken(ctx context.Context, id, token string, takeover bool) (TelegramBotSummary, error) {

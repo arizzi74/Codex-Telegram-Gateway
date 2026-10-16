@@ -30,6 +30,12 @@ const webUITelegramBotAvailableSQL = `bot.enabled=1 AND bot.owner_id<>0
     AND NOT EXISTS(SELECT 1 FROM telegram_bot_retirements retired WHERE retired.bot_id=bot.bot_id)
     AND `
 
+// The owner's private binding is the session connection shown in the WebUI.
+// Other users, groups and topics remain independent Telegram contexts.
+func telegramOwnerPrivateBindingSQL(bot, binding string) string {
+	return binding + `.user_id=` + bot + `.owner_id AND ` + binding + `.chat_id=` + bot + `.owner_id AND ` + binding + `.message_thread_id=0`
+}
+
 func readWebUITelegramBots(ctx context.Context, db interface {
 	Query(context.Context, string, ...any) (*dbRows, error)
 }) (WebUITelegramBotSnapshot, error) {
@@ -44,8 +50,7 @@ func readWebUITelegramBots(ctx context.Context, db interface {
         COALESCE((SELECT binding.session_id FROM telegram_bindings binding
             JOIN sessions session ON session.session_id=binding.session_id AND session.archived=0
             JOIN workers worker ON worker.worker_id=session.worker_id AND worker.enabled=1
-            WHERE binding.bot_id=bot.bot_id AND binding.user_id=bot.owner_id
-              AND binding.chat_id=bot.owner_id AND binding.message_thread_id=0),'')
+            WHERE binding.bot_id=bot.bot_id AND `+telegramOwnerPrivateBindingSQL("bot", "binding")+`),'')
         FROM telegram_bots bot LEFT JOIN telegram_bot_names names ON names.bot_id=bot.bot_id
         WHERE `+webUITelegramBotAvailableSQL+telegramChatAllowedSQL("bot.bot_id", "bot.owner_id")+`
         ORDER BY bot.bot_id LIMIT $1`, webUITelegramBotLimit)

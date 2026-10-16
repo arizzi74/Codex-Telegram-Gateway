@@ -22,17 +22,17 @@ type QuestionAnswerEdit struct {
 }
 
 // A Telegram partial answer advances the shared request without another worker
-// event. Notify every remembered destination; AcceptTelegram queues the origin's
-// copy itself. Native partial answers use the worker's reduced request event.
+// event. Notify remembered destinations allowed by the connected source bot;
+// AcceptTelegram queues the origin's direct reply itself. Native partial answers
+// use the worker's reduced request event and the same routing policy.
 func enqueuePendingQuestionCopies(ctx context.Context, tx *dbTx, origin IncomingUpdate, result AcceptResult) error {
 	rows, err := tx.Query(ctx, `WITH targets AS (
         SELECT bot_id,chat_id,message_thread_id FROM telegram_chat_modes
         UNION SELECT bot_id,chat_id,message_thread_id FROM telegram_bindings
     ) SELECT bot_id,chat_id,message_thread_id FROM targets
       WHERE NOT (bot_id=$1 AND chat_id=$2 AND message_thread_id=$3)
-        AND NOT EXISTS(SELECT 1 FROM telegram_bots bot WHERE bot.bot_id=targets.bot_id AND bot.enabled=0)
-        AND NOT EXISTS(SELECT 1 FROM telegram_bot_retirements retired WHERE retired.bot_id=targets.bot_id)
-        AND `+telegramChatAllowedSQL("targets.bot_id", "targets.chat_id"), origin.BotID, origin.ChatID, origin.TopicID)
+        AND `+telegramQuestionBotAllowedSQL("$4", "targets.bot_id")+`
+        AND `+telegramChatAllowedSQL("targets.bot_id", "targets.chat_id"), origin.BotID, origin.ChatID, origin.TopicID, result.SessionID)
 	if err != nil {
 		return fmt.Errorf("registry: find pending question destinations: %w", err)
 	}

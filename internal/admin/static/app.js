@@ -317,6 +317,20 @@ function telegramBotCard(bot) {
       nameSetting.append(status);
     }
     content.append(nameSetting);
+    const questionSetting = el('div', 'bot-name-setting');
+    const questionLabel = el('label', 'bot-name-toggle');
+    const questionCheckbox = document.createElement('input');
+    questionCheckbox.type = 'checkbox';
+    questionCheckbox.checked = bot.broadcast_questions === true;
+    questionCheckbox.disabled = telegramBusy;
+    questionCheckbox.dataset.botQuestionBroadcastSetting = String(bot.id);
+    const questionHelp = el('p', 'muted', 'By default, questions from this bot’s selected session are sent only to this bot. Enable to notify all enabled bots. Sessions with no assigned bot always notify all bots.');
+    questionHelp.id = 'bot-question-broadcast-help-' + bot.id;
+    questionCheckbox.setAttribute('aria-describedby', questionHelp.id);
+    questionCheckbox.addEventListener('change', () => toggleTelegramBotQuestionBroadcast(bot, questionCheckbox.checked));
+    questionLabel.append(questionCheckbox, el('span', '', 'Broadcast session questions to all bots'));
+    questionSetting.append(questionLabel, questionHelp);
+    content.append(questionSetting);
     const actions = el('div', 'bot-actions');
     if (!bot.legacy) {
       const replace = button('Replace token', 'secondary', () => openBotToken(bot));
@@ -631,6 +645,24 @@ async function toggleTelegramBotSessionName(bot, enabled) {
   const checkbox = [...$('bot-info').querySelectorAll('input[data-bot-name-setting]')].find(input => input.dataset.botNameSetting === String(bot.id));
   if (checkbox) {
     checkbox.checked = telegramBots?.bots.find(item => String(item.id) === String(bot.id))?.inherit_session_name === true;
+    checkbox.focus();
+  }
+}
+async function toggleTelegramBotQuestionBroadcast(bot, enabled) {
+  let isCurrent = () => false;
+  await runTelegramAction(async current => {
+    isCurrent = current;
+    await telegramCall('/' + encodeURIComponent(bot.id), { method: 'PATCH', body: JSON.stringify({ broadcast_questions: enabled }) }, current);
+    if (!current() || !authenticated) return;
+    $('bot-status').textContent = enabled
+      ? 'Questions from this bot’s selected session will notify all enabled bots.'
+      : 'Questions from this bot’s selected session will notify only this bot.';
+    await loadTelegramBots(authEpoch, true);
+  });
+  if (!isCurrent() || !authenticated) return;
+  const checkbox = [...$('bot-info').querySelectorAll('input[data-bot-question-broadcast-setting]')].find(input => input.dataset.botQuestionBroadcastSetting === String(bot.id));
+  if (checkbox) {
+    checkbox.checked = telegramBots?.bots.find(item => String(item.id) === String(bot.id))?.broadcast_questions === true;
     checkbox.focus();
   }
 }

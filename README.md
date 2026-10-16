@@ -298,12 +298,14 @@ Temporary messages are removed after the final response is delivered. Switching
 sessions removes the previous session's progress and shows the selected session's
 latest progress if it is running, after the connection confirmation is delivered.
 Only the selected session's turn responses and typing appear by default.
-Questions and approvals from any session still arrive,
-labelled with its name; answering them does not change your selection.
 Each Telegram bot has its own selection: use `/tgsessions` in each bot to follow
-different sessions. Questions are shared across enabled bot chats you have
-opened, and answering from any bot edits every copy to show the question and
-answer. Subsequent questions in the same request are shared as well.
+different sessions. Questions and approvals go to the session's selected bot by
+default, labelled with the session name. Enable **Broadcast session questions to
+all bots** in that bot's Admin configuration to notify all enabled bot chats you
+have opened. A session with no selected bot always notifies all those chats.
+Subsequent questions follow the same routing rule. Answering from any delivered
+copy does not change your selection and edits every copy to show the question
+and answer.
 Use `/tgquestions` (or `/tginput` without arguments) to reopen pending questions
 and approvals from any session that the worker received while running.
 Choose **Open** and then select an option or reply to the question with text.

@@ -1,6 +1,7 @@
 package admin
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -21,6 +22,7 @@ type TelegramBotManager interface {
 	ReplaceTelegramBotToken(context.Context, string, string, bool) (gateway.TelegramBotSummary, error)
 	SetTelegramBotEnabled(context.Context, string, bool) error
 	SetTelegramBotSessionName(context.Context, string, bool) error
+	SetTelegramBotBroadcastQuestions(context.Context, string, bool) error
 	ResetTelegramBotProfilePhoto(context.Context, string) error
 	RemoveTelegramBot(context.Context, string) error
 	CreateManagedTelegramBot(context.Context, string, string, string) (gateway.TelegramManagedBotIntent, error)
@@ -144,31 +146,31 @@ func (s *Server) telegramBotMember(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 	var err error
 	if r.Method == http.MethodPatch {
-		var input struct {
-			Enabled            json.RawMessage `json:"enabled"`
-			InheritSessionName json.RawMessage `json:"inherit_session_name"`
-		}
+		var input telegramBotPatchInput
 		if !decodeEnrollmentJSON(w, r, &input, false) {
 			return
 		}
 		// Each request changes one setting. Check presence before decoding so
 		// a second, null action cannot disguise an ambiguous request.
-		if (len(input.Enabled) == 0) == (len(input.InheritSessionName) == 0) {
+		if len(input) != 1 {
 			bad(w)
 			return
 		}
-		value := input.Enabled
-		if len(input.InheritSessionName) != 0 {
-			value = input.InheritSessionName
+		var setting string
+		var value json.RawMessage
+		for setting, value = range input {
 		}
 		var enabled *bool
 		if json.Unmarshal(value, &enabled) != nil || enabled == nil {
 			bad(w)
 			return
 		}
-		if len(input.InheritSessionName) != 0 {
+		switch setting {
+		case "inherit_session_name":
 			err = s.telegramBots.SetTelegramBotSessionName(ctx, id, *enabled)
-		} else {
+		case "broadcast_questions":
+			err = s.telegramBots.SetTelegramBotBroadcastQuestions(ctx, id, *enabled)
+		case "enabled":
 			err = s.telegramBots.SetTelegramBotEnabled(ctx, id, *enabled)
 		}
 	} else {
@@ -189,6 +191,47 @@ func (s *Server) telegramBotMember(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusNoContent, nil)
+}
+
+type telegramBotPatchInput map[string]json.RawMessage
+
+// Reject duplicate and unknown setting names as well as requests containing
+// several distinct settings. JSON's usual last-key-wins behavior is ambiguous
+// for administrative mutations.
+func (input *telegramBotPatchInput) UnmarshalJSON(data []byte) error {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	if token, err := decoder.Token(); err != nil || token != json.Delim('{') {
+		return gateway.ErrTelegramBotInvalid
+	}
+	settings := telegramBotPatchInput{}
+	for decoder.More() {
+		token, err := decoder.Token()
+		if err != nil {
+			return gateway.ErrTelegramBotInvalid
+		}
+		key, ok := token.(string)
+		if !ok {
+			return gateway.ErrTelegramBotInvalid
+		}
+		switch key {
+		case "enabled", "inherit_session_name", "broadcast_questions":
+		default:
+			return gateway.ErrTelegramBotInvalid
+		}
+		if _, exists := settings[key]; exists {
+			return gateway.ErrTelegramBotInvalid
+		}
+		var value json.RawMessage
+		if err := decoder.Decode(&value); err != nil {
+			return gateway.ErrTelegramBotInvalid
+		}
+		settings[key] = value
+	}
+	if token, err := decoder.Token(); err != nil || token != json.Delim('}') {
+		return gateway.ErrTelegramBotInvalid
+	}
+	*input = settings
+	return nil
 }
 
 func (s *Server) telegramManagedBotCreate(w http.ResponseWriter, r *http.Request) {
