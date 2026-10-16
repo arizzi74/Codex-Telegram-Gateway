@@ -143,6 +143,59 @@ func TestWebUITelegramBotsOriginalNamesAndCanonicalVisibility(t *testing.T) {
 	}
 }
 
+func TestWebUITelegramBotsHistoricalConnectedIntentNameHonorsOwnerAndManager(t *testing.T) {
+	const original = "EnkiCodex · Fix Telegram gateway commands"
+	for _, test := range []struct {
+		name, manager, intentManager, status string
+		intentOwner                          int64
+		want                                 string
+	}{
+		{"historical missing manager", "", "@gilgacodex_bot", "connected", 68769513, "EnkiCodex"},
+		{"current manager", "@gilgacodex_bot", "@gilgacodex_bot", "connected", 68769513, "EnkiCodex"},
+		{"historical owner mismatch", "", "@gilgacodex_bot", "connected", 68769514, original},
+		{"current manager mismatch", "@current_manager", "@gilgacodex_bot", "connected", 68769513, original},
+		{"current owner mismatch", "@gilgacodex_bot", "@gilgacodex_bot", "connected", 68769514, original},
+		{"historical unconnected intent", "", "@gilgacodex_bot", "failed", 68769513, original},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			store := integrationStore(t)
+			ctx := t.Context()
+			bot := telegramBotRecordForTest("telegram:8980848680", true)
+			bot.TelegramID, bot.OwnerID = 8980848680, 68769513
+			bot.Username, bot.ManagedBy = "enkicodex_bot", test.manager
+			bot.DisplayName = "EnkiCodex · Fix Telegram gatewa… · Fix Telegram gateway commands"
+			if err := store.SaveTelegramBotRecord(ctx, bot); err != nil {
+				t.Fatal(err)
+			}
+			if err := store.SetTelegramBotSessionName(ctx, bot.ID, true); err != nil {
+				t.Fatal(err)
+			}
+			if err := store.CaptureTelegramBotOriginalName(ctx, bot.ID, original); err != nil {
+				t.Fatal(err)
+			}
+			before := webUIBotTestSnapshot(t, store)
+			now := time.Now().UTC()
+			intent := TelegramManagedBotIntentRecord{ID: "historical-creation", ManagerID: test.intentManager,
+				OwnerID: test.intentOwner, RequestedUsername: bot.Username, DisplayName: "EnkiCodex", Status: test.status,
+				BotID: bot.ID, CreatedAt: now.Add(-time.Hour), ExpiresAt: now.Add(time.Hour)}
+			if err := store.SaveTelegramManagedBotIntent(ctx, intent); err != nil {
+				t.Fatal(err)
+			}
+			after := webUIBotTestSnapshot(t, store)
+			if len(after.Bots) != 1 || after.Bots[0].DisplayName != test.want {
+				t.Fatalf("historical name lookup = %+v, want %q", after.Bots, test.want)
+			}
+			if (before.Revision != after.Revision) != (test.want != original) {
+				t.Fatal("metadata revision did not reflect the accepted original name")
+			}
+			preferences, err := store.TelegramBotNamePreferences(ctx)
+			if err != nil || len(preferences) != 1 || preferences[0].OriginalDisplayName == nil || *preferences[0].OriginalDisplayName != original {
+				t.Fatalf("name read changed persisted preferences: %+v %v", preferences, err)
+			}
+		})
+	}
+}
+
 func TestWebUITelegramBotMovesReplacesClearsAndPreservesOtherRoutes(t *testing.T) {
 	env := newEventTestEnv(t)
 	ctx := t.Context()

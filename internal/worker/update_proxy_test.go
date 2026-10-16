@@ -211,6 +211,18 @@ func TestNativeApprovalAndLateNotificationPreventUpdate(t *testing.T) {
 	}
 	nativeWrite(t, request.connection, `{"id":"approval","method":"item/commandExecution/requestApproval","params":{"threadId":"thread-1"}}`)
 	_ = nativeRead(t, client)
+	// The client can read the frame before the proxy clears its forwarding
+	// marker. Settle that marker before checking the approval-specific blocker.
+	waitFor(t, func() bool {
+		proxy.mu.Lock()
+		defer proxy.mu.Unlock()
+		for session := range proxy.sessions {
+			if session.forwarding > 0 {
+				return false
+			}
+		}
+		return true
+	})
 	if err := proxy.checkIdle(); err == nil || !strings.Contains(err.Error(), "approvals or input") {
 		t.Fatalf("late server request did not invalidate idle check: %v", err)
 	}
