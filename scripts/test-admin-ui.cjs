@@ -120,8 +120,8 @@ const data = {
       }
       return route.fulfill({ status, contentType: 'application/json', body: status === 204 ? '' : JSON.stringify(body) });
     }
-    const filename = /\.(js|css)$/.test(url.pathname) ? path.basename(url.pathname) : 'index.html';
-    return route.fulfill({ contentType: filename.endsWith('.js') ? 'text/javascript' : filename.endsWith('.css') ? 'text/css' : 'text/html', headers: { 'Content-Security-Policy': "default-src 'self'; script-src 'self'; style-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'" }, body: fs.readFileSync(path.join(assets, filename)) });
+    const filename = /\.(js|css|svg)$/.test(url.pathname) ? path.basename(url.pathname) : 'index.html';
+    return route.fulfill({ contentType: filename.endsWith('.js') ? 'text/javascript' : filename.endsWith('.css') ? 'text/css' : filename.endsWith('.svg') ? 'image/svg+xml' : 'text/html', headers: { 'Content-Security-Policy': "default-src 'self'; script-src 'self'; style-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'" }, body: fs.readFileSync(path.join(assets, filename)) });
   });
   await page.addInitScript(() => {
     Object.defineProperty(navigator.credentials, 'get', { configurable: true, value: async () => ({
@@ -143,6 +143,24 @@ const data = {
     if (page.clock) await page.clock.install();
     await page.goto('https://admin.test/tgw/admin');
     await page.waitForSelector('#console:not([hidden])');
+    const sectionIDs = ['telegram-bots-section', 'audio-section', 'session-section', 'worker-section', 'passkey-section', 'browser-session-section', 'password-section'];
+    for (const id of sectionIDs) {
+      const section = page.locator('#' + id);
+      assert.equal(await section.evaluate(node => node.tagName), 'DETAILS', id + ' uses a native disclosure');
+      assert.equal(await section.evaluate(node => node.open), false, id + ' starts collapsed');
+      assert.equal(await section.locator(':scope > .section-content').isVisible(), false, id + ' hides its controls');
+      assert.equal(await section.locator(':scope > summary button').count(), 0, id + ' summary contains only its heading');
+      if (id === 'session-section') continue;
+      await section.locator(':scope > summary').tap();
+      assert.equal(await section.evaluate(node => node.open), true, id + ' opens with touch');
+      await section.locator(':scope > summary').press('Space');
+      assert.equal(await section.evaluate(node => node.open), false, id + ' closes from the keyboard');
+      await section.locator(':scope > summary').press('Enter');
+      assert.equal(await section.evaluate(node => node.open), true, id + ' opens from the keyboard');
+    }
+    await page.locator('#audio-section > summary').click();
+    await page.locator('#password-section > summary').click();
+    const sectionStates = () => page.locator('#console > .console-section').evaluateAll(sections => sections.map(section => ({ id: section.id, open: section.open })));
     const sessionSection = page.locator('#session-section');
     const sessionToggle = sessionSection.locator(':scope > summary');
     assert.equal(await sessionSection.evaluate(section => section.open), false, 'Sessions start collapsed');
@@ -152,27 +170,46 @@ const data = {
     assert.equal(await page.locator('#sessions').textContent(), '12');
     assert.equal(await page.locator('.session-card').count(), 10);
     assert.equal(await page.locator('.session-card h3').first().textContent(), fullName);
+    const firstSession = page.locator('[data-session-id="session-0"]');
+    assert.equal(await firstSession.evaluate(card => card.open), false, 'Each session starts collapsed');
+    assert.equal(await firstSession.locator('.session-metrics').isVisible(), false, 'Session metrics are inside its disclosure');
+    assert.equal(await firstSession.locator('.last-message').isVisible(), false, 'Session messages are inside its disclosure');
+    await firstSession.locator(':scope > summary').press('Enter');
+    assert.equal(await firstSession.evaluate(card => card.open), true, 'A session opens from the keyboard');
     assert.equal(await page.locator('.session-metrics dd').first().textContent(), '0', 'Known zero must not look unavailable');
     const partial = page.locator('[data-session-id="session-2"]');
+    assert.equal(await partial.evaluate(card => card.open), false, 'Opening one session keeps other sessions collapsed');
+    await partial.locator(':scope > summary').tap();
     assert.equal(await partial.locator('.session-metrics dd').nth(0).textContent(), '≥12', 'Partial prompt count is a lower bound');
     assert.equal(await partial.locator('.session-metrics dd').nth(1).textContent(), '≥11', 'Partial reply count is a lower bound');
     assert.equal(await partial.locator('.session-metrics dd').nth(2).textContent(), '42,000', 'Recorded cumulative tokens are independent of partial history');
     assert.match(await partial.innerText(), /Partial history · message counts may still be loading/);
     assert.equal(await page.locator('#bot-info a').getAttribute('href'), 'https://t.me/example_bot');
+    assert.equal(await page.locator('#bot-info .bot-content').isVisible(), false, 'The primary bot fallback starts collapsed');
+    await page.locator('#bot-info .bot-toggle').click();
     assert.match(await page.locator('#bot-info').innerText(), /Any chat with an allowed user/);
-    assert.equal(await page.locator('img').count(), 0, 'API data must not become HTML');
+    assert.equal(await page.locator('#session-list img, #bot-info img, #worker-list img, #browser-sessions img').count(), 0, 'API data must not become HTML');
     assert.equal(await page.evaluate(() => window.injected), undefined);
     await page.waitForSelector('.browser-session');
     assert.equal(await page.locator('.browser-session').count(), 2);
     assert.match(await page.locator('#browser-sessions').innerText(), /Safari on iOS · This browser/);
     assert.equal(await page.locator('#browser-sessions img').count(), 0, 'Browser labels must remain plain text');
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true, 'Mobile layout must fit viewport');
-    await page.locator('.session-card summary').first().click();
+    await firstSession.locator('.session-details > summary').click();
+    const beforeRefreshSections = await sectionStates();
     await page.locator('#refresh').click();
     await page.waitForFunction(() => !document.getElementById('refresh').disabled);
     assert.equal(await sessionSection.evaluate(section => section.open), true, 'Refresh preserves the expanded sessions section');
+    assert.deepEqual(await sectionStates(), beforeRefreshSections, 'Manual refresh preserves all open and collapsed Admin sections');
+    assert.equal(await firstSession.evaluate(card => card.open), true, 'Refresh preserves the expanded session');
     assert.equal(await page.locator('.session-card details').first().getAttribute('open'), '', 'Refresh preserves expanded details');
+    assert.equal(await page.locator('[data-session-id="session-3"]').evaluate(card => card.open), false, 'Refresh preserves collapsed sessions');
+    assert.equal(await page.locator('#bot-info .bot-toggle').getAttribute('aria-expanded'), 'true', 'Refresh preserves the expanded primary bot fallback');
     assert.match(await page.locator('.session-card').first().innerText(), /6,000 \/ 200,000 \(3%\)/);
+    await Promise.all([nextDashboardResponse(), page.clock.runFor(15010)]);
+    await page.waitForFunction(() => !document.getElementById('refresh').disabled);
+    assert.equal(await firstSession.evaluate(card => card.open), true, 'The 15-second dashboard poll preserves expanded sessions');
+    assert.deepEqual(await sectionStates(), beforeRefreshSections, 'The 15-second poll preserves every Admin section state');
     if (process.env.ADMIN_UI_SCREENSHOTS) {
       fs.mkdirSync(process.env.ADMIN_UI_SCREENSHOTS, { recursive: true });
       await page.screenshot({ path: path.join(process.env.ADMIN_UI_SCREENSHOTS, 'admin-mobile.png'), fullPage: true });
@@ -180,6 +217,10 @@ const data = {
     await page.locator('#session-next').click();
     assert.equal(await page.locator('.session-card').count(), 2);
     assert.equal(await page.locator('#session-page').textContent(), 'Page 2 of 2');
+    await page.locator('#session-prev').click();
+    assert.equal(await firstSession.evaluate(card => card.open), true, 'Pagination preserves expanded sessions');
+    assert.equal(await firstSession.locator('.session-details').evaluate(details => details.open), true, 'Pagination preserves the token breakdown');
+    await page.locator('#session-next').click();
     await page.locator('#session-search').fill('Linux worker');
     assert.equal(await page.locator('.session-card').count(), 10, 'Search resets page');
     await page.locator('#session-state').selectOption('running');
@@ -189,6 +230,7 @@ const data = {
     await page.locator('#session-search').fill('Session 1');
     await page.locator('#session-state').selectOption('');
     const unknown = page.locator('[data-session-id="session-1"]');
+    await unknown.locator(':scope > summary').click();
     assert.equal(await unknown.locator('.session-metrics dd').first().textContent(), '—');
     assert.match(await unknown.innerText(), /Not available/);
     await page.locator('#session-search').fill('');
@@ -412,6 +454,14 @@ const data = {
     assert.ok(mutations.some(entry => entry.path.endsWith('/sessions/' + otherBrowserID) && entry.method === 'DELETE'));
     await page.setViewportSize({ width: 1440, height: 1000 });
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
+    const desktopSections = await sectionStates();
+    for (const { id, open } of desktopSections) {
+      const summary = page.locator('#' + id + ' > summary');
+      await summary.press('Space');
+      assert.equal(await page.locator('#' + id).evaluate(section => section.open), !open, id + ' toggles by keyboard on desktop');
+      await summary.press('Enter');
+    }
+    assert.deepEqual(await sectionStates(), desktopSections, 'Desktop keyboard toggles restore every Admin section state');
     await sessionToggle.focus();
     await page.keyboard.press('Space');
     assert.equal(await sessionSection.evaluate(section => section.open), false, 'Keyboard collapses sessions');
@@ -485,6 +535,7 @@ const data = {
       await page.waitForSelector('#console:not([hidden])');
       assert.equal(new URL(page.url()).pathname, '/tgw/admin/', 'Unsafe or unsupported return targets stay in admin');
       assert.equal(await sessionSection.evaluate(section => section.open), false, 'Sessions start collapsed on desktop too');
+      assert.equal(await page.locator('#console > .console-section[open]').count(), 0, 'Every Admin section starts collapsed on desktop');
     }
     // Explicit sign-out cleans up the browser device even after a fresh login.
     const device = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee';
@@ -496,6 +547,6 @@ const data = {
     assert.ok(logoutCalls.some(entry => entry.path.endsWith('/webui/push/unsubscribe') && JSON.parse(entry.body).subscription_id === device), 'Sign-out disables the current device');
     assert.ok(logoutCalls.findIndex(entry => entry.path.endsWith('/webui/push/unsubscribe')) < logoutCalls.findIndex(entry => entry.path.endsWith('/admin/logout')), 'Device cleanup starts while the login is still valid');
     assert.deepEqual(errors, []);
-    console.log('Admin browser checks passed: mobile/desktop layout, collapsed sessions with touch/keyboard access, stats, filters, safe rendering, revoked-worker deletion/confirmation/auth/error recovery, one-use enrollment URL/copy/expiry/revocation/error recovery, no secret persistence, renewal/poll races, failed-finish recovery, session expiry.');
+    console.log('Admin browser checks passed: all Admin sections collapsed by default, mobile touch/desktop keyboard controls, section state retained through manual/15-second refreshes, session statistics/filters, safe rendering, revoked-worker deletion, enrollment URL lifecycle, no secret persistence, renewal/poll races, failed-finish recovery and session expiry.');
   } finally { await browser.close(); }
 })().catch(error => { console.error(error); process.exitCode = 1; });

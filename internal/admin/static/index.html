@@ -39,16 +39,20 @@
       <article><span>Pending approvals</span><strong id="approvals">—</strong></article>
       <article><span>Queued commands</span><strong id="commands">—</strong></article>
     </div>
-    <section id="telegram-bots-section" class="card" aria-labelledby="bot-heading">
-      <div class="row bot-section-heading"><div><h2 id="bot-heading">Telegram bots</h2><p>Connect another bot or create one through Telegram. All bots use this gateway’s private access rules and share its workers.</p></div><div class="bot-section-actions"><button id="bot-connect" type="button">Connect existing bot</button><button id="bot-create" type="button" class="secondary" disabled>Create managed bot</button></div></div>
+    <details id="telegram-bots-section" class="card console-section" aria-labelledby="bot-heading">
+      <summary><h2 id="bot-heading">Telegram bots</h2></summary>
+      <div class="section-content">
+      <div class="row bot-section-heading"><div><p>Connect another bot or create one through Telegram. All bots use this gateway’s private access rules and share its workers.</p></div><div class="bot-section-actions"><button id="bot-connect" type="button">Connect existing bot</button><button id="bot-create" type="button" class="secondary" disabled>Create managed bot</button></div></div>
       <p id="bot-status" class="muted" role="status" aria-live="polite"></p>
       <p id="bot-error" class="notice error" role="alert" hidden></p>
       <div id="bot-info"><p class="muted">Bot information is not available.</p></div>
       <div id="bot-pending"></div>
       <div id="bot-removed"></div>
-    </section>
-    <section id="audio-section" class="card" aria-labelledby="audio-heading">
-      <h2 id="audio-heading">Audio</h2>
+      </div>
+    </details>
+    <details id="audio-section" class="card console-section" aria-labelledby="audio-heading">
+      <summary><h2 id="audio-heading">Audio</h2></summary>
+      <div class="section-content">
       <p>Transcribe Telegram voice notes locally on this gateway.</p>
       <p id="audio-status" class="muted" role="status" aria-live="polite">Loading audio settings…</p>
       <p id="audio-error" class="notice error" role="alert" hidden></p>
@@ -85,10 +89,11 @@
         <p id="audio-effective" class="muted"></p>
         <div class="audio-actions"><button id="audio-save" type="submit" disabled>Apply audio settings</button><button id="audio-discard" type="button" class="secondary" disabled>Discard changes</button><span id="audio-unsaved" class="muted" hidden>Unsaved changes</span></div>
       </form>
-    </section>
-    <details id="session-section" class="card sessions-card" aria-labelledby="session-heading">
+      </div>
+    </details>
+    <details id="session-section" class="card console-section sessions-card" aria-labelledby="session-heading">
       <summary><h2 id="session-heading">Sessions</h2></summary>
-      <div class="sessions-content">
+      <div class="section-content sessions-content">
         <p class="muted">Your sessions across all workers. Internal subagent sessions are excluded.</p>
         <div class="session-filters">
           <label>Find a session<input id="session-search" type="search" placeholder="Name, directory, or worker" autocomplete="off"></label>
@@ -103,27 +108,38 @@
         </nav>
       </div>
     </details>
-    <section class="card" aria-labelledby="worker-heading">
-      <div class="row"><div><h2 id="worker-heading">Workers</h2><p>Create a one-use URL and paste it into the worker installer within 10 minutes.</p></div><button id="new-worker">Enroll worker</button></div>
+    <details id="worker-section" class="card console-section" aria-labelledby="worker-heading">
+      <summary><h2 id="worker-heading">Workers</h2></summary>
+      <div class="section-content">
+      <div class="row"><p>Create a one-use URL and paste it into the worker installer within 10 minutes.</p><button id="new-worker">Enroll worker</button></div>
       <div id="worker-list"></div>
-    </section>
-    <section class="card" aria-labelledby="passkey-heading">
-      <div class="row"><div><h2 id="passkey-heading">Passkeys</h2><p>Add a spare personal passkey before removing one.</p></div><button id="add-passkey">Add passkey</button></div>
+      </div>
+    </details>
+    <details id="passkey-section" class="card console-section" aria-labelledby="passkey-heading">
+      <summary><h2 id="passkey-heading">Passkeys</h2></summary>
+      <div class="section-content">
+      <div class="row"><p>Add a spare personal passkey before removing one.</p><button id="add-passkey">Add passkey</button></div>
       <div id="keys"></div>
-    </section>
-    <section class="card" aria-labelledby="browser-session-heading">
-      <div class="row"><div><h2 id="browser-session-heading">Browser sessions</h2><p>Review signed-in browsers and end access you no longer need. Browser labels are approximate.</p></div><button id="logout-everywhere" class="danger">Sign out everywhere</button></div>
+      </div>
+    </details>
+    <details id="browser-session-section" class="card console-section" aria-labelledby="browser-session-heading">
+      <summary><h2 id="browser-session-heading">Browser sessions</h2></summary>
+      <div class="section-content">
+      <div class="row"><p>Review signed-in browsers and end access you no longer need. Browser labels are approximate.</p><button id="logout-everywhere" class="danger">Sign out everywhere</button></div>
       <div id="browser-sessions"></div>
-    </section>
-    <section class="card" aria-labelledby="password-heading">
-      <h2 id="password-heading">Password sign-in</h2>
+      </div>
+    </details>
+    <details id="password-section" class="card console-section" aria-labelledby="password-heading">
+      <summary><h2 id="password-heading">Password sign-in</h2></summary>
+      <div class="section-content">
       <p>Optionally allow a gateway username and password alongside your passkeys.</p>
       <p id="password-settings-status" class="muted" role="status">Loading password settings…</p>
       <div class="password-settings-actions">
         <button id="password-edit" class="secondary" hidden>Enable password sign-in</button>
         <button id="password-disable" class="danger" hidden>Disable password sign-in</button>
       </div>
-    </section>
+      </div>
+    </details>
   </section>
 </main>
 <dialog id="bot-token-dialog" class="bot-dialog" aria-labelledby="bot-token-heading" aria-describedby="bot-token-description">
@@ -153,14 +169,17 @@
 <dialog id="bot-create-dialog" class="bot-dialog" aria-labelledby="bot-create-heading" aria-describedby="bot-create-description">
   <div class="row bot-dialog-heading"><h2 id="bot-create-heading">Create managed bot</h2><button id="bot-create-close" type="button" class="secondary" aria-label="Close managed bot dialog">Close</button></div>
   <form id="bot-create-form">
-    <p id="bot-create-description">Enable Bot Management Mode for your manager bot in @BotFather. Choose a username and display name, then confirm in Telegram.</p>
+    <p id="bot-create-description">Enable Bot Management Mode for your manager bot in @BotFather. Choose a display name, then confirm in Telegram.</p>
+    <div class="bot-profile-default">
+      <img src="/tgw/admin/static/webui-icon.svg" width="48" height="48" alt="Codex Gateway profile icon">
+      <p class="muted">New bots use the Gateway icon as their profile photo.</p>
+    </div>
     <label for="bot-manager">Manager bot<select id="bot-manager" required></select></label>
     <p id="bot-manager-help" class="muted">Enable Bot Management Mode for your selected manager in @BotFather.</p>
     <button id="bot-manager-refresh" type="button" class="secondary">Refresh manager bots</button>
-    <label for="bot-create-username">New bot username<input id="bot-create-username" autocomplete="off" spellcheck="false" autocapitalize="none" required pattern="[A-Za-z][A-Za-z0-9_]{4,31}" maxlength="32" placeholder="my_project_bot" aria-describedby="bot-create-username-help"></label>
-    <p id="bot-create-username-help" class="muted">Use 5–32 letters, digits or underscores. Start with a letter and end in “bot”.</p>
-    <label for="bot-create-name">Display name<input id="bot-create-name" autocomplete="off" required maxlength="64" placeholder="My project"></label>
-    <p class="muted">Keep this username in Telegram so the gateway can match your request. To change it, create a new link here. The bot shares this gateway’s allowed owner and workers.</p>
+    <label for="bot-create-name">Display name<input id="bot-create-name" autocomplete="off" required maxlength="64" placeholder="My project" aria-describedby="bot-create-name-help"></label>
+    <p id="bot-create-name-help" class="muted">The username is generated from this name: lowercase, with spaces and unsupported characters replaced by underscores, ending in _bot. The gateway checks public Telegram usernames and adds a number if needed. Telegram confirms availability when you create the bot.</p>
+    <p class="muted">The bot shares this gateway’s allowed owner and workers.</p>
     <p id="bot-create-status" class="muted" role="status" aria-live="polite"></p>
     <p id="bot-create-error" class="notice error" role="alert" hidden></p>
     <div class="bot-dialog-actions"><button id="bot-create-submit" type="submit">Create Telegram link</button><button id="bot-create-cancel" type="button" class="secondary">Cancel</button></div>
@@ -168,7 +187,7 @@
   <div id="bot-create-result" hidden>
     <p id="bot-create-result-status" role="status" aria-live="polite"></p>
     <a id="bot-create-launch" class="button-link" target="_blank" rel="noopener noreferrer" hidden>Open Telegram to create bot</a>
-    <p class="muted">Finish in Telegram, then return here. The bot appears after Telegram confirms creation.</p>
+    <p class="muted">Finish in Telegram using the generated username, then return here. The bot appears after Telegram confirms creation. If Telegram says the username is unavailable, close this dialog and create a new link with a different display name.</p>
     <div class="bot-dialog-actions"><button id="bot-create-refresh" type="button" class="secondary">Refresh status</button><button id="bot-create-done" type="button" class="secondary">Close</button></div>
   </div>
 </dialog>

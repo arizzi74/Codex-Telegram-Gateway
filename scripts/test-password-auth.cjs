@@ -60,7 +60,7 @@ const assets = path.resolve(__dirname, '../internal/admin/static');
     const filename = url.pathname.includes('/static/') ? path.basename(url.pathname) : url.pathname.includes('/webui') ? 'webui.html' : 'index.html';
     const file = path.join(assets, filename);
     if (!fs.existsSync(file)) return route.fulfill({ status: 404, body: '' });
-    return route.fulfill({ contentType: filename.endsWith('.js') ? 'text/javascript' : filename.endsWith('.css') ? 'text/css' : 'text/html', body: fs.readFileSync(file) });
+    return route.fulfill({ contentType: filename.endsWith('.js') ? 'text/javascript' : filename.endsWith('.css') ? 'text/css' : filename.endsWith('.svg') ? 'image/svg+xml' : 'text/html', body: fs.readFileSync(file) });
   });
   await context.addInitScript(() => {
     Object.defineProperty(navigator, 'credentials', { configurable: true, value: { get: async () => ({ id: 'key', rawId: new Uint8Array([1]), type: 'public-key', response: { clientDataJSON: new Uint8Array([2]), authenticatorData: new Uint8Array([3]), signature: new Uint8Array([4]) } }) } });
@@ -81,7 +81,10 @@ const assets = path.resolve(__dirname, '../internal/admin/static');
     if (confirmation !== undefined) await dialog().locator('[name=confirm-password]').fill(confirmation);
   }
   async function submit() { await dialog().locator('button[type=submit]').click(); }
-  const waitConsole = () => page.waitForSelector('#console:not([hidden])');
+  const waitConsole = async () => {
+    await page.waitForSelector('#console:not([hidden])');
+    if (!await page.locator('#password-section').evaluate(section => section.open)) await page.locator('#password-section > summary').click();
+  };
   const waitWebUI = () => page.waitForSelector('#empty:not([hidden])');
   try {
     // New and older gateways never accidentally display a password alternative.

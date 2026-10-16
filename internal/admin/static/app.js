@@ -12,6 +12,8 @@ let rotationPending = false;
 let sessionAuth = null;
 let dashboard = null;
 let sessionPage = 0;
+const expandedSessions = new Set();
+const expandedSessionDetails = new Set();
 let passwordSettings = null;
 let passwordSettingsBusy = false;
 let audioSnapshot = null;
@@ -39,6 +41,7 @@ let telegramTokenTarget = null;
 let telegramCreationID = '';
 let telegramRemovalTarget = null;
 let telegramRemovedBots = [];
+const expandedTelegramBots = new Set();
 // Only the built-in web interface and a single canonical session link are
 // allowed after login. Never turn notification links into an open redirect.
 const requestedReturn = new URLSearchParams(location.search).get('next') || '';
@@ -186,6 +189,8 @@ function lockConsole(reason) {
   authEpoch++;
   authenticated = false;
   dashboard = null;
+  expandedSessions.clear();
+  expandedSessionDetails.clear();
   reloadPending = false;
   closeWorkerEnrollment();
   resetTelegramBots();
@@ -233,14 +238,37 @@ function renderBot(bot) {
 function telegramBotCard(bot) {
   const card = el('article', 'telegram-bot');
   card.dataset.botId = String(bot.id || '');
+  const key = String(bot.id || 'primary');
+  const content = el('div', 'bot-content');
+  content.id = 'bot-content-' + key;
+  content.hidden = !expandedTelegramBots.has(key);
   const heading = el('div', 'bot-title');
-  heading.append(el('h3', '', bot.display_name || 'Telegram bot'));
+  const title = el('h3');
+  const toggle = el('button', 'bot-toggle', bot.display_name || 'Telegram bot');
+  toggle.type = 'button';
+  toggle.setAttribute('aria-expanded', String(!content.hidden));
+  toggle.setAttribute('aria-controls', content.id);
+  toggle.addEventListener('click', () => {
+    content.hidden = !content.hidden;
+    toggle.setAttribute('aria-expanded', String(!content.hidden));
+    if (content.hidden) expandedTelegramBots.delete(key);
+    else expandedTelegramBots.add(key);
+  });
+  title.append(toggle);
+  heading.append(title);
+  if (bot.id) {
+    const actions = el('div', 'bot-header-actions');
+    actions.append(button(bot.enabled === false ? 'Enable' : 'Disable', 'secondary', () => toggleTelegramBot(bot)));
+    if (!bot.legacy) actions.append(button('Delete', 'danger', () => openBotRemoval(bot)));
+    for (const control of actions.querySelectorAll('button')) control.disabled = telegramBusy;
+    heading.append(actions);
+  }
+  card.append(heading, content);
   const badges = el('div', 'badges');
   badges.append(badge(bot.enabled === false ? 'disabled' : bot.status || 'connected'));
   if (bot.legacy) badges.append(el('span', 'badge', 'Primary'));
   else badges.append(el('span', 'badge', bot.managed ? 'Managed' : 'Connected'));
-  heading.append(badges);
-  card.append(heading);
+  content.append(badges);
   const identity = el('div', 'bot-identity');
   if (bot.username) identity.append(el('span', '', '@' + bot.username));
   if (/^[A-Za-z0-9_]{5,32}$/.test(bot.username || '')) {
@@ -250,7 +278,7 @@ function telegramBotCard(bot) {
     link.rel = 'noopener noreferrer';
     identity.append(link);
   }
-  if (identity.childNodes.length) card.append(identity);
+  if (identity.childNodes.length) content.append(identity);
   const facts = el('dl', 'facts');
   if (bot.webhook_status) fact(facts, 'Webhook', words(bot.webhook_status));
   if (bot.pending_updates !== undefined) fact(facts, 'Pending Telegram updates', number(bot.pending_updates));
@@ -260,7 +288,7 @@ function telegramBotCard(bot) {
   if (bot.checked_at) fact(facts, 'Checked', timestamp(bot.checked_at));
   if (bot.webhook_url) fact(facts, 'Webhook address', bot.webhook_url, { wide: true, mono: true });
   if (bot.managed) fact(facts, 'Access', 'Same allowed owner and workers as this gateway', { wide: true });
-  card.append(facts);
+  content.append(facts);
   if (bot.id) {
     const nameSetting = el('div', 'bot-name-setting');
     const label = el('label', 'bot-name-toggle');
@@ -286,18 +314,28 @@ function telegramBotCard(bot) {
       status.setAttribute('role', 'status');
       nameSetting.append(status);
     }
-    card.append(nameSetting);
+    content.append(nameSetting);
     const actions = el('div', 'bot-actions');
-    actions.append(button(bot.enabled === false ? 'Enable' : 'Disable', 'secondary', () => toggleTelegramBot(bot)));
-    if (!bot.legacy) actions.append(button('Replace token', 'secondary', () => openBotToken(bot)), button('Remove', 'danger', () => openBotRemoval(bot)));
-    for (const control of actions.querySelectorAll('button')) control.disabled = telegramBusy;
-    card.append(actions);
+    if (!bot.legacy) {
+      const replace = button('Replace token', 'secondary', () => openBotToken(bot));
+      replace.disabled = telegramBusy;
+      actions.append(replace);
+    }
+    const reset = button('Reset profile photo >_', 'secondary', () => resetTelegramBotProfilePhoto(bot));
+    reset.dataset.botDisabled = String(bot.enabled === false);
+    reset.disabled = telegramBusy || bot.enabled === false;
+    const photoHelp = el('p', 'muted bot-photo-help', telegramPhotoResetHelp(bot.enabled === false));
+    photoHelp.id = 'bot-photo-help-' + bot.id;
+    photoHelp.dataset.botDisabled = String(bot.enabled === false);
+    reset.setAttribute('aria-describedby', photoHelp.id);
+    actions.append(reset);
+    content.append(actions, photoHelp);
   }
-  if (bot.legacy) card.append(el('p', 'token-note', 'Primary bot · Its token is managed in the gateway configuration.'));
+  if (bot.legacy) content.append(el('p', 'token-note', 'Primary bot · Its token is managed in the gateway configuration.'));
   if (bot.last_error || bot.error) {
     const warning = el('p', 'notice error', 'Telegram reported a connection problem. Refresh to check the bot’s current status.');
     if (date(bot.last_error_at)) warning.append(el('span', '', ' · ' + timestamp(bot.last_error_at)));
-    card.append(warning);
+    content.append(warning);
   }
   return card;
 }
@@ -437,12 +475,17 @@ async function loadTelegramBots(epoch = authEpoch, freshAfterMutation = false, r
 function telegramError(error) {
   // Never surface a Telegram/server error verbatim: it can contain a token.
   if (error.name === 'NotAllowedError' || error.name === 'AbortError') return 'Verification was cancelled. Your changes have not been submitted.';
-  if (error.status === 400) return 'Check the bot token or the new bot’s username and display name, then try again.';
+  if (error.status === 400) return 'Check the bot token or the new bot’s display name, then try again.';
   if (error.status === 403) return 'Access denied. Sign in again and retry.';
   if (error.status === 404) return 'This bot is no longer available. Refresh the bot list.';
   if (error.code === 'telegram_bot_duplicate') return 'This bot is already connected to the gateway.';
   if (error.code === 'telegram_bot_legacy') return 'The primary bot’s token is managed in the gateway configuration.';
   if (error.code === 'telegram_bot_manager_unavailable') return 'Telegram still reports that the selected bot cannot manage bots after refreshing its profile. Enable Bot Management Mode for that bot in @BotFather, then try again.';
+  if (error.code === 'telegram_bot_username_unverified') return 'Unable to check Telegram usernames right now. Please try again.';
+  if (error.code === 'telegram_bot_username_unavailable') return 'Could not find a usable username for this display name. Choose a different display name and try again.';
+  if (error.code === 'telegram_bot_disabled') return 'Enable this bot before resetting its profile photo.';
+  if (error.code === 'telegram_bot_profile_webhook_conflict') return 'This bot is not connected to this gateway’s webhook. Reconnect it here before resetting its profile photo.';
+  if (error.code === 'telegram_bot_owner_changed') return 'This managed bot’s owner changed. Reconnect it with its current token before resetting its profile photo.';
   if (error.takeoverRequired) return 'This bot already has a Telegram webhook. Reconnect it with its token to confirm moving it to this gateway.';
   if (error.status === 409) return 'The bot’s state changed. Refresh the bot list before trying again.';
   if (error.status === 502) return 'Telegram could not complete the request. Refresh the bot list before retrying.';
@@ -455,8 +498,9 @@ async function telegramCall(path, opts, current) {
 function updateTelegramBusy() {
   $('bot-connect').disabled = telegramBusy;
   $('bot-create').disabled = telegramBusy;
-  for (const id of ['bot-token', 'bot-token-submit', 'bot-token-close', 'bot-token-cancel', 'bot-create-username', 'bot-create-name', 'bot-create-close', 'bot-create-cancel', 'bot-create-refresh', 'bot-create-done', 'bot-manager-refresh', 'bot-remove-confirm', 'bot-remove-close', 'bot-remove-cancel']) $(id).disabled = telegramBusy;
-  for (const control of $('bot-info').querySelectorAll('button, input')) control.disabled = telegramBusy;
+  for (const id of ['bot-token', 'bot-token-submit', 'bot-token-close', 'bot-token-cancel', 'bot-create-name', 'bot-create-close', 'bot-create-cancel', 'bot-create-refresh', 'bot-create-done', 'bot-manager-refresh', 'bot-remove-confirm', 'bot-remove-close', 'bot-remove-cancel']) $(id).disabled = telegramBusy;
+  for (const control of $('bot-info').querySelectorAll('button:not(.bot-toggle), input')) control.disabled = telegramBusy || control.dataset.botDisabled === 'true';
+  for (const help of $('bot-info').querySelectorAll('.bot-photo-help')) help.textContent = telegramPhotoResetHelp(help.dataset.botDisabled === 'true');
   renderTelegramManagers();
 }
 async function runTelegramAction(action, errorID = 'bot-error') {
@@ -533,6 +577,25 @@ async function toggleTelegramBot(bot) {
     $('bot-status').textContent = bot.enabled === false ? 'Telegram bot enabled.' : 'Telegram bot disabled.';
     await loadTelegramBots(authEpoch, true);
   });
+}
+function telegramPhotoResetHelp(disabled) {
+  if (disabled) return 'Enable this bot to reset its profile photo.';
+  if (telegramBusy) return 'Wait for the current bot action to finish before resetting a profile photo.';
+  return 'Replaces the current Telegram profile photo with the default Gateway icon.';
+}
+async function resetTelegramBotProfilePhoto(bot) {
+  if (telegramBusy || !authenticated || !bot.id || bot.enabled === false) return;
+  if (!confirm('Reset the profile photo for ' + telegramBotLabel(bot) + '? This replaces its current Telegram profile photo with the default Gateway icon.')) return;
+  let completed = false;
+  await runTelegramAction(async current => {
+    $('bot-status').textContent = 'Resetting the profile photo for ' + telegramBotLabel(bot) + '…';
+    await telegramCall('/' + encodeURIComponent(bot.id) + '/profile-photo/reset', { method: 'POST', body: JSON.stringify({ confirmed: true }) }, current);
+    if (!current() || !authenticated) return;
+    completed = true;
+    $('bot-status').textContent = 'Profile photo reset for ' + telegramBotLabel(bot) + '.';
+    await loadTelegramBots(authEpoch, true);
+  });
+  if (!completed && authenticated) $('bot-status').textContent = '';
 }
 async function toggleTelegramBotSessionName(bot, enabled) {
   await runTelegramAction(async current => {
@@ -625,13 +688,10 @@ function openBotCreate() {
 async function submitBotCreate(event) {
   event.preventDefault();
   if (telegramBusy || !$('bot-create-form').reportValidity()) return;
-  const payload = { manager_id: $('bot-manager').value, username: $('bot-create-username').value.trim(), name: $('bot-create-name').value.trim() };
+  const payload = { manager_id: $('bot-manager').value, display_name: $('bot-create-name').value.trim() };
   if (!telegramManagers().some(bot => String(bot.id) === payload.manager_id)) return;
-  if (!/bot$/i.test(payload.username)) {
-    $('bot-create-error').textContent = 'Choose a username ending in “bot”.'; $('bot-create-error').hidden = false; return;
-  }
   await runTelegramAction(async current => {
-    $('bot-create-status').textContent = 'Preparing your Telegram creation link…';
+    $('bot-create-status').textContent = 'Checking Telegram username…';
     const pending = await telegramCall('/managed', { method: 'POST', body: JSON.stringify(payload) }, current);
     if (!current() || !authenticated) return;
     if (!pending?.id || !telegramCreationURL(pending) || !telegramPendingActive(pending)) throw new Error('Invalid creation response.');
@@ -657,6 +717,7 @@ function resetTelegramBots() {
   closeBotCreate();
   closeBotRemoval();
   telegramRemovedBots = [];
+  expandedTelegramBots.clear();
   $('bot-removed').replaceChildren();
   $('bot-pending').replaceChildren();
   $('bot-status').textContent = '';
@@ -687,10 +748,17 @@ function messageCount(value, stats) {
   const count = number(value);
   return stats.history_complete === false && count !== '—' ? '≥' + count : count;
 }
-function renderSession(session, expanded) {
+function renderSession(session) {
   const stats = session.stats || {};
-  const card = el('article', 'session-card');
+  const card = el('details', 'session-card');
   card.dataset.sessionId = session.session_id;
+  card.open = expandedSessions.has(session.session_id);
+  card.addEventListener('toggle', () => {
+    if (!card.isConnected) return;
+    if (card.open) expandedSessions.add(session.session_id);
+    else expandedSessions.delete(session.session_id);
+  });
+  const summary = el('summary');
   const heading = el('div', 'session-title');
   heading.append(el('h3', '', sessionName(session)));
   const badges = el('div', 'badges');
@@ -698,9 +766,11 @@ function renderSession(session, expanded) {
   if (session.pending_approvals > 0) badges.append(el('span', 'badge warning', `${number(session.pending_approvals)} awaiting approval`));
   if (session.queued_commands > 0) badges.append(el('span', 'badge', `${number(session.queued_commands)} queued`));
   heading.append(badges);
-  card.append(heading);
-  card.append(el('p', 'session-location muted', [session.worker_name, session.runtime_name].filter(Boolean).join(' · ') || 'Worker information unavailable'));
-  card.append(el('p', 'session-path', session.cwd || 'Directory unavailable'));
+  summary.append(heading);
+  const content = el('div', 'session-content');
+  card.append(summary, content);
+  content.append(el('p', 'session-location muted', [session.worker_name, session.runtime_name].filter(Boolean).join(' · ') || 'Worker information unavailable'));
+  content.append(el('p', 'session-path', session.cwd || 'Directory unavailable'));
   const timing = el('div', 'session-timing');
   if (date(stats.active_since)) {
     const active = el('p', '', 'Active for ' + duration(stats.active_since));
@@ -711,20 +781,25 @@ function renderSession(session, expanded) {
   last.title = timestamp(stats.last_message_at);
   timing.append(last);
   if (stats.model) timing.append(el('p', '', [stats.model, stats.reasoning_effort].filter(Boolean).join(' · ')));
-  card.append(timing);
+  content.append(timing);
   const metrics = el('dl', 'session-metrics');
   fact(metrics, 'Prompts', messageCount(stats.prompt_count, stats));
   fact(metrics, 'Assistant replies', messageCount(stats.assistant_message_count, stats));
   fact(metrics, 'Total tokens', number(stats.total_tokens));
   fact(metrics, 'Context tokens', number(stats.context_tokens));
-  card.append(metrics);
-  if (stats.history_complete === false) card.append(el('p', 'token-note', 'Partial history · message counts may still be loading.'));
+  content.append(metrics);
+  if (stats.history_complete === false) content.append(el('p', 'token-note', 'Partial history · message counts may still be loading.'));
   const lastMessage = el('div', 'last-message');
   lastMessage.append(el('p', 'last-message-label', 'Last message' + (stats.last_message_role ? ' · ' + words(stats.last_message_role) : '')));
   lastMessage.append(el('p', 'last-message-text', stats.last_message || 'Not available'));
-  card.append(lastMessage);
-  const details = el('details');
-  details.open = expanded;
+  content.append(lastMessage);
+  const details = el('details', 'session-details');
+  details.open = expandedSessionDetails.has(session.session_id);
+  details.addEventListener('toggle', () => {
+    if (!details.isConnected) return;
+    if (details.open) expandedSessionDetails.add(session.session_id);
+    else expandedSessionDetails.delete(session.session_id);
+  });
   details.append(el('summary', '', 'Session details and token breakdown'));
   const facts = el('dl', 'facts');
   fact(facts, 'Session created', timestamp(stats.created_at));
@@ -756,7 +831,7 @@ function renderSession(session, expanded) {
   details.append(facts);
   if (stats.history_complete === false) details.append(el('p', 'token-note', 'Message counts marked ≥ are lower bounds from the available history.'));
   details.append(el('p', 'token-note', 'Token totals show the latest recorded cumulative usage. Cached tokens are included in input tokens; reasoning tokens are included in output tokens. Unavailable statistics appear as —.'));
-  card.append(details);
+  content.append(details);
   return card;
 }
 function renderSessions() {
@@ -767,10 +842,15 @@ function renderSessions() {
   filtered.sort((a, b) => (date(b.stats?.last_message_at)?.getTime() || date(b.stats?.created_at)?.getTime() || 0) - (date(a.stats?.last_message_at)?.getTime() || date(a.stats?.created_at)?.getTime() || 0));
   const pages = Math.max(1, Math.ceil(filtered.length / pageSize));
   sessionPage = Math.max(0, Math.min(sessionPage, pages - 1));
-  const expanded = new Set([...$('session-list').querySelectorAll('.session-card')].filter(card => card.querySelector('details').open).map(card => card.dataset.sessionId));
+  // Capture synchronously too: a refresh can run before a native toggle event.
+  for (const card of $('session-list').querySelectorAll('.session-card')) {
+    const key = card.dataset.sessionId;
+    if (card.open) expandedSessions.add(key); else expandedSessions.delete(key);
+    if (card.querySelector('.session-details').open) expandedSessionDetails.add(key); else expandedSessionDetails.delete(key);
+  }
   $('session-list').replaceChildren();
   const pageSessions = filtered.slice(sessionPage * pageSize, (sessionPage + 1) * pageSize);
-  for (const session of pageSessions) $('session-list').append(renderSession(session, expanded.has(session.session_id)));
+  for (const session of pageSessions) $('session-list').append(renderSession(session));
   if (!filtered.length) $('session-list').append(el('p', 'empty', all.length ? 'No sessions match these filters.' : 'No user sessions have been reported yet.'));
   $('session-count').textContent = filtered.length ? `Showing ${sessionPage * pageSize + 1}–${sessionPage * pageSize + pageSessions.length} of ${number(filtered.length)} sessions${filtered.length !== all.length ? ` (${number(all.length)} total)` : ''}` : `${number(filtered.length)} sessions`;
   $('session-pagination').hidden = pages <= 1;
@@ -1370,6 +1450,16 @@ $('refresh').addEventListener('click', () => load());
 for (const id of ['session-search', 'session-state']) $(id).addEventListener(id === 'session-search' ? 'input' : 'change', () => { sessionPage = 0; renderSessions(); });
 $('session-prev').addEventListener('click', () => { sessionPage--; renderSessions(); });
 $('session-next').addEventListener('click', () => { sessionPage++; renderSessions(); });
+for (const section of document.querySelectorAll('#console > .console-section')) {
+  const attention = el('span', 'badge warning section-attention', 'Needs attention');
+  attention.hidden = true;
+  section.querySelector(':scope > summary').append(attention);
+  const update = () => {
+    attention.hidden = section.open || ![...section.querySelectorAll('.notice.error:not([hidden])')].some(error => error.textContent.trim());
+  };
+  section.addEventListener('toggle', update);
+  new MutationObserver(update).observe(section.querySelector(':scope > .section-content'), { subtree: true, childList: true, characterData: true, attributes: true, attributeFilter: ['hidden'] });
+}
 setInterval(() => { if (authenticated && !document.hidden) load(false); }, 15000);
 sessionAuth = window.CodexSessionAuth.create({
   mount: $('auth-warning'),

@@ -13,6 +13,10 @@ The `/tgw/admin/` console and `/tgw/api/v1/admin/` endpoints share that origin.
 Keep the origin configuration free of a path prefix so existing passkeys remain
 bound to the same hostname when URL routes change.
 
+Console sections start collapsed: Telegram bots, Audio, Sessions, Workers,
+Passkeys, Browser sessions and Password sign-in. Select a heading to expand or
+close its section. Refreshes preserve open sections and unsaved audio settings.
+
 Run `codex-gateway admin bootstrap` locally to create a bootstrap token. It is
 shown once, stored only as a SHA-256 hash, expires after 15 minutes, and is
 atomically consumed when the first resident, user-verified passkey is saved.
@@ -66,8 +70,9 @@ The browser uses these endpoints:
 | `GET /tgw/api/v1/admin/telegram-bots` | Lists connected bots and pending managed-bot requests without tokens or webhook secrets. |
 | `POST /tgw/api/v1/admin/telegram-bots/refresh` | Refreshes enabled bots' Telegram profiles and returns bots and pending requests; requires a valid session, exact Origin and CSRF, without recent authentication. |
 | `POST /tgw/api/v1/admin/telegram-bots` | Connects an existing bot with its token, or replaces a token when `replace_id` is supplied. |
-| `POST /tgw/api/v1/admin/telegram-bots/managed` | Creates a managed-bot request and a Telegram confirmation link using `manager_id`, `username` and `name`. |
+| `POST /tgw/api/v1/admin/telegram-bots/managed` | Creates a managed-bot request and a Telegram confirmation link using `manager_id` and `display_name`; the gateway generates and checks the username. The explicit `username`/`name` pair remains supported for existing clients. |
 | `PATCH /tgw/api/v1/admin/telegram-bots/{id}` | Enables or disables a bot with `{"enabled":true}` or `{"enabled":false}`. |
+| `POST /tgw/api/v1/admin/telegram-bots/{id}/profile-photo/reset` | Replaces the bot's profile photo with the purple Gateway icon; requires `{"confirmed":true}`, an enabled bot and recent authentication. |
 | `DELETE /tgw/api/v1/admin/telegram-bots/{id}` | Removes an additional bot and its local records and subscriptions; requires `{"confirmed":true}`. |
 | `GET /tgw/api/v1/admin/audio` | Returns audio settings, gateway CPU/RAM resources, installed models and setup progress. |
 | `POST /tgw/api/v1/admin/audio/settings` | Downloads required models and applies local audio settings asynchronously; requires recent authentication. |
@@ -104,8 +109,12 @@ session revocation remains available without another authentication prompt.
 ## Telegram bots
 
 The **Telegram bots** panel shows the configured **Primary** bot and each
-additional **Connected** or **Managed** bot, with its username, connection status
-and **Open Telegram** link. All bots inherit the gateway's existing Telegram
+additional **Connected** or **Managed** bot in a collapsed subsection. Its header
+shows the bot name and **Enable**/**Disable** and **Delete** controls. Expand the
+name to see its username, connection status, **Open Telegram** link and settings.
+The primary bot has no deletion control because its configuration is managed on
+the gateway host. Expansion choices survive dashboard refreshes.
+All bots inherit the gateway's existing Telegram
 user/chat access rules and share its workers. Adding a bot does not create a
 separate administrator or grant another Telegram user access. Chat bindings
 and notifications belong to the bot used to create them, so the same chat can
@@ -151,11 +160,50 @@ returned by the bot list API. Errors do not display token values.
 
 Choose **Create managed bot** to create a bot through Telegram without pasting
 its token. Enable **Bot Management Mode** for your chosen manager bot in
-`@BotFather`, select that enabled manager, and enter the new bot's username and
-display name. **Create Telegram link** prepares the request; **Open Telegram
-to create bot** opens Telegram's confirmation page. Keep the requested username
-when confirming so the gateway can match the callback to your request. To use
-a different username, create a new link with that username in the console.
+`@BotFather`, select that enabled manager, and enter the new bot's display name.
+**Create Telegram link** generates a lowercase username, replaces spaces and
+unsupported characters with underscores, and appends `_bot`. For example,
+**My Project** becomes `my_project_bot`. Names are shortened when necessary to
+fit Telegram's 32-character username limit; a letter prefix is added when needed.
+
+The gateway checks its connected bots and pending requests, then looks up the
+candidate's public Telegram profile. If occupied, it adds a number before
+`_bot`, for example `my_project1_bot`, and checks again. Lookup failures and
+unrecognized Telegram pages stop creation with a retryable error. Checks have
+time and attempt limits, and no bot credentials are sent to the public lookup.
+
+The selected username appears with the confirmation link. **Open Telegram to
+create bot** opens Telegram's confirmation page. Public profile checks do not
+reserve a username or detect every reserved or unavailable name; Telegram makes
+the final availability check during confirmation. Its authoritative
+[`bots.checkUsername` method](https://core.telegram.org/method/bots.checkUsername)
+requires a signed-in Telegram user and cannot be called with the gateway's bot
+token. Keep the requested username when confirming so the gateway can match the
+callback. If Telegram rejects it or you want another name, return to the console
+and create another link.
+
+The API returns the selected `requested_username` and
+`username_availability: "telegram_confirmation_required"` while the request is
+pending. Existing API clients may still supply `username` and `name` instead of
+`display_name`; those explicit usernames retain their existing validation and
+are checked against local reservations.
+
+After Telegram confirms creation, the gateway connects the new bot and sets
+the purple Gateway icon as its default profile photo. The creation dialog shows
+a preview. The image is bundled with the gateway and uploaded as a JPEG through
+[`setMyProfilePhoto`](https://core.telegram.org/bots/api#setmyprofilephoto).
+If the bot already has a photo, it is kept. Temporary photo failures leave the
+creation request pending so Telegram's callback can retry; the connected bot
+can already handle messages. Retries and gateway restarts check for an existing
+photo before uploading again. Once setup finishes, later bot updates do not
+restore the default or replace a picture you choose.
+
+To apply the icon to an existing bot, expand its entry and choose **Reset profile
+photo >_**. Confirm the named bot to replace its current profile photo with the
+Gateway icon. This is available for the primary bot too. Enable a disabled bot
+before resetting its photo. The gateway verifies the bot's identity and its
+current webhook before uploading; it does not move the webhook or change the
+bot's session selection. A failed reset reports an error and can be retried.
 
 The gateway refreshes the selected manager's Telegram profile before checking
 Bot Management Mode and creating the link. **Refresh manager bots** explicitly
@@ -175,7 +223,7 @@ new request, or use **Connect existing bot** with the resulting bot's token.
 
 **Disable** stops a bot's gateway access while retaining its configuration and
 local bindings. **Enable** restores it. For an additional bot, **Replace token**
-accepts a replacement token for the same Telegram identity. **Remove**
+accepts a replacement token for the same Telegram identity. **Delete**
 opens a dialog with the bot's username and two separate actions:
 
 - **Remove from gateway** confirms deletion of its local bot records, chat
@@ -207,6 +255,19 @@ the list to check its outcome before retrying. Additional bot credentials are
 encrypted in SQLite. Back up both the database and its private companion key,
 `<database path>.telegram-bots.key`, together; the key is required to restore
 those bots after a restart or recovery.
+
+### Telegram iOS profile-photo banner
+
+Telegram iOS shows **Set profile photo** for managed bots without a profile
+picture. In the reviewed [Telegram iOS source](https://github.com/TelegramMessenger/Telegram-iOS/blob/f1dd7a2dbd02cbbf513e75d5695d8d36d1cf5838/submodules/TelegramUI/Sources/ChatInterfaceTitlePanelNodes.swift#L147),
+this condition does not consult the normal dismissal state, which can explain
+why the close button does not keep the banner hidden. The gateway does not send
+this banner, and the bot API has no dismiss-banner operation. New bots created
+through the console receive the default Gateway photo automatically, removing
+the missing-photo condition. For an existing bot, use **Reset profile photo >_**
+in Admin, set a custom photo from Telegram, or use
+[`/setuserpic` in BotFather](https://core.telegram.org/bots/features#edit-bots)
+to remove the missing-photo condition.
 
 ## Audio
 
@@ -376,8 +437,10 @@ rows are drained gradually, without a large blocking cleanup transaction.
 
 The session count and searchable list include non-archived sessions retained
 for administration. Retired subagent/helper records remain stored for
-reconciliation but do not appear in the console. Session names wrap fully on
-narrow screens.
+reconciliation but do not appear in the console. The Sessions panel and each
+session card start collapsed. Expand a session's name to inspect it; each card
+has its own expansion state, retained across refreshes, filtering and pagination.
+Session names wrap fully on narrow screens.
 
 Revoked workers and their sessions disappear from the Codex Web UI sidebar and
 Telegram session pickers, including after a live inventory update. Their saved

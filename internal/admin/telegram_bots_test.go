@@ -58,6 +58,10 @@ func (m *adminTelegramBotsFake) SetTelegramBotSessionName(_ context.Context, id 
 	m.calls = append(m.calls, action+id)
 	return m.err
 }
+func (m *adminTelegramBotsFake) ResetTelegramBotProfilePhoto(_ context.Context, id string) error {
+	m.calls = append(m.calls, "reset-photo:"+id)
+	return m.err
+}
 func (m *adminTelegramBotsFake) RemoveTelegramBot(_ context.Context, id string) error {
 	m.calls = append(m.calls, "remove:"+id)
 	return m.err
@@ -77,6 +81,7 @@ func TestTelegramBotAdminAuthenticationAndValidation(t *testing.T) {
 		{"POST", base, `{"token":"example-token"}`},
 		{"POST", base + "/refresh", ""},
 		{"POST", base + "/managed", `{"username":"test_bot","name":"Test"}`},
+		{"POST", base + "/telegram:123/profile-photo/reset", `{"confirmed":true}`},
 		{"PATCH", base + "/telegram:123", `{"enabled":false}`},
 		{"PATCH", base + "/telegram:123", `{"inherit_session_name":true}`},
 		{"DELETE", base + "/telegram:123", `{"confirmed":true}`},
@@ -106,6 +111,23 @@ func TestTelegramBotAdminAuthenticationAndValidation(t *testing.T) {
 		{"POST", base + "/managed", `{"username":"test_bot","name":"Test","owner_id":42}`},
 		{"POST", base + "/managed", `{"username":"","name":"Test"}`},
 		{"POST", base + "/managed", `{"username":"test_bot","name":"Test","manager_id":"bad/path"}`},
+		{"POST", base + "/managed", `{"display_name":""}`},
+		{"POST", base + "/managed", `{"display_name":null}`},
+		{"POST", base + "/managed", `{"display_name":123}`},
+		{"POST", base + "/managed", `{"display_name":"Test","manager_id":"bad/path"}`},
+		{"POST", base + "/managed", `{"display_name":"Test","username":"test_bot"}`},
+		{"POST", base + "/managed", `{"display_name":"Test","name":"Test"}`},
+		{"POST", base + "/managed", `{"display_name":"Test","username":null}`},
+		{"POST", base + "/managed", `{"display_name":"Test","owner_id":42}`},
+		{"POST", base + "/telegram:123/profile-photo/reset", `{}`},
+		{"POST", base + "/telegram:123/profile-photo/reset", `{"confirmed":false}`},
+		{"POST", base + "/telegram:123/profile-photo/reset", `{"confirmed":null}`},
+		{"POST", base + "/telegram:123/profile-photo/reset", `{"confirmed":"true"}`},
+		{"POST", base + "/telegram:123/profile-photo/reset", `{"confirmed":true,"takeover":true}`},
+		{"POST", base + "/telegram:123/profile-photo/reset", `{"confirmed":true} {}`},
+		{"POST", base + "/telegram:123/profile-photo/reset", `null`},
+		{"POST", base + "/bad%2Fpath/profile-photo/reset", `{"confirmed":true}`},
+		{"POST", base + "/bad%20path/profile-photo/reset", `{"confirmed":true}`},
 		{"PATCH", base + "/telegram:123", `{}`},
 		{"PATCH", base + "/telegram:123", `{"enabled":null}`},
 		{"PATCH", base + "/telegram:123", `{"enabled":true,"owner_id":42}`},
@@ -140,6 +162,10 @@ func TestTelegramBotAdminAuthenticationAndValidation(t *testing.T) {
 	if w.Code != 403 || !strings.Contains(w.Body.String(), "reauthentication_required") || len(m.calls) != 0 {
 		t.Fatalf("stale authentication changed bot name setting: %d %s", w.Code, w.Body.String())
 	}
+	w = webUICommandRequestForTest(s, "POST", base+"/telegram:123/profile-photo/reset", `{"confirmed":true}`, token, passkeyTestOrigin, "csrf", "csrf")
+	if w.Code != 403 || !strings.Contains(w.Body.String(), "reauthentication_required") || len(m.calls) != 0 {
+		t.Fatalf("stale authentication reset bot photo: %d %s", w.Code, w.Body.String())
+	}
 }
 
 func TestTelegramBotAdminOperationsAndSafeErrors(t *testing.T) {
@@ -154,11 +180,15 @@ func TestTelegramBotAdminOperationsAndSafeErrors(t *testing.T) {
 		{"POST", base, `{"token":" secret-token "}`, "connect", 201},
 		{"POST", base, `{"replace_id":"telegram:123","token":"secret-token","takeover":true}`, "replace:telegram:123", 200},
 		{"POST", base + "/managed", `{"manager_id":"primary_bot","username":"test_bot","name":"Test Bot"}`, "create:primary_bot:test_bot:Test Bot", 201},
+		{"POST", base + "/managed", `{"manager_id":"primary_bot","display_name":" Test Bot "}`, "create:primary_bot::Test Bot", 201},
+		{"POST", base + "/managed", `{"display_name":"Test Bot"}`, "create:::Test Bot", 201},
 		{"PATCH", base + "/telegram:123", `{"enabled":false}`, "disable:telegram:123", 204},
 		{"PATCH", base + "/telegram:123", `{"enabled":true}`, "enable:telegram:123", 204},
 		{"PATCH", base + "/telegram:123", `{"inherit_session_name":true}`, "session-name:telegram:123", 204},
 		{"PATCH", base + "/telegram:123", `{"inherit_session_name":false}`, "original-name:telegram:123", 204},
 		{"PATCH", base + "/primary", `{"inherit_session_name":true}`, "session-name:primary", 204},
+		{"POST", base + "/telegram:123/profile-photo/reset", `{"confirmed":true}`, "reset-photo:telegram:123", 204},
+		{"POST", base + "/primary/profile-photo/reset", `{"confirmed":true}`, "reset-photo:primary", 204},
 		{"DELETE", base + "/telegram:123", `{"confirmed":true}`, "remove:telegram:123", 204},
 	} {
 		m.calls = nil
@@ -189,6 +219,10 @@ func TestTelegramBotAdminOperationsAndSafeErrors(t *testing.T) {
 		{gateway.ErrTelegramBotWebhookConflict, 409, "telegram_bot_webhook_conflict"},
 		{gateway.ErrTelegramBotManagerUnavailable, 409, "telegram_bot_manager_unavailable"},
 		{gateway.ErrTelegramBotOwnerChanged, 409, "telegram_bot_owner_changed"},
+		{gateway.ErrTelegramBotDisabled, 409, "telegram_bot_disabled"},
+		{gateway.ErrTelegramBotProfileWebhookConflict, 409, "telegram_bot_profile_webhook_conflict"},
+		{gateway.ErrTelegramBotUsernameUnverified, 502, "telegram_bot_username_unverified"},
+		{gateway.ErrTelegramBotUsernameUnavailable, 409, "telegram_bot_username_unavailable"},
 		{errors.New("https://api.telegram.org/botsecret-token/getMe /private/key"), 502, "telegram_bot_unavailable"},
 	} {
 		m.err = tc.err

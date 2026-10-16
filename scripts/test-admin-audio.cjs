@@ -61,8 +61,8 @@ async function fixture(browser, width, value = snapshot()) {
       }
       return route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(body) });
     }
-    const filename = /\.(js|css)$/.test(url.pathname) ? path.basename(url.pathname) : 'index.html';
-    return route.fulfill({ contentType: filename.endsWith('.js') ? 'text/javascript' : filename.endsWith('.css') ? 'text/css' : 'text/html',
+    const filename = /\.(js|css|svg)$/.test(url.pathname) ? path.basename(url.pathname) : 'index.html';
+    return route.fulfill({ contentType: filename.endsWith('.js') ? 'text/javascript' : filename.endsWith('.css') ? 'text/css' : filename.endsWith('.svg') ? 'image/svg+xml' : 'text/html',
       headers: { 'Content-Security-Policy': "default-src 'self'; script-src 'self'; style-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'" }, body: fs.readFileSync(path.join(assets, filename)) });
   });
   await page.addInitScript(() => {
@@ -76,6 +76,8 @@ async function fixture(browser, width, value = snapshot()) {
   await page.clock.install();
   await page.goto('https://admin.test/tgw/admin/');
   await page.waitForFunction(() => !document.getElementById('audio-enabled').disabled);
+  assert.equal(await page.locator('#audio-section').evaluate(section => section.open), false, 'Audio starts collapsed');
+  await page.locator('#audio-section > summary').click();
   async function refresh() {
     await Promise.all([
       page.waitForResponse(response => new URL(response.url()).pathname.endsWith('/admin/audio')),
@@ -122,6 +124,12 @@ async function fixture(browser, width, value = snapshot()) {
       assert.equal(await enabled.isChecked(), true, 'Refresh preserves unsaved enable selection');
       await page.locator('#audio-model-small').check();
       await threads.fill('4');
+      await page.locator('#audio-section > summary').click();
+      await refresh();
+      assert.equal(await page.locator('#audio-section').evaluate(section => section.open), false, 'Refresh preserves a collapsed Audio section');
+      assert.equal(await threads.inputValue(), '4', 'Collapsing and refreshing preserve the unsaved thread count');
+      assert.equal(await page.locator('#audio-model-small').isChecked(), true, 'Collapsing and refreshing preserve the unsaved model');
+      await page.locator('#audio-section > summary').click();
       await page.locator('#audio-reply').check();
       assert.equal(await page.locator('#audio-voice-wrap').isVisible(), true);
       assert.equal(await page.locator('input[name="audio-engine"]').count(), 2, 'Exactly the two supported engines are offered');
@@ -174,6 +182,7 @@ async function fixture(browser, width, value = snapshot()) {
       assert.match(await page.locator('#audio-effective').innerText(), /Small · 4 threads · text and audio replies/);
       await page.reload();
       await page.waitForFunction(() => !document.getElementById('audio-enabled').disabled);
+      await page.locator('#audio-section > summary').click();
       assert.equal(await enabled.isChecked(), true, 'Saved settings survive a browser reload');
       assert.equal(await threads.inputValue(), '4', 'An existing thread selection is preserved');
       assert.equal(await page.locator('#audio-engine-piper').isChecked(), true, 'Saved engine selection survives reload');
@@ -218,7 +227,12 @@ async function fixture(browser, width, value = snapshot()) {
       assert.equal(state.credentialCalls, 1, 'An explicit recent-auth rejection verifies before resubmission');
       await finish();
       state.readStatus = 503;
+      await page.locator('#audio-section > summary').click();
       await refresh();
+      await page.locator('#audio-section .section-attention').waitFor({ state: 'visible' });
+      assert.equal(await page.locator('#audio-section').evaluate(section => section.open), false, 'Background errors preserve the collapsed section');
+      await page.locator('#audio-section > summary').click();
+      assert.equal(await page.locator('#audio-section .section-attention').isVisible(), false, 'Opening the section reveals the error and clears its indicator');
       assert.match(await page.locator('#audio-error').innerText(), /temporarily unavailable/);
       assert.equal(await threads.inputValue(), '5', 'Temporary read failure keeps known settings');
       assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true, 'Audio console fits viewport ' + width);

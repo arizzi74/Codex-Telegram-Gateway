@@ -65,14 +65,15 @@ type TelegramBotSummary struct {
 }
 
 type TelegramManagedBotIntent struct {
-	ID                string    `json:"id"`
-	ManagerID         string    `json:"manager_id"`
-	RequestedUsername string    `json:"requested_username"`
-	DisplayName       string    `json:"display_name"`
-	LaunchURL         string    `json:"launch_url"`
-	ExpiresAt         time.Time `json:"expires_at"`
-	Status            string    `json:"status"`
-	BotID             string    `json:"bot_id,omitempty"`
+	ID                   string    `json:"id"`
+	ManagerID            string    `json:"manager_id"`
+	RequestedUsername    string    `json:"requested_username"`
+	DisplayName          string    `json:"display_name"`
+	LaunchURL            string    `json:"launch_url"`
+	ExpiresAt            time.Time `json:"expires_at"`
+	Status               string    `json:"status"`
+	BotID                string    `json:"bot_id,omitempty"`
+	UsernameAvailability string    `json:"username_availability,omitempty"`
 }
 
 type telegramBotCredentials struct{ Token, WebhookSecret string }
@@ -99,6 +100,7 @@ type TelegramBotManager struct {
 	botNamesWake    chan struct{}
 	botNameRedactor *auth.Redactor
 	newClient       func(string) *TelegramClient
+	usernameExists  func(context.Context, string) (bool, error)
 }
 
 func NewTelegramBotManager(ctx context.Context, store *registry.Store, cfg config.GatewayConfig, legacySecret string, logger *slog.Logger, settings ...VoiceConfiguration) (*TelegramBotManager, error) {
@@ -131,6 +133,9 @@ func NewTelegramBotManager(ctx context.Context, store *registry.Store, cfg confi
 		return nil, errors.New("Telegram bot encryption is unavailable")
 	}
 	m := &TelegramBotManager{store: store, cfg: cfg, log: logger, aead: aead, bots: map[string]*telegramManagedRuntime{}, botNames: map[string]telegramBotNameState{}, botNamesWake: make(chan struct{}, 1), newClient: NewTelegramClient}
+	m.usernameExists = func(ctx context.Context, username string) (bool, error) {
+		return telegramPublicUsernameExists(ctx, telegramUsernameProfileHTTP, username)
+	}
 	if len(settings) > 0 {
 		m.voiceSettings = settings[0]
 	}
@@ -630,6 +635,10 @@ func (m *TelegramBotManager) RemoveTelegramBot(ctx context.Context, id string) e
 	return nil
 }
 
+// CreateManagedTelegramBot generates a username when username is empty. Public
+// Telegram profiles and local reservations are checked before saving a request;
+// Telegram still authoritatively validates it when the owner confirms creation.
+// Explicit usernames remain supported for existing administrative clients.
 func (m *TelegramBotManager) CreateManagedTelegramBot(ctx context.Context, managerID, username, displayName string) (TelegramManagedBotIntent, error) {
 	m.op.Lock()
 	defer m.op.Unlock()
@@ -640,9 +649,10 @@ func (m *TelegramBotManager) CreateManagedTelegramBot(ctx context.Context, manag
 	if bot == nil || !bot.record.Enabled {
 		return TelegramManagedBotIntent{}, ErrTelegramBotNotFound
 	}
+	automaticUsername := strings.TrimSpace(username) == ""
 	username = strings.TrimPrefix(strings.TrimSpace(username), "@")
 	displayName = strings.TrimSpace(displayName)
-	if !validTelegramBotUsername(username) || !utf8.ValidString(displayName) || utf8.RuneCountInString(displayName) < 1 || utf8.RuneCountInString(displayName) > 64 {
+	if (!automaticUsername && !validTelegramBotUsername(username)) || !utf8.ValidString(displayName) || utf8.RuneCountInString(displayName) < 1 || utf8.RuneCountInString(displayName) > 64 {
 		return TelegramManagedBotIntent{}, ErrTelegramBotInvalid
 	}
 	identity, err := bot.client.RefreshIdentity(ctx, bot.record.TelegramID)
@@ -669,12 +679,20 @@ func (m *TelegramBotManager) CreateManagedTelegramBot(ctx context.Context, manag
 	if !identity.CanManageBots {
 		return TelegramManagedBotIntent{}, ErrTelegramBotManagerUnavailable
 	}
-	intents, err := m.store.TelegramManagedBotIntents(ctx)
-	if err != nil {
-		return TelegramManagedBotIntent{}, errors.New("Telegram creation requests could not be read")
-	}
-	for _, intent := range intents {
-		if intent.ManagerID == managerID && (intent.Status == "pending" || intent.Status == "activating") && strings.EqualFold(intent.RequestedUsername, username) {
+	var number, checks int
+	lookupCtx, cancelLookup := context.WithTimeout(ctx, telegramManagedBotUsernameBudget)
+	defer cancelLookup()
+	if automaticUsername {
+		username, err = m.nextTelegramManagedBotUsername(lookupCtx, displayName, &number, &checks)
+		if err != nil {
+			return TelegramManagedBotIntent{}, err
+		}
+	} else {
+		reserved, err := m.store.TelegramManagedBotUsernameReserved(ctx, username)
+		if err != nil {
+			return TelegramManagedBotIntent{}, errors.New("Telegram username reservations could not be read")
+		}
+		if reserved {
 			return TelegramManagedBotIntent{}, ErrTelegramBotDuplicate
 		}
 	}
@@ -684,15 +702,33 @@ func (m *TelegramBotManager) CreateManagedTelegramBot(ctx context.Context, manag
 	if err = bot.client.SetWebhook(ctx, m.webhookURL(bot.record), bot.secret); err != nil {
 		return TelegramManagedBotIntent{}, errors.New("Telegram manager webhook could not be configured")
 	}
-	now := time.Now().UTC()
-	intent := registry.TelegramManagedBotIntentRecord{ID: uuid.NewString(), ManagerID: managerID, OwnerID: m.cfg.Secrets.WLID, RequestedUsername: username, DisplayName: displayName, LaunchURL: "https://t.me/newbot/" + identity.Username + "/" + username + "?" + url.Values{"name": {displayName}}.Encode(), Status: "pending", CreatedAt: now, ExpiresAt: now.Add(TelegramManagedBotIntentTTL)}
-	if err = m.store.SaveTelegramManagedBotIntent(ctx, intent); err != nil {
-		return TelegramManagedBotIntent{}, errors.New("Telegram creation request could not be saved")
+	for {
+		now := time.Now().UTC()
+		intent := registry.TelegramManagedBotIntentRecord{ID: uuid.NewString(), ManagerID: managerID, OwnerID: m.cfg.Secrets.WLID, RequestedUsername: username, DisplayName: displayName, LaunchURL: "https://t.me/newbot/" + identity.Username + "/" + username + "?" + url.Values{"name": {displayName}}.Encode(), Status: "pending", CreatedAt: now, ExpiresAt: now.Add(TelegramManagedBotIntentTTL)}
+		err = m.store.SaveTelegramManagedBotIntent(ctx, intent)
+		if err == nil {
+			return telegramManagedIntentSummary(intent), nil
+		}
+		if !errors.Is(err, registry.ErrTelegramBotUsernameReserved) {
+			return TelegramManagedBotIntent{}, errors.New("Telegram creation request could not be saved")
+		}
+		if !automaticUsername {
+			return TelegramManagedBotIntent{}, ErrTelegramBotDuplicate
+		}
+		// Another gateway instance may reserve the checked suggestion before
+		// this transaction. Continue under the original lookup/attempt limits.
+		username, err = m.nextTelegramManagedBotUsername(lookupCtx, displayName, &number, &checks)
+		if err != nil {
+			return TelegramManagedBotIntent{}, err
+		}
 	}
-	return telegramManagedIntentSummary(intent), nil
 }
 func telegramManagedIntentSummary(in registry.TelegramManagedBotIntentRecord) TelegramManagedBotIntent {
-	return TelegramManagedBotIntent{ID: in.ID, ManagerID: in.ManagerID, RequestedUsername: in.RequestedUsername, DisplayName: in.DisplayName, LaunchURL: in.LaunchURL, ExpiresAt: in.ExpiresAt, Status: in.Status, BotID: in.BotID}
+	summary := TelegramManagedBotIntent{ID: in.ID, ManagerID: in.ManagerID, RequestedUsername: in.RequestedUsername, DisplayName: in.DisplayName, LaunchURL: in.LaunchURL, ExpiresAt: in.ExpiresAt, Status: in.Status, BotID: in.BotID}
+	if in.Status == "pending" || in.Status == "activating" {
+		summary.UsernameAvailability = "telegram_confirmation_required"
+	}
+	return summary
 }
 func (m *TelegramBotManager) ListTelegramManagedBotIntents(ctx context.Context) ([]TelegramManagedBotIntent, error) {
 	records, err := m.store.TelegramManagedBotIntents(ctx)
@@ -880,6 +916,12 @@ func (m *TelegramBotManager) acceptManagedBotUpdate(ctx context.Context, manager
 		if _, err = m.connect(ctx, record, telegramBotCredentials{token, secret}, client); err != nil {
 			return err
 		}
+	}
+	// Keep the creation activating until its default photo is applied or an
+	// existing photo is observed. A transient failure leaves the bot usable and
+	// the update unseen, so Telegram redelivery can resume after a restart.
+	if err = m.applyManagedBotDefaultProfilePhoto(ctx, managerID, m.get(id)); err != nil {
+		return err
 	}
 	return m.store.CompleteTelegramManagedBotUpdate(ctx, managerID, update.ID, id)
 }

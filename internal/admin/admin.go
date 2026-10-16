@@ -102,6 +102,9 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/tgw/admin/", s.ui)
 	s.mux.HandleFunc("/tgw/admin/static/app.css", s.css)
 	s.mux.HandleFunc("/tgw/admin/static/app.js", s.js)
+	s.mux.HandleFunc("/tgw/admin/static/webui-icon.svg", func(w http.ResponseWriter, r *http.Request) {
+		serveAsset(w, r, "static/webui-icon.svg", "image/svg+xml")
+	})
 	s.mux.HandleFunc("/tgw/api/v1/admin/bootstrap", s.bootstrapBegin)
 	s.mux.HandleFunc("/tgw/api/v1/admin/passkeys/register/begin", s.registrationBegin)
 	s.mux.HandleFunc("/tgw/api/v1/admin/passkeys/register/finish", s.registrationFinish)
@@ -122,6 +125,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/tgw/api/v1/admin/telegram-bots", s.telegramBotCollection)
 	s.mux.HandleFunc("/tgw/api/v1/admin/telegram-bots/managed", s.telegramManagedBotCreate)
 	s.mux.HandleFunc("/tgw/api/v1/admin/telegram-bots/refresh", s.telegramBotRefresh)
+	s.mux.HandleFunc("/tgw/api/v1/admin/telegram-bots/{id}/profile-photo/reset", s.telegramBotProfilePhotoReset)
 	s.mux.HandleFunc("/tgw/api/v1/admin/telegram-bots/", s.telegramBotMember)
 	s.mux.HandleFunc("/tgw/api/v1/admin/workers", s.workers)
 	s.mux.HandleFunc("/tgw/api/v1/admin/workers/", s.worker)

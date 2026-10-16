@@ -15,6 +15,7 @@ require (
 	github.com/yuin/goldmark v1.8.6
 	go.etcd.io/bbolt v1.5.0
 	golang.org/x/crypto v0.57.0
+	golang.org/x/net v0.60.0
 	golang.org/x/sys v0.48.0
 	modernc.org/sqlite v1.58.0
 )
@@ -87,7 +88,6 @@ require (
 	go.opentelemetry.io/otel/trace v1.44.0 // indirect
 	go.yaml.in/yaml/v3 v3.0.5 // indirect
 	golang.org/x/mod v0.41.0 // indirect
-	golang.org/x/net v0.60.0 // indirect
 	golang.org/x/sync v0.23.0 // indirect
 	golang.org/x/term v0.46.0 // indirect
 	golang.org/x/text v0.42.0 // indirect

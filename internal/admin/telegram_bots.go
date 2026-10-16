@@ -21,6 +21,7 @@ type TelegramBotManager interface {
 	ReplaceTelegramBotToken(context.Context, string, string, bool) (gateway.TelegramBotSummary, error)
 	SetTelegramBotEnabled(context.Context, string, bool) error
 	SetTelegramBotSessionName(context.Context, string, bool) error
+	ResetTelegramBotProfilePhoto(context.Context, string) error
 	RemoveTelegramBot(context.Context, string) error
 	CreateManagedTelegramBot(context.Context, string, string, string) (gateway.TelegramManagedBotIntent, error)
 }
@@ -201,25 +202,80 @@ func (s *Server) telegramManagedBotCreate(w http.ResponseWriter, r *http.Request
 		return
 	}
 	var input struct {
-		ManagerID string `json:"manager_id"`
-		Username  string `json:"username"`
-		Name      string `json:"name"`
+		ManagerID   string          `json:"manager_id"`
+		DisplayName json.RawMessage `json:"display_name"`
+		Username    json.RawMessage `json:"username"`
+		Name        json.RawMessage `json:"name"`
 	}
 	if !decodeEnrollmentJSON(w, r, &input, false) {
 		return
 	}
-	if (input.ManagerID != "" && !validTelegramBotID(input.ManagerID)) || strings.TrimSpace(input.Username) == "" || len(input.Username) > 64 || strings.TrimSpace(input.Name) == "" || len(input.Name) > 256 {
+	var username, displayName string
+	valid := input.ManagerID == "" || validTelegramBotID(input.ManagerID)
+	if len(input.DisplayName) != 0 {
+		// New clients supply only the display name. Keep the explicit
+		// username/name pair for existing clients, rejecting mixed formats.
+		var name *string
+		valid = valid && len(input.Username) == 0 && len(input.Name) == 0 && json.Unmarshal(input.DisplayName, &name) == nil && name != nil
+		if name != nil {
+			displayName = *name
+		}
+	} else {
+		var user, name *string
+		valid = valid && json.Unmarshal(input.Username, &user) == nil && user != nil && json.Unmarshal(input.Name, &name) == nil && name != nil
+		if user != nil && name != nil {
+			username, displayName = *user, *name
+		}
+		valid = valid && strings.TrimSpace(username) != "" && len(username) <= 64
+	}
+	if !valid || strings.TrimSpace(displayName) == "" || len(displayName) > 256 {
 		telegramBotError(w, gateway.ErrTelegramBotInvalid)
 		return
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
 	defer cancel()
-	intent, err := s.telegramBots.CreateManagedTelegramBot(ctx, input.ManagerID, strings.TrimSpace(input.Username), strings.TrimSpace(input.Name))
+	intent, err := s.telegramBots.CreateManagedTelegramBot(ctx, input.ManagerID, strings.TrimSpace(username), strings.TrimSpace(displayName))
 	if err != nil {
 		telegramBotError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusCreated, intent)
+}
+
+func (s *Server) telegramBotProfilePhotoReset(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", "POST")
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if _, ok := s.requireFreshAuth(w, r); !ok {
+		return
+	}
+	if !s.requireTelegramBots(w) {
+		return
+	}
+	id := r.PathValue("id")
+	if !validTelegramBotID(id) {
+		bad(w)
+		return
+	}
+	var input struct {
+		Confirmed bool `json:"confirmed"`
+	}
+	if !decodeEnrollmentJSON(w, r, &input, false) {
+		return
+	}
+	if !input.Confirmed {
+		bad(w)
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
+	defer cancel()
+	if err := s.telegramBots.ResetTelegramBotProfilePhoto(ctx, id); err != nil {
+		telegramBotError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusNoContent, nil)
 }
 
 func validTelegramBotID(id string) bool {
@@ -254,6 +310,14 @@ func telegramBotError(w http.ResponseWriter, err error) {
 		status, code, message = http.StatusConflict, "telegram_bot_manager_unavailable", "Telegram still reports that the selected bot cannot manage bots after refreshing its profile. Enable Bot Management Mode for that bot in BotFather, then retry."
 	case errors.Is(err, gateway.ErrTelegramBotOwnerChanged):
 		status, code, message = http.StatusConflict, "telegram_bot_owner_changed", "This managed bot's owner changed. Wait for Telegram to verify the configured owner again, or remove it and explicitly reconnect it with its current token."
+	case errors.Is(err, gateway.ErrTelegramBotDisabled):
+		status, code, message = http.StatusConflict, "telegram_bot_disabled", "Enable this bot before resetting its profile photo."
+	case errors.Is(err, gateway.ErrTelegramBotProfileWebhookConflict):
+		status, code, message = http.StatusConflict, "telegram_bot_profile_webhook_conflict", "This bot's webhook no longer belongs to this gateway. Reconnect it here before resetting its profile photo."
+	case errors.Is(err, gateway.ErrTelegramBotUsernameUnverified):
+		status, code, message = http.StatusBadGateway, "telegram_bot_username_unverified", "Could not check Telegram usernames. Retry when Telegram is available."
+	case errors.Is(err, gateway.ErrTelegramBotUsernameUnavailable):
+		status, code, message = http.StatusConflict, "telegram_bot_username_unavailable", "Could not find an unused username within the attempt limit. Try a different display name."
 	}
 	writeJSON(w, status, map[string]string{"code": code, "message": message})
 }

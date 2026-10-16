@@ -23,27 +23,33 @@ import (
 )
 
 type managedBotFake struct {
-	mu                sync.Mutex
-	server            *httptest.Server
-	identities        map[string]TelegramUser
-	refreshed         map[string]TelegramUser
-	webhooks          map[string]string
-	managedTokens     map[int64]string
-	calls             map[string]int
-	secrets           map[string]string
-	drops             map[string]bool
-	failSet           bool
-	failRefresh       bool
-	defaultNames      map[string]string
-	nameUpdates       []string
-	nameErrorCode     int
-	nameRetryAfter    int
-	nameApplyThenFail bool
+	mu                 sync.Mutex
+	server             *httptest.Server
+	identities         map[string]TelegramUser
+	refreshed          map[string]TelegramUser
+	webhooks           map[string]string
+	managedTokens      map[int64]string
+	calls              map[string]int
+	secrets            map[string]string
+	drops              map[string]bool
+	failSet            bool
+	failRefresh        bool
+	defaultNames       map[string]string
+	nameUpdates        []string
+	nameErrorCode      int
+	nameRetryAfter     int
+	nameApplyThenFail  bool
+	profilePhotos      map[string]int
+	photoUploads       map[string]int
+	failPhotoRead      bool
+	photoErrorCode     int
+	photoResultFalse   bool
+	photoApplyThenFail bool
 }
 
 func newManagedBotFake(t *testing.T) *managedBotFake {
 	t.Helper()
-	f := &managedBotFake{identities: map[string]TelegramUser{}, refreshed: map[string]TelegramUser{}, webhooks: map[string]string{}, managedTokens: map[int64]string{}, calls: map[string]int{}, secrets: map[string]string{}, drops: map[string]bool{}, defaultNames: map[string]string{}}
+	f := &managedBotFake{identities: map[string]TelegramUser{}, refreshed: map[string]TelegramUser{}, webhooks: map[string]string{}, managedTokens: map[int64]string{}, calls: map[string]int{}, secrets: map[string]string{}, drops: map[string]bool{}, defaultNames: map[string]string{}, profilePhotos: map[string]int{}, photoUploads: map[string]int{}}
 	f.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
 		defer f.mu.Unlock()
@@ -53,6 +59,45 @@ func newManagedBotFake(t *testing.T) *managedBotFake {
 			return
 		}
 		f.calls[method]++
+		if method == "setMyProfilePhoto" {
+			if err := r.ParseMultipartForm(1 << 20); err != nil {
+				http.Error(w, "invalid multipart photo", 400)
+				return
+			}
+			defer r.MultipartForm.RemoveAll()
+			var input struct{ Type, Photo string }
+			if json.Unmarshal([]byte(r.FormValue("photo")), &input) != nil || input.Type != "static" || input.Photo != "attach://profile_photo" {
+				http.Error(w, "invalid photo attachment", 400)
+				return
+			}
+			file, header, err := r.FormFile("profile_photo")
+			if err != nil {
+				http.Error(w, "missing photo file", 400)
+				return
+			}
+			defer file.Close()
+			photo, err := io.ReadAll(file)
+			if err != nil || header.Header.Get("Content-Type") != "image/jpeg" || !bytes.Equal(photo, defaultTelegramBotProfilePhoto) {
+				http.Error(w, "incorrect photo file", 400)
+				return
+			}
+			if f.photoErrorCode != 0 {
+				_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error_code": f.photoErrorCode, "description": "photo failed " + token})
+				return
+			}
+			if f.photoResultFalse {
+				_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "result": false})
+				return
+			}
+			f.photoUploads[token]++
+			f.profilePhotos[token] = 1
+			if f.photoApplyThenFail {
+				_, _ = w.Write([]byte(`{"ok":`))
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "result": true})
+			return
+		}
 		var input struct {
 			URL     string   `json:"url"`
 			Secret  string   `json:"secret_token"`
@@ -61,10 +106,18 @@ func newManagedBotFake(t *testing.T) *managedBotFake {
 			Allowed []string `json:"allowed_updates"`
 			Drop    bool     `json:"drop_pending_updates"`
 			Name    string   `json:"name"`
+			Limit   int      `json:"limit"`
 		}
 		_ = json.NewDecoder(r.Body).Decode(&input)
 		var result any = true
 		switch method {
+		case "getUserProfilePhotos":
+			identity, exists := f.identities[token]
+			if f.failPhotoRead || !exists || input.UserID != identity.ID || input.Limit != 1 {
+				_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error_code": 500, "description": "photo lookup failed " + token})
+				return
+			}
+			result = map[string]any{"total_count": f.profilePhotos[token], "photos": [][]TelegramPhoto{}}
 		case "getMyName":
 			result = map[string]string{"name": f.defaultNames[token]}
 		case "setMyName":

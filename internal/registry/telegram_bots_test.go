@@ -3,6 +3,8 @@ package registry
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -217,4 +219,133 @@ func TestTelegramManagedBotCreationClaimRechecksExpiryAtomically(t *testing.T) {
 	if !found {
 		t.Fatal("claim did not atomically bind the intent to its bot")
 	}
+}
+
+func TestTelegramManagedBotUsernameReservationIncludesAllLocalState(t *testing.T) {
+	store := integrationStore(t)
+	ctx := t.Context()
+	now := time.Now().UTC()
+	intent := func(id, username, status string, expires time.Time) TelegramManagedBotIntentRecord {
+		return TelegramManagedBotIntentRecord{ID: id, ManagerID: "another-manager", OwnerID: 10, RequestedUsername: username, DisplayName: "Test", LaunchURL: "https://t.me/", Status: status, CreatedAt: now, ExpiresAt: expires}
+	}
+	for _, record := range []TelegramManagedBotIntentRecord{
+		intent("first", "First_bot", "pending", now.Add(time.Hour)),
+		intent("activating", "Activating_bot", "activating", now.Add(-time.Hour)),
+		intent("expired", "Expired_bot", "pending", now.Add(-time.Hour)),
+		intent("failed", "Failed_bot", "failed", now.Add(time.Hour)),
+	} {
+		if err := store.SaveTelegramManagedBotIntent(ctx, record); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// The first request falls outside the admin's 100-row history window.
+	for i := 0; i < 101; i++ {
+		record := intent(fmt.Sprintf("later-%d", i), fmt.Sprintf("later%d_bot", i), "pending", now.Add(time.Hour))
+		record.CreatedAt = now.Add(time.Minute)
+		if err := store.SaveTelegramManagedBotIntent(ctx, record); err != nil {
+			t.Fatal(err)
+		}
+	}
+	bot := telegramBotRecordForTest("disabled", false)
+	bot.Username = "Connected_bot"
+	if err := store.SaveTelegramBotRecord(ctx, bot); err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		username string
+		reserved bool
+	}{{"FIRST_BOT", true}, {"activating_BOT", true}, {"connected_BOT", true}, {"Expired_bot", false}, {"Failed_bot", false}, {"Missing_bot", false}} {
+		reserved, err := store.TelegramManagedBotUsernameReserved(ctx, test.username)
+		if err != nil || reserved != test.reserved {
+			t.Errorf("reserved(%q) = %v, %v; want %v", test.username, reserved, err, test.reserved)
+		}
+	}
+	for _, username := range []string{"first_BOT", "activating_bot", "CONNECTED_BOT"} {
+		record := intent("duplicate-"+username, username, "pending", now.Add(time.Hour))
+		record.ManagerID = "different-manager"
+		if err := store.SaveTelegramManagedBotIntent(ctx, record); !errors.Is(err, ErrTelegramBotUsernameReserved) {
+			t.Errorf("duplicate reservation %q: %v", username, err)
+		}
+	}
+}
+
+func TestTelegramManagedBotUsernameReservationSerializesSeparateStores(t *testing.T) {
+	store := integrationStore(t)
+	other, err := Open(t.Context(), store.pool.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(other.Close)
+	start := make(chan struct{})
+	results := make(chan error, 2)
+	var group sync.WaitGroup
+	for i, candidate := range []*Store{store, other} {
+		group.Add(1)
+		go func() {
+			defer group.Done()
+			<-start
+			now := time.Now().UTC()
+			results <- candidate.SaveTelegramManagedBotIntent(t.Context(), TelegramManagedBotIntentRecord{ID: fmt.Sprintf("request-%d", i), ManagerID: fmt.Sprintf("manager-%d", i), OwnerID: 10, RequestedUsername: "Same_bot", DisplayName: "Same", LaunchURL: "https://t.me/", Status: "pending", CreatedAt: now, ExpiresAt: now.Add(time.Hour)})
+		}()
+	}
+	close(start)
+	group.Wait()
+	close(results)
+	saved, duplicate := 0, 0
+	for err := range results {
+		if err == nil {
+			saved++
+		} else if errors.Is(err, ErrTelegramBotUsernameReserved) {
+			duplicate++
+		} else {
+			t.Fatalf("unexpected reservation error: %v", err)
+		}
+	}
+	if saved != 1 || duplicate != 1 {
+		t.Fatalf("reservation race: saved=%d duplicate=%d", saved, duplicate)
+	}
+}
+
+func TestTelegramManagedBotActivationPendingScopesVerifiedCreation(t *testing.T) {
+	store := integrationStore(t)
+	ctx := t.Context()
+	now := time.Now().UTC()
+	intent := TelegramManagedBotIntentRecord{ID: "creation", ManagerID: "manager", OwnerID: 10, RequestedUsername: "TestBot", DisplayName: "Test", LaunchURL: "https://t.me/", Status: "pending", CreatedAt: now, ExpiresAt: now.Add(time.Hour)}
+	if err := store.SaveTelegramManagedBotIntent(ctx, intent); err != nil {
+		t.Fatal(err)
+	}
+	bot := telegramBotRecordForTest("telegram:222", false)
+	bot.ManagedBy = "manager"
+	if err := store.ClaimTelegramManagedBotCreation(ctx, bot, intent.ID); err != nil {
+		t.Fatal(err)
+	}
+	assertPending := func(manager string, owner, identity int64, want bool) {
+		t.Helper()
+		pending, err := store.TelegramManagedBotActivationPending(ctx, manager, owner, identity)
+		if err != nil || pending != want {
+			t.Fatalf("activation(%q,%d,%d) = %v, %v; want %v", manager, owner, identity, pending, err, want)
+		}
+	}
+	assertPending("manager", 10, 222, false)
+	bot.Enabled = true
+	if err := store.SaveTelegramBotRecord(ctx, bot); err != nil {
+		t.Fatal(err)
+	}
+	assertPending("manager", 10, 222, true)
+	assertPending("another-manager", 10, 222, false)
+	assertPending("manager", 99, 222, false)
+	assertPending("manager", 10, 333, false)
+	bot.OwnerID = 99
+	if err := store.SaveTelegramBotRecord(ctx, bot); err != nil {
+		t.Fatal(err)
+	}
+	assertPending("manager", 10, 222, false)
+	bot.OwnerID = 10
+	if err := store.SaveTelegramBotRecord(ctx, bot); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.CompleteTelegramManagedBotUpdate(ctx, "manager", 150, bot.ID); err != nil {
+		t.Fatal(err)
+	}
+	assertPending("manager", 10, 222, false)
 }

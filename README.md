@@ -344,6 +344,15 @@ The token expires in 15 minutes. The console manages worker enrollment,
 credential rotation, and revocation. It lists user sessions with prompt counts,
 token usage, activity and last messages, and shows the connected Telegram bot's
 identity and webhook status. Subagent sessions are excluded, as in `/tgsessions`.
+All console sections are collapsible and start closed.
+Each session and bot has a separate collapsed entry; bot headers keep their
+enable/disable and deletion controls visible. Managed-bot creation asks for a
+display name, generates a lowercase `_bot` username, and checks public Telegram
+profiles and local requests, adding a number when needed. Telegram confirms
+final availability when you create the bot.
+New managed bots receive the purple Gateway icon as their default profile photo;
+an existing photo is preserved. Expand a bot and use **Reset profile photo >_**
+to apply the icon to an existing bot after confirmation.
 Each Telegram bot can optionally inherit the session name selected in your
 private chat, displaying **Original name · Session name**. Disconnection or
 turning the option off restores its original name. The bot-removal dialog also

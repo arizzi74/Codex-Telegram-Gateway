@@ -27,7 +27,25 @@ type TelegramManagedBotIntentRecord struct {
 	CreatedAt, ExpiresAt                                     time.Time
 }
 
-var ErrTelegramBotRecordNotFound = errors.New("registry: Telegram bot record not found")
+var (
+	ErrTelegramBotRecordNotFound   = errors.New("registry: Telegram bot record not found")
+	ErrTelegramBotUsernameReserved = errors.New("registry: Telegram bot username is already reserved")
+)
+
+const telegramManagedBotUsernameReservedSQL = `SELECT EXISTS(
+    SELECT 1 FROM telegram_bots WHERE username=$1 COLLATE NOCASE
+    UNION ALL
+    SELECT 1 FROM telegram_managed_bot_intents WHERE requested_username=$1 COLLATE NOCASE
+      AND (status='activating' OR (status='pending' AND expires_at>$2)))`
+
+// TelegramManagedBotUsernameReserved checks all connected bots and active
+// requests, across managers. It deliberately does not use the bounded list
+// returned to the admin UI or claim availability outside this gateway.
+func (s *Store) TelegramManagedBotUsernameReserved(ctx context.Context, username string) (bool, error) {
+	var reserved bool
+	err := s.pool.QueryRow(ctx, telegramManagedBotUsernameReservedSQL, username, time.Now().UTC()).Scan(&reserved)
+	return reserved, err
+}
 
 const saveTelegramBotSQL = `INSERT INTO telegram_bots(bot_id,telegram_id,owner_id,username,display_name,legacy,enabled,can_manage_bots,managed_by,encrypted_credentials,last_error,created_at,updated_at)
         VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
@@ -179,6 +197,17 @@ func (s *Store) SaveTelegramManagedBotIntent(ctx context.Context, in TelegramMan
 	if _, err = tx.Exec(ctx, `UPDATE telegram_managed_bot_intents SET status='expired' WHERE status='pending' AND expires_at<=$1`, time.Now().UTC()); err != nil {
 		return err
 	}
+	if in.Status == "pending" {
+		// SQLite IMMEDIATE transactions serialize this check and insert, even
+		// when separate gateway instances use different manager bots.
+		var reserved bool
+		if err = tx.QueryRow(ctx, telegramManagedBotUsernameReservedSQL, in.RequestedUsername, time.Now().UTC()).Scan(&reserved); err != nil {
+			return err
+		}
+		if reserved {
+			return ErrTelegramBotUsernameReserved
+		}
+	}
 	if _, err = tx.Exec(ctx, `INSERT INTO telegram_managed_bot_intents(intent_id,manager_id,owner_id,requested_username,display_name,launch_url,status,bot_id,created_at,expires_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`, in.ID, in.ManagerID, in.OwnerID, in.RequestedUsername, in.DisplayName, in.LaunchURL, in.Status, in.BotID, in.CreatedAt, in.ExpiresAt); err != nil {
 		return err
 	}
@@ -212,6 +241,18 @@ func (s *Store) PendingTelegramManagedBotIntent(ctx context.Context, manager str
 		err = ErrTelegramBotRecordNotFound
 	}
 	return in, err
+}
+
+// TelegramManagedBotActivationPending identifies a claimed creation by verified
+// numeric bot identity, manager and owner. Completed creations and disabled bots
+// cannot trigger default profile changes on later token/ownership updates.
+func (s *Store) TelegramManagedBotActivationPending(ctx context.Context, manager string, owner, telegramID int64) (bool, error) {
+	var pending bool
+	err := s.pool.QueryRow(ctx, `SELECT EXISTS(
+        SELECT 1 FROM telegram_managed_bot_intents intent JOIN telegram_bots bot ON bot.bot_id=intent.bot_id
+        WHERE intent.status='activating' AND intent.manager_id=$1 AND intent.owner_id=$2
+          AND bot.managed_by=$1 AND bot.owner_id=$2 AND bot.telegram_id=$3 AND bot.enabled=1 AND bot.legacy=0)`, manager, owner, telegramID).Scan(&pending)
+	return pending, err
 }
 
 func (s *Store) TelegramManagedBotUpdateSeen(ctx context.Context, manager string, update int64) (bool, error) {
