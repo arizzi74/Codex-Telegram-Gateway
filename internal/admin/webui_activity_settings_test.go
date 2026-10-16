@@ -58,7 +58,7 @@ func TestWebUIActivitySettingsBroadcastAndV1Compatibility(t *testing.T) {
 		version int
 	}
 	viewers := make([]viewer, 0, 3)
-	for _, version := range []int{2, 2, 1} {
+	for _, version := range []int{3, 2, 1} {
 		conn, _, err := websocket.Dial(ctx, "wss"+strings.TrimPrefix(passkeyTestOrigin, "https")+"/tgw/api/v1/webui/activity?v="+strconv.Itoa(version), &websocket.DialOptions{HTTPClient: client, HTTPHeader: http.Header{"Origin": []string{passkeyTestOrigin}, "Cookie": []string{adminCookie + "=" + token}}})
 		if err != nil {
 			t.Fatal(err)

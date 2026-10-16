@@ -41,7 +41,7 @@ func TestWebUIActivityRequiresPasskeyAndExactOrigin(t *testing.T) {
 			t.Fatalf("activity guard: status=%d want=%d", w.Code, tc.code)
 		}
 	}
-	r := httptest.NewRequest("GET", "/tgw/api/v1/webui/activity?v=3", nil)
+	r := httptest.NewRequest("GET", "/tgw/api/v1/webui/activity?v=4", nil)
 	r.Header.Set("Origin", passkeyTestOrigin)
 	r.AddCookie(cookie(adminCookie, token, true))
 	w := httptest.NewRecorder()

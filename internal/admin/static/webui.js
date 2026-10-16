@@ -13,6 +13,7 @@
   const requestedSession = new URL(location.href).searchParams.get('session_id') || '';
   let notificationSessionID = sessionUUID.test(requestedSession) ? requestedSession.toLowerCase() : '';
   const activity = { socket: null, timer: null, generation: 0, revision: -1, sequence: -1, inventoryRevision: '', sessions: new Map(), attempts: 0, watchdog: null, ready: false };
+  const telegramBots = { rows: [], revision: '', activityRevision: '', httpRevision: '', epoch: 0, ready: false, read: null, readAgain: false, pending: null, errorTimer: null };
   const sessionSettings = new Map(), activitySettingsRevisions = new Map();
   let settingsSerial = 0;
   let permissionSettings = null, permissionRevision = 0;
@@ -101,7 +102,114 @@
     steerNoticeTimer = setTimeout(clearSteerNotice, 4000);
     settleBottom();
   }
-  function connection(kind, text) { $('connection').dataset.state = kind; $('connection-text').textContent = text; $('reconnect').textContent = 'Reconnect'; $('reconnect').hidden = !state.selected || !['disconnected', 'error'].includes(kind); }
+  function connection(kind, text) { $('connection').dataset.state = kind; $('connection-text').textContent = text; $('reconnect').textContent = 'Reconnect'; $('reconnect').hidden = !state.selected || !['disconnected', 'error'].includes(kind); renderTelegramBots(); }
+  function telegramBotContextAvailable() {
+    const session = state.selected;
+    return state.authenticated && !authRotationPending && !!session && !session.archived && !session.deleted &&
+      state.sessions.some(row => row.session_id === session.session_id && !row.archived && !row.deleted);
+  }
+  function telegramBotStatus(text = '') {
+    clearTimeout(telegramBots.errorTimer); telegramBots.errorTimer = null;
+    $('telegram-bot-status').textContent = text; $('telegram-bot-status').hidden = !text;
+    if (text) telegramBots.errorTimer = setTimeout(() => telegramBotStatus(), 6000);
+  }
+  function renderTelegramBots() {
+    const select = $('telegram-bot');
+    const rows = state.authenticated ? telegramBots.rows : [];
+    if (select.options.length !== rows.length + 1 || rows.some((row, index) => select.options[index + 1]?.value !== row.id || select.options[index + 1]?.textContent !== row.display_name)) {
+      const none = document.createElement('option'); none.value = ''; none.textContent = '<no bot>';
+      select.replaceChildren(none, ...rows.map(row => { const option = document.createElement('option'); option.value = row.id; option.textContent = row.display_name; return option; }));
+    }
+    const sessionID = state.selected?.session_id;
+    // Legacy duplicate bindings are displayed deterministically. Rendering
+    // never changes them; an explicit choice performs the exclusive update.
+    const assigned = rows.filter(row => row.session_id === sessionID).sort((a, b) => a.id.localeCompare(b.id))[0]?.id || '';
+    const pending = telegramBots.pending;
+    select.value = pending && pending.sessionID === sessionID && pending.epoch === telegramBots.epoch ? pending.botID : assigned;
+    select.title = select.selectedOptions[0]?.textContent || '<no bot>';
+    select.disabled = !telegramBotContextAvailable() || !telegramBots.ready || !!pending;
+    select.setAttribute('aria-busy', String(!!pending));
+  }
+  function validTelegramBots(rows, revision) {
+    return typeof revision === 'string' && Array.isArray(rows) && rows.every(row => row && typeof row.id === 'string' && row.id.length > 0 &&
+      typeof row.display_name === 'string' && typeof row.session_id === 'string') && new Set(rows.map(row => row.id)).size === rows.length;
+  }
+  function applyTelegramBots(rows, revision, source = 'http') {
+    if (!validTelegramBots(rows, revision)) return false;
+    if (source === 'activity') {
+      telegramBots.activityRevision = revision;
+      if (telegramBots.httpRevision && telegramBots.httpRevision !== revision) {
+        // Opaque revisions cannot order HTTP against the activity stream. Keep
+        // a confirmed HTTP result until the stream catches up or a fresh read
+        // confirms this different revision as the current registry state.
+        telegramBots.epoch++; refreshTelegramBots(); return true;
+      }
+      telegramBots.httpRevision = '';
+    } else telegramBots.httpRevision = telegramBots.activityRevision === revision ? '' : revision;
+    telegramBots.rows = rows.map(row => ({ id: row.id, display_name: row.display_name, session_id: row.session_id }));
+    telegramBots.revision = revision; telegramBots.ready = true; telegramBots.epoch++;
+    renderTelegramBots(); return true;
+  }
+  function resetTelegramBots() {
+    telegramBots.read?.controller.abort(); telegramBots.pending?.controller.abort();
+    telegramBots.read = null; telegramBots.readAgain = false; telegramBots.pending = null; telegramBots.rows = []; telegramBots.revision = ''; telegramBots.activityRevision = ''; telegramBots.httpRevision = ''; telegramBots.ready = false; telegramBots.epoch++;
+    telegramBotStatus(); renderTelegramBots();
+  }
+  async function refreshTelegramBots() {
+    if (!state.authenticated || authRotationPending) return;
+    if (telegramBots.read) { telegramBots.readAgain = true; return; }
+    telegramBots.readAgain = false;
+    const operation = { controller: new AbortController(), authGeneration: state.authGeneration, epoch: telegramBots.epoch };
+    telegramBots.read = operation;
+    const timeout = setTimeout(() => operation.controller.abort(), 15000);
+    try {
+      const data = await fetchJSON(api + '/telegram-bots', operation.controller.signal);
+      if (telegramBots.read !== operation || operation.authGeneration !== state.authGeneration || !state.authenticated || operation.epoch !== telegramBots.epoch) return;
+      if (!applyTelegramBots(data.bots, data.revision)) throw new Error('Invalid bot inventory');
+    } catch (_) {
+      if (telegramBots.read === operation && operation.authGeneration === state.authGeneration && state.authenticated && !telegramBots.ready) telegramBotStatus('Telegram bots unavailable.');
+    } finally {
+      clearTimeout(timeout);
+      if (telegramBots.read === operation) {
+        telegramBots.read = null;
+        if (telegramBots.readAgain) queueMicrotask(refreshTelegramBots);
+      }
+    }
+  }
+  async function changeTelegramBot() {
+    const botID = $('telegram-bot').value;
+    if (!telegramBotContextAvailable() || !telegramBots.ready || telegramBots.pending || (botID && !telegramBots.rows.some(row => row.id === botID))) { renderTelegramBots(); return; }
+    const operation = { sessionID: state.selected.session_id, botID, authGeneration: state.authGeneration, epoch: telegramBots.epoch, controller: new AbortController() };
+    telegramBots.pending = operation; telegramBotStatus(); renderTelegramBots();
+    const timeout = setTimeout(() => operation.controller.abort(), 15000);
+    const current = () => telegramBots.pending === operation && operation.authGeneration === state.authGeneration && state.authenticated;
+    let failed = false, reconcile = false;
+    try {
+      const response = await fetch(api + '/telegram-bots', { method: 'POST', credentials: 'same-origin', cache: 'no-store', signal: operation.controller.signal,
+        headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': window.CodexSessionAuth.cookie('__Host-telegramgw-csrf') }, body: JSON.stringify({ session_id: operation.sessionID, bot_id: botID }) });
+      if (!current()) return;
+      if (response.status === 401) { expire(); return; }
+      if (!response.ok) throw new Error('Assignment failed');
+      const data = await response.json();
+      if (!current()) return;
+      // A sequenced live update received during this request is newer evidence
+      // than an HTTP response that may have been delayed in transit.
+      if (operation.epoch === telegramBots.epoch) {
+        if (!applyTelegramBots(data.bots, data.revision)) throw new Error('Invalid bot inventory');
+      } else reconcile = true;
+    } catch (_) {
+      if (!current()) return;
+      failed = true; reconcile = true;
+    } finally {
+      clearTimeout(timeout);
+      if (current()) {
+        telegramBots.pending = null; renderTelegramBots();
+        if (failed && state.selected?.session_id === operation.sessionID) telegramBotStatus('Could not update the Telegram bot. Try again.');
+        if (reconcile) refreshTelegramBots();
+      }
+    }
+  }
+  $('telegram-bot').addEventListener('change', changeTelegramBot);
   function showSessions(open) {
     const mobile = matchMedia('(max-width:650px)').matches;
     if (mobile) blurEditable();
@@ -253,7 +361,7 @@
     if (!state.authenticated || document.hidden || activity.socket) return;
     clearTimeout(activity.timer); activity.timer = null;
     const generation = ++activity.generation;
-    const url = new URL(api + '/activity', location.href); url.protocol = location.protocol === 'https:' ? 'wss:' : 'ws:'; url.searchParams.set('v', '2');
+    const url = new URL(api + '/activity', location.href); url.protocol = location.protocol === 'https:' ? 'wss:' : 'ws:'; url.searchParams.set('v', '3');
     const socket = new WebSocket(url); activity.socket = socket; activity.sequence = -1; activity.revision = -1; activity.ready = false;
     activityStatus(activity.attempts ? 'reconnecting' : 'connecting', activity.attempts ? 'Reconnecting live updates…' : 'Connecting live updates…');
     const recover = async code => {
@@ -282,7 +390,7 @@
       if (activity.generation !== generation || !state.authenticated || activity.socket !== socket) return;
       let message; try { message = JSON.parse(event.data); } catch (_) { recover(0); return; }
       if (message.type === 'error') return;
-      if (message.version !== 2 || !Number.isSafeInteger(message.sequence) || message.sequence < 0) { recover(0); return; }
+      if (message.version !== 3 || !Number.isSafeInteger(message.sequence) || message.sequence < 0) { recover(0); return; }
       if (message.type === 'heartbeat') {
         if (!activity.ready || message.sequence !== activity.sequence) { recover(0); return; }
         watch(45000); return;
@@ -293,6 +401,8 @@
       if (message.type === 'activity_snapshot') {
         if (!Array.isArray(message.sessions) || !message.sessions.every(validRow) || new Set(message.sessions.map(row => row.session_id)).size !== message.sessions.length) { recover(0); return; }
         if (activity.ready && message.sequence <= activity.sequence) return;
+        if (!validTelegramBots(message.telegram_bots, message.telegram_bots_revision)) { recover(0); return; }
+        applyTelegramBots(message.telegram_bots, message.telegram_bots_revision, 'activity');
         activity.sessions = new Map(message.sessions.map(row => [row.session_id, row]));
         for (const row of message.sessions) applyActivitySettings(row);
         activity.ready = true;
@@ -302,8 +412,11 @@
       } else if (message.type === 'activity_event') {
         if (!activity.ready) { recover(0); return; }
         if (message.sequence <= activity.sequence) return;
-        if (message.sequence !== activity.sequence + 1 || !['turn_started', 'turn_ended', 'question_requested', 'question_resolved', 'session_changed', 'session_removed', 'session_settings_changed'].includes(message.event)) { recover(0); return; }
-        if (message.event === 'session_removed') {
+        if (message.sequence !== activity.sequence + 1 || !['turn_started', 'turn_ended', 'question_requested', 'question_resolved', 'session_changed', 'session_removed', 'session_settings_changed', 'telegram_bots_changed'].includes(message.event)) { recover(0); return; }
+        if (message.event === 'telegram_bots_changed') {
+          if (!validTelegramBots(message.telegram_bots, message.telegram_bots_revision)) { recover(0); return; }
+          applyTelegramBots(message.telegram_bots, message.telegram_bots_revision, 'activity');
+        } else if (message.event === 'session_removed') {
           if (typeof message.session_id !== 'string' || message.session !== null) { recover(0); return; }
           activity.sessions.delete(message.session_id);
           sessionSettings.delete(message.session_id); activitySettingsRevisions.delete(message.session_id);
@@ -321,6 +434,7 @@
       activity.attempts = 0; watch(45000);
       activityStatus('live', '● Live updates');
       updateSessionIndicators();
+      renderTelegramBots();
       const nextPending = activity.sessions.get(state.selected?.session_id);
       if (state.connected && !state.loading && (previousPending?.pending_questions !== nextPending?.pending_questions || previousPending?.pending_revision !== nextPending?.pending_revision)) refreshQuestions();
       if (message.event === 'session_removed') renderSessions();
@@ -419,6 +533,7 @@
     $('turn-state').textContent = !state.connected ? 'Disconnected' : state.loading ? 'Loading' : state.turn ? 'Working' : 'Ready';
     $('turn-state').classList.toggle('running', !!state.turn);
     updateSessionIndicators();
+    renderTelegramBots();
     commandUI?.update();
   }
   function renderPermissions() {
@@ -563,6 +678,7 @@
     commandUI?.sessionChanged();
     state.generation++;
     state.authGeneration++;
+    resetTelegramBots();
     resetInventory();
     for (const deletion of sessionDeletions.values()) { clearTimeout(deletion.timer); deletion.controller?.abort(); }
     sessionDeletions.clear(); deleteSessionTarget = null;
@@ -1026,6 +1142,7 @@
       notificationUI?.setAuthenticated(true);
       $('auth').hidden = true;
       renderSessions();
+      renderTelegramBots(); refreshTelegramBots();
       connectActivity();
       commandUI?.update();
       if (!state.selected) { $('empty').hidden = false; connection('connected', 'Gateway connected · choose a session'); }
@@ -1051,6 +1168,7 @@
   }
   function selectSession(session) {
     showSessions(false);
+    telegramBotStatus();
     if (sessionUUID.test(session.session_id)) notificationLocation(session.session_id);
     if (state.selected?.session_id === session.session_id && state.connected) return;
     window.CodexDiagrams?.clear();
@@ -1856,6 +1974,7 @@
     // the runtime does not publish a quota event. Refresh once, without ever
     // retrying the account mutation or delaying its visible result.
     if (name === 'usage' && /^confirm\s/.test(args) && !result.error) refreshRateLimits();
+    if (name === 'setbotname' && !result.error) refreshTelegramBots();
     if (name === 'goal' && !result.error) refreshGoal();
     if (result.turn_id) { state.turn = result.turn_id; updateControls(); }
     if (result.session && ['new', 'fork'].includes(name)) {
@@ -2158,6 +2277,7 @@
       captureAuthPosition(); saveDraft();
       authRotationPending = true;
       state.authGeneration++; state.generation++; resetInventory();
+      resetTelegramBots();
       pauseSessionCreationRequests();
       closeSocket(); closeActivity(); disableQuestions();
       connection('reconnecting', 'Renewing sign-in… Your running work continues.'); updateControls();
@@ -2171,6 +2291,7 @@
       draftRecovery?.identityChanged();
       captureAuthPosition();
       state.authGeneration++; state.generation++;
+      resetTelegramBots();
       pauseSessionCreationRequests();
       resetInventory();
       closeSocket(); closeActivity();

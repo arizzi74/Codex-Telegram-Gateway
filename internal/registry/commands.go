@@ -243,7 +243,7 @@ func (s *Store) AcceptTelegram(ctx context.Context, in IncomingUpdate) (AcceptRe
 	if err := tx.Commit(ctx); err != nil {
 		return AcceptResult{}, fmt.Errorf("registry: commit Telegram accept: %w", err)
 	}
-	if result.ApprovalID != "" || result.CommandID != "" {
+	if result.ApprovalID != "" || result.CommandID != "" || result.View == "selected" || result.View == "disconnected" {
 		s.notifySessionActivity()
 	}
 	if result.View == "voice_cancelled" || (strings.EqualFold(in.Action, "interrupt") && result.CommandID != "") {
@@ -956,6 +956,9 @@ func createTelegramCommand(ctx context.Context, tx *dbTx, in IncomingUpdate, tar
 }
 
 func setBinding(ctx context.Context, tx *dbTx, in IncomingUpdate, sessionID uuid.UUID) error {
+	if err := replacePrivateTelegramSessionBot(ctx, tx, in, sessionID); err != nil {
+		return err
+	}
 	if err := bumpSelectionRevision(ctx, tx, in); err != nil {
 		return err
 	}

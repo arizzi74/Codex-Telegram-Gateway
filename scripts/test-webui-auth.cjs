@@ -41,6 +41,7 @@ const selected = { session_id: sessionID, codex_thread_id: 'thread', worker_name
       return json(drafts.get(id) || {}, drafts.has(id) ? 200 : 404);
     }
     if (url.pathname === '/tgw/api/v1/webui/sessions') return json({ sessions: [selected] }, auth ? 200 : 401);
+    if (url.pathname === '/tgw/api/v1/webui/telegram-bots') return json({ revision: 'fixture-bots', bots: [] });
     if (url.pathname === '/tgw/api/v1/webui/push/config') return json({ supported: false, subscribed: false });
     const filename = url.pathname.endsWith('/diagram-renderer') ? 'webui-mermaid-frame.html' : url.pathname.includes('/static/') ? path.basename(url.pathname) : 'webui.html';
     if (!fs.existsSync(path.join(assets, filename))) return route.fulfill({ status: 404, body: '' });
@@ -62,9 +63,9 @@ const selected = { session_id: sessionID, codex_thread_id: 'thread', worker_name
       constructor(url) {
         this.activity = new URL(url).pathname.endsWith('/activity'); this.readyState = 0; this.sequence = 0;
         window.authSockets.push(this);
-        setTimeout(() => { if (this.readyState === 3) return; this.readyState = 1; this.originalClose = this.onclose; this.emit(this.activity ? { type: 'activity_snapshot', version: 2, sequence: 0, revision: 1, sessions: [{ session_id: sessionID, state: 'idle', worker_connectivity: 'connected', pending_questions: 0 }] } : { type: 'ready' }); if (this.activity) this.heartbeat = setInterval(() => this.emit({ type: 'heartbeat', version: 2, sequence: 0 }), 15000); }, 5);
+        setTimeout(() => { if (this.readyState === 3) return; this.readyState = 1; this.originalClose = this.onclose; this.emit(this.activity ? { type: 'activity_snapshot', version: 3, sequence: 0, revision: 1, sessions: [{ session_id: sessionID, state: 'idle', worker_connectivity: 'connected', pending_questions: 0 }] } : { type: 'ready' }); if (this.activity) this.heartbeat = setInterval(() => this.emit({ type: 'heartbeat', version: 3, sequence: 0 }), 15000); }, 5);
       }
-      emit(value) { if (this.readyState === 1) this.onmessage?.({ data: JSON.stringify(value) }); }
+      emit(value) { if (value.type === 'activity_snapshot') value = { telegram_bots: [], telegram_bots_revision: 'fixture-bots', ...value }; if (this.readyState === 1) this.onmessage?.({ data: JSON.stringify(value) }); }
       close(code = 1000) { this.readyState = 3; clearInterval(this.heartbeat); this.onclose?.({ code }); }
       send(raw) {
         const frame = JSON.parse(raw); window.authFrames.push(frame);

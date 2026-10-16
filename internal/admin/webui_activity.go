@@ -27,7 +27,7 @@ func (s *Server) webuiActivity(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	version := r.URL.Query().Get("v")
-	if version != "" && version != "1" && version != "2" {
+	if version != "" && version != "1" && version != "2" && version != "3" {
 		http.Error(w, "Unsupported activity protocol version.", http.StatusBadRequest)
 		return
 	}
@@ -35,6 +35,8 @@ func (s *Server) webuiActivity(w http.ResponseWriter, r *http.Request) {
 	wireVersion := 1
 	if version == "2" {
 		wireVersion = 2
+	} else if version == "3" {
+		wireVersion = 3
 	}
 	changes, unsubscribe, err := s.store.SubscribeSessionActivity()
 	if err != nil {
@@ -71,6 +73,12 @@ func (s *Server) webuiActivity(w http.ResponseWriter, r *http.Request) {
 	}
 	sequence, revision := uint64(0), uint64(0)
 	inventoryRevision := ""
+	telegramBotsRevision := ""
+	readTelegramBots := func() (registry.WebUITelegramBotSnapshot, error) {
+		readCtx, stop := context.WithTimeout(ctx, 5*time.Second)
+		defer stop()
+		return s.store.WebUITelegramBots(readCtx)
+	}
 	previous := make(map[string]registry.SessionActivity)
 	snapshot := func(activity registry.SessionActivitySnapshot) bool {
 		if !authenticated() {
@@ -93,8 +101,20 @@ func (s *Server) webuiActivity(w http.ResponseWriter, r *http.Request) {
 		if legacy {
 			return write(map[string]any{"type": "activity", "revision": revision, "sessions": json.RawMessage(raw)})
 		}
-		return write(map[string]any{"type": "activity_snapshot", "version": wireVersion, "sequence": sequence, "revision": revision,
-			"inventory_revision": inventoryRevision, "sessions": json.RawMessage(raw)})
+		frame := map[string]any{"type": "activity_snapshot", "version": wireVersion, "sequence": sequence, "revision": revision,
+			"inventory_revision": inventoryRevision, "sessions": json.RawMessage(raw)}
+		if wireVersion >= 3 {
+			bots, err := readTelegramBots()
+			if err != nil {
+				return false
+			}
+			telegramBotsRevision = bots.Revision
+			frame["telegram_bots"], frame["telegram_bots_revision"] = bots.Bots, bots.Revision
+			if !authenticated() {
+				return false
+			}
+		}
+		return write(frame)
 	}
 	if !authenticated() {
 		return
@@ -131,6 +151,27 @@ func (s *Server) webuiActivity(w http.ResponseWriter, r *http.Request) {
 		}
 		return write(map[string]any{"type": "activity_event", "version": wireVersion, "sequence": sequence, "revision": event.Revision,
 			"event": name, "session_id": event.SessionID, "session": json.RawMessage(raw)})
+	}
+	telegramBotUpdates := func() bool {
+		if wireVersion < 3 {
+			return true
+		}
+		bots, err := readTelegramBots()
+		if err != nil {
+			return false
+		}
+		if bots.Revision == telegramBotsRevision {
+			return true
+		}
+		// Bot routing is global metadata, so this event intentionally has no
+		// session/session_id. Use the same sequence as session activity edges.
+		if !authenticated() {
+			return false
+		}
+		sequence++
+		telegramBotsRevision = bots.Revision
+		return write(map[string]any{"type": "activity_event", "version": wireVersion, "sequence": sequence, "revision": revision,
+			"event": "telegram_bots_changed", "telegram_bots": bots.Bots, "telegram_bots_revision": bots.Revision})
 	}
 	updates := func() bool {
 		if !authenticated() {
@@ -185,7 +226,7 @@ func (s *Server) webuiActivity(w http.ResponseWriter, r *http.Request) {
 			return snapshot(update.Snapshot)
 		}
 		revision = update.Snapshot.Revision
-		return true
+		return telegramBotUpdates()
 	}
 	ticker := time.NewTicker(webUIActivityAuthInterval)
 	defer ticker.Stop()
@@ -202,6 +243,11 @@ func (s *Server) webuiActivity(w http.ResponseWriter, r *http.Request) {
 			}
 		case <-ticker.C:
 			if !authenticated() {
+				return
+			}
+			// Also refresh metadata at heartbeat boundaries: another gateway
+			// process may have changed routing without this process's wakeup.
+			if wireVersion >= 3 && (!telegramBotUpdates() || !authenticated()) {
 				return
 			}
 			if legacy {

@@ -60,6 +60,7 @@ func (s *Store) ApplyTelegramChatAllowlist(ctx context.Context, bot string, chat
 		return err
 	}
 	s.notifyTelegramVoiceJobs()
+	s.notifySessionActivity()
 	return nil
 }
 

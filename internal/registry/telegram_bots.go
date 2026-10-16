@@ -78,6 +78,16 @@ func (s *Store) SaveTelegramBotRecord(ctx context.Context, b TelegramBotRecord) 
 		return err
 	}
 	defer tx.Rollback(ctx)
+	var previousName string
+	var previousOwner int64
+	var previousEnabled, previousRetired bool
+	err = tx.QueryRow(ctx, `SELECT display_name,owner_id,enabled,
+        EXISTS(SELECT 1 FROM telegram_bot_retirements WHERE bot_id=$1)
+        FROM telegram_bots WHERE bot_id=$1`, b.ID).Scan(&previousName, &previousOwner, &previousEnabled, &previousRetired)
+	changed := errors.Is(err, sql.ErrNoRows) || previousName != b.DisplayName || previousOwner != b.OwnerID || previousEnabled != b.Enabled || (b.Enabled && previousRetired)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
 	if _, err = tx.Exec(ctx, saveTelegramBotSQL, telegramBotRecordArgs(b)...); err != nil {
 		return err
 	}
@@ -86,7 +96,13 @@ func (s *Store) SaveTelegramBotRecord(ctx context.Context, b TelegramBotRecord) 
 			return err
 		}
 	}
-	return tx.Commit(ctx)
+	if err := tx.Commit(ctx); err != nil {
+		return err
+	}
+	if changed {
+		s.notifySessionActivity()
+	}
+	return nil
 }
 
 // ClaimTelegramManagedBotCreation consumes an unexpired request and saves its
@@ -111,7 +127,11 @@ func (s *Store) ClaimTelegramManagedBotCreation(ctx context.Context, b TelegramB
 	if _, err = tx.Exec(ctx, saveTelegramBotSQL, telegramBotRecordArgs(b)...); err != nil {
 		return err
 	}
-	return tx.Commit(ctx)
+	if err := tx.Commit(ctx); err != nil {
+		return err
+	}
+	s.notifySessionActivity()
+	return nil
 }
 
 func (s *Store) DeleteTelegramBotRecord(ctx context.Context, id string) error {
@@ -149,7 +169,11 @@ func (s *Store) DeleteTelegramBotRecord(ctx context.Context, id string) error {
 			return err
 		}
 	}
-	return tx.Commit(ctx)
+	if err := tx.Commit(ctx); err != nil {
+		return err
+	}
+	s.notifySessionActivity()
+	return nil
 }
 
 func (s *Store) TelegramBotRetired(ctx context.Context, id string) (bool, error) {
@@ -275,13 +299,22 @@ func (s *Store) CompleteTelegramManagedBotUpdate(ctx context.Context, manager st
 		return err
 	}
 	defer tx.Rollback(ctx)
+	connected := false
 	if bot != "" {
-		if _, err = tx.Exec(ctx, `UPDATE telegram_managed_bot_intents SET status='connected' WHERE manager_id=$1 AND bot_id=$2 AND status='activating' AND EXISTS(SELECT 1 FROM telegram_bots WHERE bot_id=$2 AND enabled=1)`, manager, bot); err != nil {
+		tag, err := tx.Exec(ctx, `UPDATE telegram_managed_bot_intents SET status='connected' WHERE manager_id=$1 AND bot_id=$2 AND status='activating' AND EXISTS(SELECT 1 FROM telegram_bots WHERE bot_id=$2 AND enabled=1)`, manager, bot)
+		if err != nil {
 			return err
 		}
+		connected = tag.RowsAffected() > 0
 	}
 	if _, err = tx.Exec(ctx, `INSERT INTO telegram_managed_bot_updates(manager_id,update_id,received_at) VALUES($1,$2,$3) ON CONFLICT DO NOTHING`, manager, update, time.Now().UTC()); err != nil {
 		return err
 	}
-	return tx.Commit(ctx)
+	if err := tx.Commit(ctx); err != nil {
+		return err
+	}
+	if connected {
+		s.notifySessionActivity()
+	}
+	return nil
 }

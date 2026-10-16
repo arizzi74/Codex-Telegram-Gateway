@@ -491,9 +491,13 @@ not rewritten.
 ## Session focus and multisession mode
 
 Each bot keeps its own selected session. Use `/tgsessions` separately in each
-bot conversation; selecting or disconnecting a session in one bot leaves the
-others unchanged. Two bots selecting the same session both receive its output.
-Open a newly connected bot and send `/start` before expecting notifications.
+bot conversation. In your private bot conversations, a session has one bot:
+selecting it through another bot disconnects the previous bot from that
+session. Moving a bot to a different session clears its old assignment. The
+Web UI's Telegram bot dropdown shows and changes the same selection, with live
+updates in other open browser views. Group and forum-topic selections remain
+independent. Open a newly connected bot and send `/start` before expecting
+notifications.
 
 By default, turn progress and completion messages follow the selected session.
 Switching from A to B removes A's temporary messages and restores the latest

@@ -138,6 +138,7 @@ itemTimes['timestamp-older-completed'] = { startedAtMs: null, completedAtMs: tim
   let creationBehavior = 'pending';
   await page.route('https://webui.test/**', async route => {
     const url = new URL(route.request().url()); paths.push(url.pathname);
+    if (url.pathname === '/tgw/api/v1/webui/telegram-bots') return route.fulfill({ contentType: 'application/json', body: JSON.stringify({ revision: 'fixture-bots', bots: [] }) });
     if (url.pathname === '/tgw/api/v1/webui/push/config') return route.fulfill({ contentType: 'application/json', body: JSON.stringify({ supported: false, scope: 'all', subscribed: false }) });
     if (url.pathname === '/tgw/api/v1/webui/workspaces') {
       const request = route.request().method() === 'POST' ? route.request().postDataJSON() : Object.fromEntries(url.searchParams);
@@ -258,7 +259,7 @@ itemTimes['timestamp-older-completed'] = { startedAtMs: null, completedAtMs: tim
       const row = { ...window.testActivityRows.find(row => row.session_id === id), session_id: id, model, reasoning_effort: effort, settings_revision: revision || '1:' + (++window.testSettingsRevision) };
       window.testActivityRows = window.testActivityRows.map(current => current.session_id === id ? row : current);
       const socket = window.testActivitySocket;
-      socket.emit({ type: 'activity_event', version: 2, sequence: ++socket.sequence, revision: window.testActivityRevision++, event: 'session_settings_changed', session_id: id, session: row });
+      socket.emit({ type: 'activity_event', version: 3, sequence: ++socket.sequence, revision: window.testActivityRevision++, event: 'session_settings_changed', session_id: id, session: row });
     };
     class FakeSocket {
       static OPEN = 1;
@@ -270,12 +271,12 @@ itemTimes['timestamp-older-completed'] = { startedAtMs: null, completedAtMs: tim
         setTimeout(() => {
           if (this.readyState === 3) return;
           this.readyState = 1; this.onopen?.({});
-          const initial = this.activity ? { type: 'activity_snapshot', version: 2, sequence: this.sequence, revision: window.testActivityRevision++, sessions: window.testActivityRows } : { type: 'ready' };
+          const initial = this.activity ? { type: 'activity_snapshot', version: 3, sequence: this.sequence, revision: window.testActivityRevision++, sessions: window.testActivityRows } : { type: 'ready' };
           if (this.activity && window.testHoldActivitySnapshot) this.heldInitialActivity = initial; else this.emit(initial);
-          if (this.activity) this.heartbeatTimer = setInterval(() => { if (!window.testPauseActivityHeartbeats && this.readyState === 1) this.emit({ type: 'heartbeat', version: 2, sequence: this.sequence }); }, 15000);
+          if (this.activity) this.heartbeatTimer = setInterval(() => { if (!window.testPauseActivityHeartbeats && this.readyState === 1) this.emit({ type: 'heartbeat', version: 3, sequence: this.sequence }); }, 15000);
         }, 5);
       }
-      emit(value) { this.onmessage?.({ data: JSON.stringify(value) }); }
+      emit(value) { if (value.type === 'activity_snapshot') value = { telegram_bots: [], telegram_bots_revision: 'fixture-bots', ...value }; this.onmessage?.({ data: JSON.stringify(value) }); }
       close(code = 1000) { this.readyState = 3; clearInterval(this.heartbeatTimer); this.onclose?.({ code }); }
       drop(code = 1006) { this.close(code); }
       send(raw) {
@@ -394,13 +395,13 @@ itemTimes['timestamp-older-completed'] = { startedAtMs: null, completedAtMs: tim
   const current = async value => page.evaluate(value => window.testSockets.at(-1).emit(value), value);
   const activity = async values => page.evaluate(values => {
     const socket = window.testActivitySocket; window.testActivityRows = values;
-    socket.emit({ type: 'activity_snapshot', version: 2, sequence: ++socket.sequence, revision: window.testActivityRevision++, sessions: values });
+    socket.emit({ type: 'activity_snapshot', version: 3, sequence: ++socket.sequence, revision: window.testActivityRevision++, sessions: values });
   }, values);
   const activityEvent = (event, session) => page.evaluate(({ event, session }) => {
     const socket = window.testActivitySocket; const id = typeof session === 'string' ? session : session.session_id;
     window.testActivityRows = window.testActivityRows.filter(row => row.session_id !== id);
     if (typeof session !== 'string') window.testActivityRows.push(session);
-    socket.emit({ type: 'activity_event', version: 2, sequence: ++socket.sequence, revision: window.testActivityRevision++, event, session_id: id, session: typeof session === 'string' ? null : session });
+    socket.emit({ type: 'activity_event', version: 3, sequence: ++socket.sequence, revision: window.testActivityRevision++, event, session_id: id, session: typeof session === 'string' ? null : session });
   }, { event, session });
   const connected = () => page.waitForSelector('#connection[data-state="connected"]');
   const touchTap = async locator => {
@@ -638,13 +639,13 @@ itemTimes['timestamp-older-completed'] = { startedAtMs: null, completedAtMs: tim
     workers.push({ ID: 'new-empty-worker', Name: 'New enrolled worker', Enabled: true, Connectivity: 'connected', SupportsSessionWorkspaces: true, SupportsWebUISessionCreation: true });
     await page.evaluate(() => {
       const socket = window.testActivitySocket;
-      socket.emit({ type: 'activity_snapshot', version: 2, sequence: ++socket.sequence, revision: window.testActivityRevision++, inventory_revision: 'new-enrollment', sessions: window.testActivityRows });
+      socket.emit({ type: 'activity_snapshot', version: 3, sequence: ++socket.sequence, revision: window.testActivityRevision++, inventory_revision: 'new-enrollment', sessions: window.testActivityRows });
     });
     await page.waitForSelector('.session-group[data-worker-id="new-empty-worker"]');
     const readsAfterWorkerChange = paths.filter(value => value === '/tgw/api/v1/webui/sessions').length;
     await page.evaluate(() => {
       const socket = window.testActivitySocket;
-      socket.emit({ type: 'activity_snapshot', version: 2, sequence: ++socket.sequence, revision: window.testActivityRevision++, inventory_revision: 'new-enrollment', sessions: window.testActivityRows });
+      socket.emit({ type: 'activity_snapshot', version: 3, sequence: ++socket.sequence, revision: window.testActivityRevision++, inventory_revision: 'new-enrollment', sessions: window.testActivityRows });
     });
     assert.equal(paths.filter(value => value === '/tgw/api/v1/webui/sessions').length, readsAfterWorkerChange, 'An unchanged worker revision does not poll inventory');
     workers.pop(); creationBehavior = 'pending';
@@ -1058,7 +1059,7 @@ itemTimes['timestamp-older-completed'] = { startedAtMs: null, completedAtMs: tim
     // background question must be visible even while this viewer stays on A.
     const activitySnapshot = sessions.map(session => ({ session_id: session.session_id, state: session.state, active_turn_id: session.state === 'running' ? 'running-' + session.session_id : '', pending_questions: 0, worker_connectivity: 'connected', runtime_state: 'running' }));
     await page.evaluate(() => { window.initialActivitySocket = window.testActivitySocket; });
-    assert.equal(await page.evaluate(() => new URL(window.testActivitySocket.url).searchParams.get('v')), '2', 'The browser explicitly requests the versioned global activity protocol');
+    assert.equal(await page.evaluate(() => new URL(window.testActivitySocket.url).searchParams.get('v')), '3', 'The browser explicitly requests the versioned global activity protocol');
     const backgroundConnections = await page.evaluate(() => window.testSockets.length);
     const sessionActivityRow = id => activitySnapshot.find(session => session.session_id === id);
     await page.waitForFunction(() => document.querySelector('[data-session-id="b"]').dataset.activity === 'running');
@@ -1173,7 +1174,7 @@ itemTimes['timestamp-older-completed'] = { startedAtMs: null, completedAtMs: tim
     await activityEvent('turn_started', { ...sessionActivityRow('b'), active_turn_id: 'sequence-test-b' });
     await page.evaluate(() => {
       const socket = window.testActivitySocket; window.activityBeforeGap = socket;
-      socket.emit({ type: 'activity_event', version: 2, sequence: socket.sequence, revision: window.testActivityRevision++, event: 'turn_ended', session_id: 'b', session: { ...window.testActivityRows.find(row => row.session_id === 'b'), state: 'idle', active_turn_id: '' } });
+      socket.emit({ type: 'activity_event', version: 3, sequence: socket.sequence, revision: window.testActivityRevision++, event: 'turn_ended', session_id: 'b', session: { ...window.testActivityRows.find(row => row.session_id === 'b'), state: 'idle', active_turn_id: '' } });
     });
     assert.equal(await page.locator('[data-session-id="b"]').getAttribute('data-activity'), 'running', 'A duplicate event sequence cannot revert a newer indicator');
     const nativeConnectionsBeforeGap = await page.evaluate(() => window.testSockets.length);
@@ -1181,7 +1182,7 @@ itemTimes['timestamp-older-completed'] = { startedAtMs: null, completedAtMs: tim
       const socket = window.testActivitySocket; window.oldActivityHandler = socket.onmessage;
       const row = { ...window.testActivityRows.find(row => row.session_id === 'b'), state: 'idle', active_turn_id: '' };
       window.testActivityRows = window.testActivityRows.map(current => current.session_id === 'b' ? row : current);
-      socket.emit({ type: 'activity_event', version: 2, sequence: socket.sequence + 2, revision: window.testActivityRevision++, event: 'turn_ended', session_id: 'b', session: row });
+      socket.emit({ type: 'activity_event', version: 3, sequence: socket.sequence + 2, revision: window.testActivityRevision++, event: 'turn_ended', session_id: 'b', session: row });
     });
     await page.waitForFunction(() => window.activityBeforeGap.readyState === 3);
     await page.clock.fastForward(1100);
@@ -1189,11 +1190,11 @@ itemTimes['timestamp-older-completed'] = { startedAtMs: null, completedAtMs: tim
     await page.waitForFunction(() => document.querySelector('[data-session-id="b"]').dataset.activity === 'idle');
     assert.equal(await page.evaluate(() => window.testActivitySocket.sequence), 0, 'A recovered stream starts from a fresh authoritative snapshot');
     assert.equal(await page.evaluate(() => window.testSockets.length), nativeConnectionsBeforeGap, 'Activity recovery does not replace the selected transcript connection');
-    await page.evaluate(() => window.oldActivityHandler({ data: JSON.stringify({ type: 'activity_event', version: 2, sequence: window.activityBeforeGap.sequence + 1, revision: window.testActivityRevision++, event: 'turn_started', session_id: 'b', session: { ...window.testActivityRows.find(row => row.session_id === 'b'), state: 'running', active_turn_id: 'stale-old-transport' } }) }));
+    await page.evaluate(() => window.oldActivityHandler({ data: JSON.stringify({ type: 'activity_event', version: 3, sequence: window.activityBeforeGap.sequence + 1, revision: window.testActivityRevision++, event: 'turn_started', session_id: 'b', session: { ...window.testActivityRows.find(row => row.session_id === 'b'), state: 'running', active_turn_id: 'stale-old-transport' } }) }));
     assert.equal(await page.locator('[data-session-id="b"]').getAttribute('data-activity'), 'idle', 'Late events from the closed stream cannot affect the replacement stream');
     await page.evaluate(() => {
       const socket = window.testActivitySocket; window.activityBeforeHeartbeatGap = socket;
-      socket.emit({ type: 'heartbeat', version: 2, sequence: socket.sequence + 1 });
+      socket.emit({ type: 'heartbeat', version: 3, sequence: socket.sequence + 1 });
     });
     await page.waitForFunction(() => window.activityBeforeHeartbeatGap.readyState === 3);
     await page.clock.fastForward(1100);
@@ -1207,7 +1208,7 @@ itemTimes['timestamp-older-completed'] = { startedAtMs: null, completedAtMs: tim
     assert.equal(await page.evaluate(() => window.testActivitySockets.length), beforeResync, 'A consecutive authoritative resync does not reconnect the stream');
     await page.evaluate(() => { window.testPauseActivityHeartbeats = true; window.activityBeforeStall = window.testActivitySocket; });
     await page.clock.fastForward(30000);
-    await page.evaluate(() => { const socket = window.testActivitySocket; socket.emit({ type: 'heartbeat', version: 2, sequence: socket.sequence }); });
+    await page.evaluate(() => { const socket = window.testActivitySocket; socket.emit({ type: 'heartbeat', version: 3, sequence: socket.sequence }); });
     await page.clock.fastForward(30000);
     assert.equal(await page.evaluate(() => window.testActivitySocket === window.activityBeforeStall && window.testActivitySocket.readyState === 1), true, 'A valid heartbeat keeps an otherwise idle global stream alive');
     await page.clock.fastForward(15001);
@@ -2198,7 +2199,7 @@ itemTimes['timestamp-older-completed'] = { startedAtMs: null, completedAtMs: tim
     await current({ method: 'turn/started', params: { threadId: 'thread-a', turn: { id: 'retry-recovery-a', status: 'inProgress' } } });
     await current({ method: 'error', params: { threadId: 'thread-a', turnId: 'retry-recovery-a', willRetry: true, error: { message: 'Retryable network interruption' } } });
     assert.match(await page.locator('#notice').textContent(), /Retryable network interruption/);
-    await page.evaluate(() => { const socket = window.testActivitySocket; socket.emit({ type: 'heartbeat', version: 2, sequence: socket.sequence }); });
+    await page.evaluate(() => { const socket = window.testActivitySocket; socket.emit({ type: 'heartbeat', version: 3, sequence: socket.sequence }); });
     assert.equal(await page.locator('#notice').isVisible(), true, 'An activity heartbeat cannot prove a native turn retry recovered');
     await current({ method: 'item/agentMessage/delta', params: { threadId: 'thread-a', turnId: 'unrelated-turn', itemId: 'unrelated-retry-item', delta: 'Unrelated progress' } });
     assert.match(await page.locator('#notice').textContent(), /Retryable network interruption/, 'Progress from another turn cannot clear a retry error');
@@ -2944,7 +2945,7 @@ itemTimes['timestamp-older-completed'] = { startedAtMs: null, completedAtMs: tim
     assert.equal(await page.evaluate(() => Object.keys(sessionStorage).length), 0);
     assert.ok(paths.every(value => value.startsWith('/tgw/')), 'All gateway routes use /tgw');
     assert.deepEqual(errors, []);
-    console.log('Web UI browser checks passed: native active-goal indicator/snapshot/event races/session isolation/terminal states/unsupported runtime/desktop/mobile/escaped objective/keyboard focus/reduced motion/disconnect/auth cleanup, banked-reset usage views/keyboard/mobile/default-cancel/account confirmation/stale-button isolation/status refresh/lost-ack no-replay, Mermaid live-update state/session/auth cleanup, slash autocomplete and CLI choices with keyboard/touch/current markers, successful setting auto-close without mobile autofocus, errors/read-only results remain visible, typed worker and gateway commands without a session, permission confirmation/stale-button isolation, unavailable commands never become prompts, native and global v2 model/effort changes with inventory/resume/command-ack isolation, read-only model status, clipboard images/text+image/image-only/image steering/idle and rejection preservation/per-session drafts/navigation races/no replay, tool colors in both themes, safe formatting/nonempty reasoning/native sub-agent activity, chronology/pagination, independent global activity events/sequence gaps/resync/heartbeat and handshake recovery/inventory races, static Working label plus matching green activity pulse/reduced motion, worker heading background/compact Settings footer/dialog/desktop/mobile/keyboard/focus, desktop font controls/persistence/mobile isolation, full-width responsive status, live quotas/reset tooltips/no polling/session isolation/unavailable fallback, responsive layout and bottom following through late layout changes, keyboard resize/pan/page scroll/delayed focus/dismissal/mobile menu without autofocus, native inner scrolling, blocking/async questions, rejected-answer recovery, approvals, live external prompts, session isolation, disconnect/reconnect, prompt and command drafts/no replay, scoped connection/history/retry error recovery without hiding uncertain-send or runtime warnings, ACK-only ephemeral queued-steer feedback/timer/switch/end/rejection/isolation, mobile status grid alignment/empty rows/compact horizontal Stop and Steer/multiline input, failed resume, sidebar deletion confirmation/desktop/mobile/cancel/CSRF/scope/delayed result/failure/lost acknowledgement/unknown outcome/no POST replay, idle heartbeat, auth expiry.');
+    console.log('Web UI browser checks passed: native active-goal indicator/snapshot/event races/session isolation/terminal states/unsupported runtime/desktop/mobile/escaped objective/keyboard focus/reduced motion/disconnect/auth cleanup, banked-reset usage views/keyboard/mobile/default-cancel/account confirmation/stale-button isolation/status refresh/lost-ack no-replay, Mermaid live-update state/session/auth cleanup, slash autocomplete and CLI choices with keyboard/touch/current markers, successful setting auto-close without mobile autofocus, errors/read-only results remain visible, typed worker and gateway commands without a session, permission confirmation/stale-button isolation, unavailable commands never become prompts, native and global v3 model/effort changes with inventory/resume/command-ack isolation, read-only model status, clipboard images/text+image/image-only/image steering/idle and rejection preservation/per-session drafts/navigation races/no replay, tool colors in both themes, safe formatting/nonempty reasoning/native sub-agent activity, chronology/pagination, independent global activity events/sequence gaps/resync/heartbeat and handshake recovery/inventory races, static Working label plus matching green activity pulse/reduced motion, worker heading background/compact Settings footer/dialog/desktop/mobile/keyboard/focus, desktop font controls/persistence/mobile isolation, full-width responsive status, live quotas/reset tooltips/no polling/session isolation/unavailable fallback, responsive layout and bottom following through late layout changes, keyboard resize/pan/page scroll/delayed focus/dismissal/mobile menu without autofocus, native inner scrolling, blocking/async questions, rejected-answer recovery, approvals, live external prompts, session isolation, disconnect/reconnect, prompt and command drafts/no replay, scoped connection/history/retry error recovery without hiding uncertain-send or runtime warnings, ACK-only ephemeral queued-steer feedback/timer/switch/end/rejection/isolation, mobile status grid alignment/empty rows/compact horizontal Stop and Steer/multiline input, failed resume, sidebar deletion confirmation/desktop/mobile/cancel/CSRF/scope/delayed result/failure/lost acknowledgement/unknown outcome/no POST replay, idle heartbeat, auth expiry.');
   } catch (error) {
     if (process.env.WEBUI_SCREENSHOTS) {
       fs.mkdirSync(process.env.WEBUI_SCREENSHOTS, { recursive: true });

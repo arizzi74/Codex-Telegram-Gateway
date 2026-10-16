@@ -68,6 +68,8 @@ The browser uses these endpoints:
 | `POST /tgw/api/v1/admin/sessions/revoke-all` | Signs out every browser belonging to the account. |
 | `GET /tgw/api/v1/admin/dashboard` | Returns visible sessions and statistics, workers, runtimes, bot status, and pending counts. |
 | `GET /tgw/api/v1/admin/telegram-bots` | Lists connected bots and pending managed-bot requests without tokens or webhook secrets. |
+| `GET /tgw/api/v1/webui/telegram-bots` | Lists available bots by base display name and their private-chat session assignments, without credentials. |
+| `POST /tgw/api/v1/webui/telegram-bots` | Assigns a bot using `{"session_id":"UUID","bot_id":"ID"}`; an empty bot ID disconnects the session's bot. Requires a valid browser session, exact Origin and CSRF. |
 | `POST /tgw/api/v1/admin/telegram-bots/refresh` | Refreshes enabled bots' Telegram profiles and returns bots and pending requests; requires a valid session, exact Origin and CSRF, without recent authentication. |
 | `POST /tgw/api/v1/admin/telegram-bots` | Connects an existing bot with its token, or replaces a token when `replace_id` is supplied. |
 | `POST /tgw/api/v1/admin/telegram-bots/managed` | Creates a managed-bot request and a Telegram confirmation link using `manager_id` and `display_name`; the gateway generates and checks the username. The explicit `username`/`name` pair remains supported for existing clients. |
@@ -123,10 +125,13 @@ and notifications belong to the bot used to create them, so the same chat can
 use different bot conversations independently.
 
 Open each bot in Telegram, send `/start`, and use `/tgsessions` in that bot to
-choose its session. Changing one bot's selection does not change another's.
-If two bots select the same session, both receive its output; select different
-sessions to keep their conversations separate. `/tgmultisession` is also
-configured separately for each bot chat and is off by default.
+choose its session. In your private bot conversations, each session has one
+selected bot. Selecting a session already assigned to another bot disconnects
+that previous bot; moving a bot to another session clears its previous
+assignment. The Web UI's Telegram bot dropdown uses these same assignments and
+updates across open browser views. Group and forum-topic selections remain
+independent. `/tgmultisession` is configured separately for each bot chat and
+is off by default.
 
 Questions and approvals are shared across the bot chats you have opened,
 including chats with another session selected or no selection. Answer from any

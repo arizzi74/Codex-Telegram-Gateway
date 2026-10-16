@@ -31,6 +31,7 @@ const contents = Buffer.from('# Complete artifact matrix\n\nPerformance results:
     if (url.pathname === '/tgw/api/v1/admin/login/options') return json({ passkey: true, password: false });
     if (url.pathname === '/tgw/api/v1/admin/session') return json({ authenticated: auth, owner_id: 'owner', session_id: 'login', server_time: new Date().toISOString(), expires_at: new Date(Date.now() + 28800000).toISOString(), reauthenticated_at: new Date().toISOString() }, auth ? 200 : 401);
     if (url.pathname === '/tgw/api/v1/webui/sessions') return json({ sessions }, auth ? 200 : 401);
+    if (url.pathname === '/tgw/api/v1/webui/telegram-bots') return json({ revision: 'fixture-bots', bots: [] });
     if (url.pathname === '/tgw/api/v1/webui/push/config') return json({ supported: false, subscribed: false });
     if (url.pathname === '/tgw/api/v1/webui/files') {
       const body = request.postDataJSON();
@@ -68,9 +69,9 @@ const contents = Buffer.from('# Complete artifact matrix\n\nPerformance results:
       constructor(url) {
         const target = new URL(url); this.activity = target.pathname.endsWith('/activity'); this.sessionID = target.searchParams.get('session_id'); this.readyState = 0;
         window.fileSockets.push(this);
-        setTimeout(() => { if (this.readyState === 3) return; this.readyState = 1; this.emit(this.activity ? { type: 'activity_snapshot', version: 2, sequence: 0, revision: 1, sessions: sessions.map(session => ({ session_id: session.session_id, state: 'idle', worker_connectivity: 'connected', pending_questions: 0 })) } : { type: 'ready' }); }, 5);
+        setTimeout(() => { if (this.readyState === 3) return; this.readyState = 1; this.emit(this.activity ? { type: 'activity_snapshot', version: 3, sequence: 0, revision: 1, sessions: sessions.map(session => ({ session_id: session.session_id, state: 'idle', worker_connectivity: 'connected', pending_questions: 0 })) } : { type: 'ready' }); }, 5);
       }
-      emit(value) { if (this.readyState === 1) this.onmessage?.({ data: JSON.stringify(value) }); }
+      emit(value) { if (value.type === 'activity_snapshot') value = { telegram_bots: [], telegram_bots_revision: 'fixture-bots', ...value }; if (this.readyState === 1) this.onmessage?.({ data: JSON.stringify(value) }); }
       close(code = 1000) { this.readyState = 3; this.onclose?.({ code }); }
       send(raw) {
         const frame = JSON.parse(raw); let result = {};

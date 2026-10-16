@@ -193,6 +193,18 @@ func bindCommandSession(ctx context.Context, tx *dbTx, commandID, sessionID uuid
 	if retired {
 		return nil
 	}
+	// Work accepted before a disable or chat revocation can still complete on
+	// the worker. Its frozen outcome must not reclaim a private selection or
+	// displace another bot after authorization has changed.
+	var allowed bool
+	if err := tx.QueryRow(ctx, `SELECT NOT EXISTS(SELECT 1 FROM telegram_bots WHERE bot_id=$1 AND enabled=0)
+        AND NOT EXISTS(SELECT 1 FROM telegram_bot_retirements WHERE bot_id=$1)
+        AND `+telegramChatAllowedSQL("$1", "$2"), *botID, *chatID).Scan(&allowed); err != nil {
+		return fmt.Errorf("registry: authorize automatic Telegram binding: %w", err)
+	}
+	if !allowed {
+		return nil
+	}
 	var command protocol.Command
 	if err := json.Unmarshal(payload, &command); err != nil {
 		return fmt.Errorf("registry: decode automatic Telegram binding command: %w", err)
@@ -236,18 +248,7 @@ func bindCommandSession(ctx context.Context, tx *dbTx, commandID, sessionID uuid
 			return nil
 		}
 	}
-	if _, err := tx.Exec(ctx, `INSERT INTO telegram_bindings
-        (bot_id, user_id, chat_id, message_thread_id, session_id, selected_at)
-        VALUES ($1,$2,$3,$4,$5,(strftime('%Y-%m-%dT%H:%M:%f','now') || '000000Z'))
-        ON CONFLICT (bot_id, user_id, chat_id, message_thread_id) DO UPDATE
-		SET session_id = EXCLUDED.session_id, selected_at = EXCLUDED.selected_at`,
-		*botID, *userID, *chatID, topic, sessionID); err != nil {
-		return fmt.Errorf("registry: bind returned session: %w", err)
-	}
-	if err := bumpSelectionRevision(ctx, tx, in); err != nil {
-		return err
-	}
-	return reconcileTelegramSelection(ctx, tx, in)
+	return setBinding(ctx, tx, in, sessionID)
 }
 
 // SessionSnapshot returns the normalized session registry state for worker

@@ -52,6 +52,7 @@ func (s *Server) webuiRoutes() {
 	s.mux.HandleFunc("/tgw/api/v1/webui/connect", s.webuiConnect)
 	s.mux.HandleFunc("/tgw/api/v1/webui/commands", s.webuiCommands)
 	s.mux.HandleFunc("/tgw/api/v1/webui/activity", s.webuiActivity)
+	s.mux.HandleFunc("/tgw/api/v1/webui/telegram-bots", s.webuiTelegramBots)
 	s.mux.HandleFunc("/tgw/api/v1/webui/files", s.webuiFile)
 }
 

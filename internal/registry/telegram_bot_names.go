@@ -65,6 +65,7 @@ func (s *Store) CaptureTelegramBotOriginalName(ctx context.Context, id, name str
 	if tag.RowsAffected() != 1 {
 		return ErrTelegramBotRecordNotFound
 	}
+	s.notifySessionActivity()
 	return nil
 }
 
