@@ -223,6 +223,17 @@ func (a *Agent) reject(c protocol.Command, code, message string) (protocol.Comma
 }
 
 func (a *Agent) record(c protocol.Command, state CommandState, result *protocol.Result, kind string) (protocol.Event, error) {
+	if result != nil && result.Error != nil && len(c.Arguments.Files) > 0 {
+		record, found, err := a.store.LoadCommand(c.ID)
+		if err != nil {
+			return protocol.Event{}, err
+		}
+		if found && record.InboundFile.savedPath() != "" {
+			copy := *result.Error
+			copy.Message = "File saved in " + record.InboundFile.savedPath() + "\n" + copy.Message
+			result.Error = &copy
+		}
+	}
 	data, err := json.Marshal(result)
 	if err != nil {
 		return protocol.Event{}, err
@@ -715,6 +726,25 @@ func (s *sessionActor) command(req actorCommand) {
 		reject(protocol.CommandExpired, "Command has expired.")
 		return
 	}
+	if _, err := s.fileWorkspace(c); err != nil {
+		reject(protocol.InvalidWorkspace, err.Error())
+		return
+	}
+	if c.Operation == protocol.StoreFiles {
+		// Saving an attachment is independent of the live or cold Codex turn.
+		// Leave the command received until the atomic save finishes, allowing
+		// valid retries to reuse the completed file without an RPC replay. The
+		// normal runtime generation fence still applies after a worker restart.
+		_, path, err := s.saveInboundFile(c)
+		if err != nil {
+			reject(protocol.InvalidWorkspace, err.Error())
+			return
+		}
+		_, err = s.agent.record(c, CommandCompleted, &protocol.Result{CommandID: c.ID, State: "completed", Text: "File saved in " + path}, "command_completed")
+		req.reply <- commandReply{ack: protocol.CommandAck{CommandID: c.ID, Status: "accepted"}, err: err}
+		s.agent.report(err)
+		return
+	}
 	if c.Operation == protocol.StartTurn {
 		if len(s.queue) >= s.agent.cfg.MaxQueuedTurns {
 			reject(protocol.SessionQueueFull, "Session queue is full.")
@@ -759,6 +789,14 @@ func (s *sessionActor) command(req actorCommand) {
 		p, ok := s.pending[c.Arguments.RequestID]
 		if !ok || p.approval.ID != c.Arguments.ApprovalID || p.approval.ThreadID != c.ThreadID || (p.approval.TurnID != "" && p.approval.TurnID != s.session.ActiveTurnID) || (c.ExpectedTurnID != "" && c.ExpectedTurnID != p.approval.TurnID) {
 			reject(protocol.ApprovalNotPending, "This request is no longer pending.")
+			return
+		}
+	}
+	if len(c.Arguments.Files) > 0 {
+		var err error
+		c, _, err = s.saveInboundFile(c)
+		if err != nil {
+			reject(protocol.InvalidWorkspace, err.Error())
 			return
 		}
 	}
@@ -896,13 +934,18 @@ func codexCommandNeedsIdle(name, args string) bool {
 }
 
 func (s *sessionActor) start(c protocol.Command) {
+	if c.SessionID != s.session.ID || c.ThreadID != s.session.ThreadID {
+		_, err := s.agent.reject(c, protocol.UnknownSession, "Session target no longer matches.")
+		s.agent.report(err)
+		return
+	}
 	if s.session.Archived {
 		_, err := s.agent.reject(c, protocol.UnknownSession, "Session is no longer available in the worker inventory.")
 		s.agent.report(err)
 		return
 	}
 	client, runtime, ok := s.agent.manager.Client(s.runtime.ID)
-	if !ok || runtime.Generation != c.RuntimeGeneration {
+	if !ok || c.RuntimeID != s.runtime.ID || runtime.Generation != c.RuntimeGeneration {
 		_, err := s.agent.reject(c, protocol.StaleRuntime, "Runtime generation no longer matches.")
 		s.agent.report(err)
 		return
@@ -916,6 +959,20 @@ func (s *sessionActor) start(c protocol.Command) {
 		_, err = s.agent.reject(c, protocol.InvalidWorkspace, "Session workspace is not allowed.")
 		s.agent.report(err)
 		return
+	}
+	if _, err := s.fileWorkspace(c); err != nil {
+		_, recordErr := s.agent.reject(c, protocol.InvalidWorkspace, err.Error())
+		s.agent.report(recordErr)
+		return
+	}
+	if len(c.Arguments.Files) > 0 {
+		var err error
+		c, _, err = s.saveInboundFile(c)
+		if err != nil {
+			_, recordErr := s.agent.reject(c, protocol.InvalidWorkspace, err.Error())
+			s.agent.report(recordErr)
+			return
+		}
 	}
 	if err := s.agent.store.SetCommandState(c.ID, CommandExecuting, nil); err != nil {
 		s.agent.report(err)
@@ -963,6 +1020,14 @@ func (s *sessionActor) resumeForCommand(c protocol.Command, client *codexadapter
 		_, err = s.agent.reject(c, protocol.CodexProtocolError, "Codex resumed a different thread. Inspect the selected thread before retrying.")
 		s.agent.report(err)
 		return false
+	}
+	if len(c.Arguments.Files) > 0 {
+		cwd, err := auth.CanonicalWorkspace(resumed.CWD, s.agent.cfg.AllowedWorkspaceRoots)
+		if err != nil || cwd != c.Arguments.CWD {
+			_, recordErr := s.agent.reject(c, protocol.InvalidWorkspace, "Codex resumed this thread in a different workspace. Select the session again before resending the file.")
+			s.agent.report(recordErr)
+			return false
+		}
 	}
 	s.session.Loaded = true
 	if resumed.ActiveTurnID != "" || resumed.Status == "active" || resumed.Status == "running" {

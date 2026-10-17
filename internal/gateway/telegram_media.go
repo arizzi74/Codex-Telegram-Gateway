@@ -6,6 +6,8 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/iaia/telegramgw/internal/protocol"
 )
@@ -15,6 +17,12 @@ import (
 // usable by administration commands and tests.
 type TelegramImageAPI interface {
 	DownloadImage(context.Context, string) (protocol.Image, error)
+}
+
+// TelegramFileAPI transfers document bytes without exposing a download URL.
+// Text-only and legacy image-only API implementations remain usable.
+type TelegramFileAPI interface {
+	DownloadFile(context.Context, string) (protocol.File, error)
 }
 
 type telegramMediaError string
@@ -80,50 +88,122 @@ func (h *Webhook) downloadMessageImage(ctx context.Context, message *TelegramMes
 	return images, ""
 }
 
+func (h *Webhook) downloadMessageFile(ctx context.Context, message *TelegramMessage) ([]protocol.Image, []protocol.File, string) {
+	document := message.Document
+	if document.FileSize > protocol.MaxFileBytes {
+		return nil, nil, "file_too_large"
+	}
+	if strings.TrimSpace(document.FileID) == "" || len(document.FileID) > 4096 {
+		return nil, nil, "file_download_failed"
+	}
+	api, ok := h.api.(TelegramFileAPI)
+	if !ok {
+		return nil, nil, "file_download_failed"
+	}
+	file, err := api.DownloadFile(ctx, document.FileID)
+	if err != nil {
+		var mediaErr telegramMediaError
+		if errors.As(err, &mediaErr) && string(mediaErr) == "file_too_large" {
+			return nil, nil, "file_too_large"
+		}
+		return nil, nil, "file_download_failed"
+	}
+	if len(file.Data) > protocol.MaxFileBytes {
+		return nil, nil, "file_too_large"
+	}
+	// Telegram metadata and filename extensions do not identify an image.
+	// Preserve the existing vision path for supported actual image bytes.
+	img := protocol.Image{MIMEType: http.DetectContentType(file.Data), Data: file.Data}
+	if protocol.ValidateImages([]protocol.Image{img}) == nil {
+		return []protocol.Image{img}, nil, ""
+	}
+	file.Name = telegramDocumentName(document.FileName)
+	if err := protocol.ValidateFiles([]protocol.File{file}); err != nil {
+		return nil, nil, "file_invalid"
+	}
+	return nil, []protocol.File{file}, ""
+}
+
+func telegramDocumentName(name string) string {
+	name = strings.Map(func(r rune) rune {
+		if r == '/' || r == '\\' || unicode.IsControl(r) {
+			return '_'
+		}
+		return r
+	}, strings.ToValidUTF8(name, "_"))
+	name = strings.TrimSpace(name)
+	for len(name) > 1024 {
+		_, size := utf8.DecodeLastRuneInString(name)
+		name = name[:len(name)-size]
+	}
+	if name == "" || name == "." || name == ".." {
+		return "file"
+	}
+	return name
+}
+
 func (t *TelegramClient) DownloadImage(ctx context.Context, fileID string) (protocol.Image, error) {
-	var file struct {
-		Path string `json:"file_path"`
-		Size int64  `json:"file_size"`
-	}
-	if err := t.call(ctx, "getFile", map[string]string{"file_id": fileID}, &file); err != nil {
-		return protocol.Image{}, telegramMediaError("image_download_failed")
-	}
-	if file.Size > protocol.MaxImageBytes {
-		return protocol.Image{}, telegramMediaError("image_too_large")
-	}
-	if !safeTelegramFilePath(file.Path) {
-		return protocol.Image{}, telegramMediaError("image_download_failed")
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, t.endpoint+"/file/bot"+t.token+"/"+file.Path, nil)
+	data, err := t.downloadMediaBytes(ctx, fileID, protocol.MaxImageBytes, "image")
 	if err != nil {
-		return protocol.Image{}, telegramMediaError("image_download_failed")
-	}
-	client := *t.http
-	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
-	response, err := client.Do(req)
-	if err != nil {
-		// net/http errors can include the request URL and therefore the token.
-		return protocol.Image{}, telegramMediaError("image_download_failed")
-	}
-	defer response.Body.Close()
-	if response.StatusCode != http.StatusOK {
-		return protocol.Image{}, telegramMediaError("image_download_failed")
-	}
-	if response.ContentLength > protocol.MaxImageBytes {
-		return protocol.Image{}, telegramMediaError("image_too_large")
-	}
-	data, err := io.ReadAll(io.LimitReader(response.Body, protocol.MaxImageBytes+1))
-	if err != nil {
-		return protocol.Image{}, telegramMediaError("image_download_failed")
-	}
-	if len(data) > protocol.MaxImageBytes {
-		return protocol.Image{}, telegramMediaError("image_too_large")
+		return protocol.Image{}, err
 	}
 	img := protocol.Image{MIMEType: http.DetectContentType(data), Data: data}
 	if err := protocol.ValidateImages([]protocol.Image{img}); err != nil {
 		return protocol.Image{}, telegramMediaError("image_unsupported")
 	}
 	return img, nil
+}
+
+func (t *TelegramClient) DownloadFile(ctx context.Context, fileID string) (protocol.File, error) {
+	data, err := t.downloadMediaBytes(ctx, fileID, protocol.MaxFileBytes, "file")
+	if err != nil {
+		return protocol.File{}, err
+	}
+	return protocol.File{Name: "file", Data: data}, nil
+}
+
+func (t *TelegramClient) downloadMediaBytes(ctx context.Context, fileID string, limit int, kind string) ([]byte, error) {
+	var file struct {
+		Path string `json:"file_path"`
+		Size int64  `json:"file_size"`
+	}
+	failed := telegramMediaError(kind + "_download_failed")
+	large := telegramMediaError(kind + "_too_large")
+	if err := t.call(ctx, "getFile", map[string]string{"file_id": fileID}, &file); err != nil {
+		return nil, failed
+	}
+	if file.Size > int64(limit) {
+		return nil, large
+	}
+	if !safeTelegramFilePath(file.Path) {
+		return nil, failed
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, t.endpoint+"/file/bot"+t.token+"/"+file.Path, nil)
+	if err != nil {
+		return nil, failed
+	}
+	client := *t.http
+	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	response, err := client.Do(req)
+	if err != nil {
+		// net/http errors can include the request URL and therefore the token.
+		return nil, failed
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		return nil, failed
+	}
+	if response.ContentLength > int64(limit) {
+		return nil, large
+	}
+	data, err := io.ReadAll(io.LimitReader(response.Body, int64(limit)+1))
+	if err != nil {
+		return nil, failed
+	}
+	if len(data) > limit {
+		return nil, large
+	}
+	return data, nil
 }
 
 func safeTelegramFilePath(path string) bool {

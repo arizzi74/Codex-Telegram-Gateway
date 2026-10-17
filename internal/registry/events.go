@@ -579,7 +579,7 @@ func (s *Store) applyEvent(ctx context.Context, tx *dbTx, workerID uuid.UUID, ev
 	}
 	notify = notificationRequired(event.Kind) || (event.Kind == "command_completed" && result.Session != nil)
 	if !notify && event.Kind == "command_completed" && result.Text != "" && commandID != nil {
-		if err := tx.QueryRow(ctx, "SELECT operation='codex_command' FROM commands WHERE command_id=$1", *commandID).Scan(&notify); err != nil {
+		if err := tx.QueryRow(ctx, "SELECT operation IN ('codex_command','store_files') FROM commands WHERE command_id=$1", *commandID).Scan(&notify); err != nil {
 			return false, nil, err
 		}
 	}

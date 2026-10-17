@@ -21,6 +21,10 @@ type TelegramRegistry interface {
 	AcceptTelegram(context.Context, registry.IncomingUpdate) (registry.AcceptResult, error)
 	PrepareTelegramImage(context.Context, registry.IncomingUpdate) (registry.IncomingUpdate, error)
 }
+
+type TelegramFileRegistry interface {
+	PrepareTelegramFile(context.Context, registry.IncomingUpdate) (registry.IncomingUpdate, error)
+}
 type Webhook struct {
 	store         TelegramRegistry
 	cfg           config.GatewayConfig
@@ -106,7 +110,7 @@ func (h *Webhook) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	} else if message.hasMedia() {
 		// Captions stay literal except for explicit steering, which carries the
-		// image to the active turn. Other slash commands must not execute while
+		// attachment to the active turn. Other slash commands must not execute while
 		// silently discarding their attachment.
 		in.Action = "text"
 		in.Text = strings.TrimSpace(message.Caption)
@@ -124,16 +128,27 @@ func (h *Webhook) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			in.Action, in.Text = action, text
 		}
 		ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
-		in, err = h.store.PrepareTelegramImage(ctx, in)
+		_, fileAPI := h.api.(TelegramFileAPI)
+		fileRegistry, fileRouting := h.store.(TelegramFileRegistry)
+		document := message.Document != nil && len(message.Photo) == 0 && len(message.Animation) == 0 && len(message.Video) == 0 && len(message.Audio) == 0 && len(message.VideoNote) == 0 && len(message.Sticker) == 0
+		if document && fileAPI && fileRouting {
+			in, err = fileRegistry.PrepareTelegramFile(ctx, in)
+		} else {
+			in, err = h.store.PrepareTelegramImage(ctx, in)
+		}
 		cancel()
 		if err != nil {
-			h.log.Warn("Telegram image target could not be resolved", "telegram_update_id", update.ID)
+			h.log.Warn("Telegram attachment target could not be resolved", "telegram_update_id", update.ID)
 			http.Error(w, "registry unavailable", 503)
 			return
 		}
 		if in.MediaError == "" {
 			ctx, cancel = context.WithTimeout(r.Context(), 15*time.Second)
-			in.Images, in.MediaError = h.downloadMessageImage(ctx, message)
+			if document && fileAPI && fileRouting {
+				in.Images, in.Files, in.MediaError = h.downloadMessageFile(ctx, message)
+			} else {
+				in.Images, in.MediaError = h.downloadMessageImage(ctx, message)
+			}
 			cancel()
 		}
 		if in.MediaError != "" {

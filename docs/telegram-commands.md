@@ -205,8 +205,9 @@ separately.
 
 For a photo with multiple resolutions, the gateway selects the largest version
 that fits its size limit. Each image message is a separate submission; albums
-are not combined into one turn. Video, generic audio uploads, stickers,
-animations and non-image documents produce an unsupported-attachment reply.
+are not combined into one turn. Non-image documents use the file-saving behavior
+below. Video, generic audio uploads, stickers and animations produce an
+unsupported-attachment reply; send an ordinary file as a document instead.
 Telegram voice notes use the optional local transcription feature below.
 Reply to input requests with text, and send images separately. If Telegram still
 shows a reply to a question in its composer, close that preview with **×** before
@@ -224,6 +225,39 @@ Both gateway and worker need v0.5.13 or later. During a rolling upgrade, an old
 worker produces an update-required reply instead of receiving only the caption.
 Images sent to earlier gateway versions were ignored before command storage;
 resend them after the upgrade.
+
+## Receiving files
+
+After selecting a session, send a non-image file using Telegram's **File** or
+**Document** attachment option. PDF, text, spreadsheet, archive and other file
+contents are accepted up to **10 MiB per file**. Files are not executed or
+unpacked automatically. Photos and supported image documents retain the image
+behavior described above.
+
+The selected worker saves the file in `<session working directory>/inbound/`,
+creating that subfolder on the first upload. For a session whose directory is
+`~/CODEX/Session_name`, this is `~/CODEX/Session_name/inbound/`. The saved filename
+is derived from the original filename with a unique suffix; existing files are
+never overwritten. Missing filenames receive a default name. Telegram retries
+of the same accepted upload reuse the same saved file.
+
+- **Without a caption:** the bot replies `File saved in <absolute path>`.
+  Codex receives no prompt and no turn starts or resumes.
+- **With a caption:** the worker appends `File: <absolute path>` to the caption
+  and submits it to Codex. An active turn is steered; an idle session starts a
+  new turn. `/tgsteer` can explicitly target the current active turn.
+
+The session, working directory and applicable active turn are fixed before the
+download begins. Selecting another session during the upload does not redirect
+the file or prompt. Failed downloads, disallowed directories and filesystem
+errors produce a failure reply rather than a saved-file confirmation. A session
+whose working directory changes before saving must be selected and retried.
+
+Files travel through the authenticated gateway-to-worker connection and are
+retained in durable command records on both hosts, in addition to the saved
+`inbound/` file. Telegram download URLs and bot credentials are not forwarded to
+the worker. Gateway and worker both need file-input support (v0.6.7 or later);
+an older worker produces an update-required reply for generic files.
 
 ## Voice notes
 

@@ -52,6 +52,8 @@ type TelegramPhoto struct {
 type TelegramDocument struct {
 	FileID   string `json:"file_id"`
 	FileSize int64  `json:"file_size"`
+	FileName string `json:"file_name"`
+	MIMEType string `json:"mime_type"`
 }
 type TelegramCallback struct {
 	ID      string           `json:"id"`

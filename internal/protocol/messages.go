@@ -55,6 +55,7 @@ type Hello struct {
 	Arch                         string    `json:"arch"`
 	WorkerVersion                string    `json:"worker_version"`
 	SupportsImageInput           bool      `json:"supports_image_input,omitempty"`
+	SupportsFileInput            bool      `json:"supports_file_input,omitempty"`
 	SupportsSessionWorkspaces    bool      `json:"supports_session_workspaces,omitempty"`
 	SupportsWebUISessionCreation bool      `json:"supports_webui_session_creation,omitempty"`
 	SupportsSessionDeletion      bool      `json:"supports_session_deletion,omitempty"`
@@ -77,6 +78,7 @@ type Heartbeat struct {
 	SupportsWorkerUpdate         bool      `json:"supports_worker_update,omitempty"`
 	WorkerID                     string    `json:"worker_id"`
 	SupportsImageInput           bool      `json:"supports_image_input,omitempty"`
+	SupportsFileInput            bool      `json:"supports_file_input,omitempty"`
 	SupportsSessionWorkspaces    bool      `json:"supports_session_workspaces,omitempty"`
 	SupportsWebUISessionCreation bool      `json:"supports_webui_session_creation,omitempty"`
 	SupportsSessionDeletion      bool      `json:"supports_session_deletion,omitempty"`
@@ -89,6 +91,7 @@ type Operation string
 
 const (
 	StartTurn        Operation = "start_turn"
+	StoreFiles       Operation = "store_files"
 	NewSession       Operation = "new_session"
 	Steer            Operation = "steer"
 	Interrupt        Operation = "interrupt"
@@ -128,6 +131,7 @@ type Arguments struct {
 	CWD               string               `json:"cwd,omitempty"`
 	Text              string               `json:"text,omitempty"`
 	Images            []Image              `json:"images,omitempty"`
+	Files             []File               `json:"files,omitempty"`
 	ApprovalID        string               `json:"approval_id,omitempty"`
 	RequestID         string               `json:"request_id,omitempty"`
 	Decision          string               `json:"decision,omitempty"`
@@ -157,7 +161,7 @@ func (c Command) Validate() error {
 		if c.SessionID != "" || c.ThreadID != "" {
 			return errors.New("new session cannot target an existing thread")
 		}
-	case StartTurn, Steer, Interrupt, ApprovalResponse, InputResponse, CodexCommand, ReadHistory, DeleteSession:
+	case StartTurn, StoreFiles, Steer, Interrupt, ApprovalResponse, InputResponse, CodexCommand, ReadHistory, DeleteSession:
 		if _, err := uuid.Parse(c.SessionID); err != nil || c.ThreadID == "" {
 			return errors.New("missing session target")
 		}
@@ -173,7 +177,21 @@ func (c Command) Validate() error {
 	if len(c.Arguments.Images) > 0 && c.Operation != StartTurn && c.Operation != Steer {
 		return errors.New("images require a turn input operation")
 	}
-	if (c.Operation == StartTurn || c.Operation == Steer) && c.Arguments.Text == "" && len(c.Arguments.Images) == 0 {
+	if err := ValidateFiles(c.Arguments.Files); err != nil {
+		return err
+	}
+	if len(c.Arguments.Files) > 0 {
+		if c.Operation != StoreFiles && c.Operation != StartTurn && c.Operation != Steer {
+			return errors.New("files require a file saving or turn input operation")
+		}
+		if len(c.Arguments.Images) != 0 || strings.TrimSpace(c.Arguments.CWD) == "" {
+			return errors.New("file input requires a frozen workspace and cannot include images")
+		}
+	}
+	if c.Operation == StoreFiles && (len(c.Arguments.Files) == 0 || c.Arguments.Text != "" || len(c.Arguments.Images) != 0) {
+		return errors.New("file saving requires files without turn input")
+	}
+	if (c.Operation == StartTurn || c.Operation == Steer) && c.Arguments.Text == "" && len(c.Arguments.Images) == 0 && len(c.Arguments.Files) == 0 {
 		return errors.New("missing input")
 	}
 	if (c.Operation == ApprovalResponse || c.Operation == InputResponse) && (c.Arguments.RequestID == "" || c.Arguments.ApprovalID == "") {

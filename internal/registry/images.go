@@ -25,6 +25,13 @@ func (s *Store) PrepareTelegramImage(ctx context.Context, in IncomingUpdate) (In
 		in.Action, in.MediaError, in.Images, in.imageTarget = "media_error", code, nil, nil
 		return in, nil
 	}
+	allowed, err := telegramMediaAuthorized(ctx, tx, in)
+	if err != nil {
+		return IncomingUpdate{}, err
+	}
+	if !allowed {
+		return reject("file_unauthorized")
+	}
 	if in.ReplyToMessageID > 0 {
 		var approvalReply bool
 		if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM bot_message_routes
@@ -55,10 +62,14 @@ func (s *Store) PrepareTelegramImage(ctx context.Context, in IncomingUpdate) (In
 }
 
 func resolveImageOrCurrentRoute(ctx context.Context, tx *dbTx, in IncomingUpdate) (routeTarget, error) {
-	if in.imageTarget == nil {
+	frozenTarget := in.imageTarget
+	if in.fileTarget != nil {
+		frozenTarget = in.fileTarget
+	}
+	if frozenTarget == nil {
 		return resolveRoute(ctx, tx, in)
 	}
-	frozen := *in.imageTarget
+	frozen := *frozenTarget
 	current, err := sessionRoute(ctx, tx, frozen.sessionID)
 	if err != nil {
 		return routeTarget{}, err
@@ -66,7 +77,11 @@ func resolveImageOrCurrentRoute(ctx context.Context, tx *dbTx, in IncomingUpdate
 	if current.workerID != frozen.workerID || current.runtimeID != frozen.runtimeID || current.generation != frozen.generation || current.threadID != frozen.threadID {
 		return routeTarget{}, ErrTelegramTarget
 	}
-	steering := strings.EqualFold(strings.TrimSpace(in.Action), "steer") || (autoSteerTelegramAction(in.Action) && frozen.activeTurnID != "")
+	if len(in.Files) > 0 && current.cwd != frozen.cwd {
+		return routeTarget{}, ErrTelegramTarget
+	}
+	fileOnly := len(in.Files) > 0 && strings.TrimSpace(in.Text) == "" && !strings.EqualFold(strings.TrimSpace(in.Action), "steer")
+	steering := !fileOnly && (strings.EqualFold(strings.TrimSpace(in.Action), "steer") || (autoSteerTelegramAction(in.Action) && frozen.activeTurnID != ""))
 	if steering && current.activeTurnID != frozen.activeTurnID {
 		return routeTarget{}, ErrStaleTurn
 	}
@@ -89,6 +104,7 @@ func workerSupportsImageInput(ctx context.Context, tx *dbTx, workerID uuid.UUID)
 func mediaErrorResult(code string) AcceptResult {
 	switch code {
 	case "image_too_large", "image_download_failed", "image_unsupported", "image_worker_upgrade", "image_input_reply", "target_unavailable",
+		"file_too_large", "file_download_failed", "file_invalid", "file_worker_upgrade", "file_unauthorized",
 		"voice_disabled", "voice_invalid", "voice_too_large", "voice_too_long", "voice_unavailable":
 	default:
 		code = "image_unsupported"

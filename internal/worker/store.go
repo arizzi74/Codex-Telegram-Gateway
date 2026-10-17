@@ -47,10 +47,11 @@ const (
 
 // CommandRecord is a command and its durable execution outcome.
 type CommandRecord struct {
-	Command    protocol.Command `json:"command"`
-	ReceivedAt time.Time        `json:"received_at"`
-	State      CommandState     `json:"state"`
-	Result     *protocol.Result `json:"result,omitempty"`
+	Command     protocol.Command   `json:"command"`
+	ReceivedAt  time.Time          `json:"received_at"`
+	State       CommandState       `json:"state"`
+	Result      *protocol.Result   `json:"result,omitempty"`
+	InboundFile *inboundFileRecord `json:"inbound_file,omitempty"`
 }
 
 // ReceiveResult reports whether a command was written by this call. A
@@ -568,6 +569,9 @@ func recoverExecuting(tx *workerdb.Tx) error {
 		}
 		record.State = CommandOutcomeUnknown
 		record.Result = &protocol.Result{CommandID: record.Command.ID, State: string(CommandOutcomeUnknown), Error: &protocol.Error{Code: protocol.OutcomeUnknown, Message: "worker restarted while command execution was in progress"}}
+		if path := record.InboundFile.savedPath(); path != "" {
+			record.Result.Error.Message = "File saved in " + path + "\n" + record.Result.Error.Message
+		}
 		encoded, err := json.Marshal(record)
 		if err != nil {
 			return err

@@ -205,13 +205,13 @@ func (s *Store) acceptSessionAlias(ctx context.Context, tx *dbTx, in IncomingUpd
 	if err != nil {
 		return AcceptResult{}, err
 	}
-	if strings.TrimSpace(in.Text) == "" && len(in.Images) == 0 {
+	if strings.TrimSpace(in.Text) == "" && len(in.Images) == 0 && len(in.Files) == 0 {
 		if err := setBinding(ctx, tx, in, id); err != nil {
 			return AcceptResult{}, err
 		}
 		return AcceptResult{View: "selected", SessionID: id.String(), RuntimeID: target.runtimeID.String()}, nil
 	}
-	if len(in.Images) == 0 {
+	if len(in.Images) == 0 && len(in.Files) == 0 {
 		if handled, result, err := acceptAliasQuestion(ctx, tx, in, target); handled || err != nil {
 			return result, err
 		}

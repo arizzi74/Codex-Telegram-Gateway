@@ -48,6 +48,7 @@ type peer struct {
 	workerID, connectionID       uuid.UUID
 	supportsWorkerUpdate         bool
 	supportsImageInput           bool
+	supportsFileInput            bool // guarded by Hub.mu after publication
 	supportsSessionWorkspaces    bool
 	supportsWebUISessionCreation bool
 	supportsSessionDeletion      bool
@@ -131,6 +132,7 @@ func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// builds advertise their actual capabilities, including development builds.
 	legacySessionSupport := strings.TrimPrefix(hello.WorkerVersion, "v") == "0.5.19"
 	p := &peer{workerID: worker.ID, connectionID: connectionID, supportsImageInput: hello.SupportsImageInput,
+		supportsFileInput:            hello.SupportsFileInput,
 		supportsWorkerUpdate:         hello.SupportsWorkerUpdate,
 		supportsSessionWorkspaces:    hello.SupportsSessionWorkspaces || legacySessionSupport,
 		supportsWebUISessionCreation: hello.SupportsWebUISessionCreation,
@@ -200,7 +202,13 @@ func (h *Hub) handle(ctx context.Context, p *peer, e protocol.Envelope) error {
 		if err != nil {
 			return err
 		}
-		return h.store.RecordHeartbeat(ctx, registry.Heartbeat{WorkerID: p.workerID, ConnectionID: p.connectionID, Runtimes: runtimes, Metadata: e.Payload})
+		if err := h.store.RecordHeartbeat(ctx, registry.Heartbeat{WorkerID: p.workerID, ConnectionID: p.connectionID, Runtimes: runtimes, Metadata: e.Payload}); err != nil {
+			return err
+		}
+		h.mu.Lock()
+		p.supportsFileInput = hb.SupportsFileInput
+		h.mu.Unlock()
+		return nil
 	case "worker_event":
 		event, err := protocol.Payload[protocol.Event](e)
 		if err != nil {
@@ -388,6 +396,7 @@ func (h *Hub) SendCommand(ctx context.Context, c protocol.Command) error {
 	}
 	h.mu.RLock()
 	p := h.peers[c.WorkerID]
+	supportsFiles := p != nil && p.supportsFileInput
 	h.mu.RUnlock()
 	if p == nil {
 		return errors.New("worker is not connected")
@@ -397,6 +406,13 @@ func (h *Hub) SendCommand(ctx context.Context, c protocol.Command) error {
 	}
 	if err := h.store.CheckConnection(ctx, p.workerID, p.connectionID); err != nil {
 		return err
+	}
+	if (len(c.Arguments.Files) > 0 || c.Operation == protocol.StoreFiles) && !supportsFiles {
+		if h.AckHandler == nil {
+			return errors.New("worker must be updated before receiving files")
+		}
+		return h.AckHandler(ctx, p.workerID, p.connectionID, protocol.CommandAck{CommandID: c.ID, Status: "rejected",
+			Error: &protocol.Error{Code: protocol.UnsupportedOperation, Message: "Update the worker to support document uploads, then resend the file."}})
 	}
 	needsWorkspaces := c.Operation == protocol.BrowseWorkspace || (c.Operation == protocol.NewSession && (c.Arguments.CreateDirectory || c.Arguments.SessionName != ""))
 	needsConversationHistory := c.Operation == protocol.ReadHistory && c.Arguments.History != nil && c.Arguments.History.Messages

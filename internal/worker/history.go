@@ -153,8 +153,14 @@ func (s *Store) externalPromptFilter(runtimeID, threadID string) (func([]codexad
 			text, turn := c.Arguments.Text, record.Result.TurnID
 			switch c.Operation {
 			case protocol.StartTurn:
+				if record.InboundFile != nil {
+					text = record.InboundFile.Prompt
+				}
 				text += strings.Repeat("[Image]", len(c.Arguments.Images))
 			case protocol.Steer:
+				if record.InboundFile != nil {
+					text = record.InboundFile.Prompt
+				}
 				text += strings.Repeat("[Image]", len(c.Arguments.Images))
 				if turn == "" {
 					turn = c.ExpectedTurnID

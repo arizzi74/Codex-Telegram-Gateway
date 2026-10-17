@@ -38,8 +38,10 @@ type IncomingUpdate struct {
 	CommandTTL                                             time.Duration
 	Raw                                                    json.RawMessage
 	Images                                                 []protocol.Image
+	Files                                                  []protocol.File
 	MediaError                                             string
 	imageTarget                                            *routeTarget
+	fileTarget                                             *routeTarget
 	commandCreatedAt                                       time.Time
 }
 
@@ -165,6 +167,7 @@ type routeTarget struct {
 	workerID, runtimeID, sessionID uuid.UUID
 	generation                     int64
 	threadID, activeTurnID         string
+	cwd                            string
 }
 
 // AcceptTelegram atomically deduplicates a Telegram update, resolves its
@@ -219,6 +222,10 @@ func (s *Store) AcceptTelegram(ctx context.Context, in IncomingUpdate) (AcceptRe
 	var result AcceptResult
 	if in.CallbackToken != "" {
 		result, err = s.consumeCallback(ctx, tx, in)
+	} else if len(in.Files) > 0 {
+		// A file and its caption are a session upload, including replies to
+		// input questions and messages sent while a wizard is open.
+		result, err = s.acceptAction(ctx, tx, in)
 	} else if (strings.TrimSpace(in.Action) == "" || strings.EqualFold(strings.TrimSpace(in.Action), "text")) && in.ReplyToMessageID > 0 {
 		result, err = s.acceptReplyInput(ctx, tx, in)
 	} else if handled, wizardResult, wizardErr := s.acceptWizardText(ctx, tx, in); handled || wizardErr != nil {
@@ -281,6 +288,19 @@ func (s *Store) acceptAction(ctx context.Context, tx *dbTx, in IncomingUpdate) (
 	action := strings.ToLower(strings.TrimSpace(in.Action))
 	if action == "media_error" {
 		return mediaErrorResult(in.MediaError), nil
+	}
+	if len(in.Files) > 0 {
+		if err := protocol.ValidateFiles(in.Files); err != nil {
+			for _, file := range in.Files {
+				if len(file.Data) > protocol.MaxFileBytes {
+					return mediaErrorResult("file_too_large"), nil
+				}
+			}
+			return mediaErrorResult("file_invalid"), nil
+		}
+		if len(in.Images) > 0 || (action != "" && action != "text" && action != "start_turn" && action != "steer" && action != "session_alias") {
+			return mediaErrorResult("file_invalid"), nil
+		}
 	}
 	if len(in.Images) > 0 {
 		if err := protocol.ValidateImages(in.Images); err != nil {
@@ -465,11 +485,13 @@ func acceptTextCommand(ctx context.Context, tx *dbTx, in IncomingUpdate, operati
 	// Ordinary prompts guide the exact active turn instead of waiting in the
 	// next-turn queue. Resolve this after question replies and wizard input have
 	// been handled, and use the frozen target for downloaded images.
-	if operation == protocol.StartTurn && autoSteerTelegramAction(in.Action) && target.activeTurnID != "" {
+	if len(in.Files) > 0 && strings.TrimSpace(in.Text) == "" && !strings.EqualFold(strings.TrimSpace(in.Action), "steer") {
+		operation = protocol.StoreFiles
+	} else if operation == protocol.StartTurn && autoSteerTelegramAction(in.Action) && target.activeTurnID != "" {
 		operation = protocol.Steer
 	}
 	if operation == protocol.StartTurn || operation == protocol.Steer {
-		if strings.TrimSpace(in.Text) == "" && len(in.Images) == 0 {
+		if strings.TrimSpace(in.Text) == "" && len(in.Images) == 0 && len(in.Files) == 0 {
 			return AcceptResult{}, ErrTelegramTarget
 		}
 	}
@@ -480,6 +502,25 @@ func acceptTextCommand(ctx context.Context, tx *dbTx, in IncomingUpdate, operati
 		}
 		if !supported {
 			return mediaErrorResult("image_worker_upgrade"), nil
+		}
+	}
+	if len(in.Files) > 0 {
+		allowed, err := telegramMediaAuthorized(ctx, tx, in)
+		if err != nil {
+			return AcceptResult{}, err
+		}
+		if !allowed {
+			return mediaErrorResult("file_unauthorized"), nil
+		}
+		supported, err := workerSupportsFileInput(ctx, tx, target.workerID)
+		if err != nil {
+			return AcceptResult{}, err
+		}
+		if !supported {
+			return mediaErrorResult("file_worker_upgrade"), nil
+		}
+		if strings.TrimSpace(target.cwd) == "" {
+			return AcceptResult{}, ErrTelegramTarget
 		}
 	}
 	expected := ""
@@ -507,7 +548,14 @@ func acceptTextCommand(ctx context.Context, tx *dbTx, in IncomingUpdate, operati
 			return AcceptResult{}, err
 		}
 	}
-	command, err := createTelegramCommand(ctx, tx, in, target, operation, target.sessionID.String(), expected, protocol.Arguments{Text: in.Text, Images: in.Images})
+	args := protocol.Arguments{Text: in.Text, Images: in.Images, Files: in.Files}
+	if operation == protocol.StoreFiles {
+		args.Text = ""
+	}
+	if len(in.Files) > 0 {
+		args.CWD = target.cwd
+	}
+	command, err := createTelegramCommand(ctx, tx, in, target, operation, target.sessionID.String(), expected, args)
 	if err != nil {
 		return AcceptResult{}, err
 	}
@@ -797,11 +845,11 @@ func bindingRoute(ctx context.Context, tx *dbTx, in IncomingUpdate, topicID int6
 func sessionRoute(ctx context.Context, tx *dbTx, sessionID uuid.UUID) (routeTarget, error) {
 	var target routeTarget
 	err := tx.QueryRow(ctx, `SELECT session.worker_id, session.runtime_id, runtime.generation,
-        session.codex_thread_id, COALESCE(session.active_turn_id, '')
+		session.codex_thread_id, COALESCE(session.active_turn_id, ''), COALESCE(session.cwd, '')
         FROM sessions AS session JOIN runtimes AS runtime ON runtime.runtime_id=session.runtime_id
         JOIN workers worker ON worker.worker_id=session.worker_id
         WHERE session.session_id=$1 AND session.archived=FALSE AND worker.enabled=TRUE`, sessionID).
-		Scan(&target.workerID, &target.runtimeID, &target.generation, &target.threadID, &target.activeTurnID)
+		Scan(&target.workerID, &target.runtimeID, &target.generation, &target.threadID, &target.activeTurnID, &target.cwd)
 	if errors.Is(err, sql.ErrNoRows) {
 		return routeTarget{}, ErrTelegramTarget
 	}
@@ -997,11 +1045,11 @@ func queueUIResponse(ctx context.Context, tx *dbTx, in IncomingUpdate, result Ac
 		return err
 	}
 	if result.View == "queued" && result.CommandID != "" {
-		var prompt bool
-		if err := tx.QueryRow(ctx, `SELECT operation='start_turn' FROM commands WHERE command_id=$1`, result.CommandID).Scan(&prompt); err != nil {
+		var omitQueued bool
+		if err := tx.QueryRow(ctx, `SELECT operation IN ('start_turn','store_files') FROM commands WHERE command_id=$1`, result.CommandID).Scan(&omitQueued); err != nil {
 			return fmt.Errorf("registry: inspect queued response: %w", err)
 		}
-		if prompt {
+		if omitQueued {
 			return nil
 		}
 	}

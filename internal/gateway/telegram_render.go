@@ -623,7 +623,18 @@ func (s *Sender) renderEvent(ctx context.Context, row registry.Delivery) (string
 		}
 		return "✅ New session ready · " + humanIdentity(createdWorker, createdRuntime, created) + "\n\nWorkspace: " + displayValue(created.CWD) + "\nStatus: " + titleCase(created.State) + "\n\nReply to this message to use this session, or select it with /tgsessions.", nil, nil
 	case "command_result_unknown":
-		return "⚠️ " + identity + "\n\nThe command outcome is unknown. Use /tgstatus before retrying.", nil, nil
+		message := "The command outcome is unknown. Use /tgstatus before retrying."
+		var result protocol.Result
+		if json.Unmarshal(event.Data, &result) == nil && result.Error != nil {
+			// A document can be saved before an ambiguous Codex RPC or worker
+			// restart. Keep its confirmed path visible without exposing raw RPC
+			// diagnostics or implying that the prompt completed successfully.
+			first, _, _ := strings.Cut(result.Error.Message, "\n")
+			if strings.HasPrefix(first, "File saved in ") {
+				message = first + "\n\n" + message
+			}
+		}
+		return "⚠️ " + identity + "\n\n" + message, nil, nil
 	default:
 		return titleCase(event.Kind) + " · " + identity, nil, nil
 	}
@@ -885,6 +896,16 @@ func telegramErrorText(code string) string {
 		return "The selected worker needs an update before it can receive images. Please resend the image after the worker updates."
 	case "image_input_reply":
 		return "This input request needs a text answer. Send the image as a separate message to the selected session."
+	case "file_too_large":
+		return "The file is too large. Send a document of 10 MiB or less."
+	case "file_download_failed":
+		return "The file could not be downloaded from Telegram. Please send it again."
+	case "file_invalid":
+		return "The document could not be accepted. Send one file of 10 MiB or less."
+	case "file_worker_upgrade":
+		return "The selected worker needs an update before it can receive files. Please resend the file after the worker updates."
+	case "file_unauthorized":
+		return "This attachment cannot be sent because access to its destination changed."
 	case "unknown_command":
 		return "Unknown command. Use /tghelp for gateway controls or /help for Codex commands."
 	case "command_too_long":
