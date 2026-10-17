@@ -153,8 +153,14 @@ off.
 Each bot has an **Inherit selected session name** checkbox, off by default.
 When enabled, its Telegram display name follows the session selected in the
 gateway owner's private chat, for example **EnkiCodex · CodeNow**. Session
-switches and session renames update the name automatically. Disconnecting the
-session or clearing the checkbox restores the original display name.
+switches and session renames update the name automatically. Managed bots use
+the display name from their matching completed creation request as the base,
+including older registrations without a saved manager identity. Other bots use
+the original default name captured before inheritance was enabled. Disconnecting
+the session or clearing the checkbox restores that base name.
+This also repairs inherited names that previously included an old session name
+inside the captured original. Names are recovered from the creation record;
+the gateway does not guess by stripping parts of a display name.
 The `@username` and gateway routing identity stay unchanged.
 
 Telegram display names are global to a bot, so selections in groups and topics

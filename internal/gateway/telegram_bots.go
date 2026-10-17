@@ -192,7 +192,13 @@ func NewTelegramBotManager(ctx context.Context, store *registry.Store, cfg confi
 		return nil, errors.New("Telegram bot name preferences could not be loaded")
 	}
 	for _, preference := range preferences {
-		m.botNames[preference.BotID] = telegramBotNameState{preference: preference, pending: preference.InheritSessionName || (preference.OriginalDisplayName != nil && (preference.AppliedDisplayName == nil || *preference.AppliedDisplayName != *preference.OriginalDisplayName))}
+		state := telegramBotNameState{preference: preference}
+		if err := m.loadBotNameBase(ctx, preference.BotID, &state); err != nil && (preference.InheritSessionName || preference.OriginalDisplayName != nil) {
+			state.pending, state.lastError = true, "name_state_unavailable"
+		} else {
+			state.pending = preference.InheritSessionName || state.needsNameRestore()
+		}
+		m.botNames[preference.BotID] = state
 	}
 	return m, nil
 }
@@ -338,8 +344,8 @@ func (m *TelegramBotManager) summary(bot *telegramManagedRuntime) TelegramBotSum
 	}
 	name := m.botNameState(b.ID)
 	summary := TelegramBotSummary{ID: b.ID, TelegramID: b.TelegramID, Username: b.Username, DisplayName: b.DisplayName, Enabled: b.Enabled, Legacy: b.Legacy, Managed: b.ManagedBy != "", CanManageBots: b.CanManageBots, WebhookURL: m.webhookURL(b), Status: status, Error: b.LastError, InheritSessionName: name.preference.InheritSessionName, NameSyncPending: name.pending, NameError: name.lastError}
-	if name.preference.OriginalDisplayName != nil {
-		summary.OriginalDisplayName = *name.preference.OriginalDisplayName
+	if original := name.originalDisplayName(); original != nil {
+		summary.OriginalDisplayName = *original
 	}
 	// getMe may briefly return an older name after setMyName succeeds.
 	if name.preference.AppliedDisplayName != nil && (name.preference.InheritSessionName || name.pending) {

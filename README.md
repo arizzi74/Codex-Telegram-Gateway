@@ -363,8 +363,11 @@ New managed bots receive the purple Gateway icon as their default profile photo;
 an existing photo is preserved. Expand a bot and use **Reset profile photo >_**
 to apply the icon to an existing bot after confirmation.
 Each Telegram bot can optionally inherit the session name selected in your
-private chat, displaying **Original name · Session name**. Disconnection or
-turning the option off restores its original name. The bot-removal dialog also
+private chat, displaying **Base name · Session name**. Managed bots use their
+recorded creation name as the base, so a previously inherited session name
+cannot become part of the permanent prefix. Other bots retain their captured
+original name. Disconnection or turning the option off restores the base name.
+The bot-removal dialog also
 links to BotFather's deletion flow; permanent Telegram deletion requires the
 owner's confirmation there. See [Telegram bot settings](docs/admin.md#telegram-bots).
 Passkeys use the hostname from the configured public HTTPS URL as their

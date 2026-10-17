@@ -17,10 +17,39 @@ const telegramBotNamesInterval = 5 * time.Second
 
 type telegramBotNameState struct {
 	preference registry.TelegramBotNamePreference
-	pending    bool
-	lastError  string
-	retryAt    time.Time
-	failures   int
+	// The creation intent can recover a clean base from a historical capture
+	// that already included a session. Keep that source separate from the
+	// immutable capture, which remains the fallback for externally created bots.
+	baseName  *string
+	pending   bool
+	lastError string
+	retryAt   time.Time
+	failures  int
+}
+
+func (s telegramBotNameState) originalDisplayName() *string {
+	if s.baseName != nil {
+		return s.baseName
+	}
+	return s.preference.OriginalDisplayName
+}
+
+func (s telegramBotNameState) needsNameRestore() bool {
+	original := s.originalDisplayName()
+	applied := s.preference.AppliedDisplayName
+	return s.preference.OriginalDisplayName != nil && (applied == nil || *applied != *original)
+}
+
+func (m *TelegramBotManager) loadBotNameBase(ctx context.Context, id string, state *telegramBotNameState) error {
+	base, err := m.store.TelegramBotCreationName(ctx, id, m.cfg.Secrets.WLID)
+	if err != nil {
+		return err
+	}
+	if base == nil {
+		base = state.preference.OriginalDisplayName
+	}
+	state.baseName = base
+	return nil
 }
 
 func (m *TelegramBotManager) botNameState(id string) telegramBotNameState {
@@ -36,7 +65,7 @@ func (m *TelegramBotManager) putBotNameState(id string, state telegramBotNameSta
 }
 
 // SetBotNameRedactor applies the gateway's outbound redaction policy to composed
-// names before truncation. The captured original is restored exactly.
+// names before truncation. The resolved base is restored exactly.
 func (m *TelegramBotManager) SetBotNameRedactor(redactor *auth.Redactor) {
 	m.op.Lock()
 	m.botNameRedactor = redactor
@@ -58,7 +87,7 @@ func (m *TelegramBotManager) SetTelegramBotSessionName(ctx context.Context, id s
 	state := m.botNameState(id)
 	state.preference.BotID = id
 	state.preference.InheritSessionName = enabled
-	state.pending = enabled || (state.preference.OriginalDisplayName != nil && (state.preference.AppliedDisplayName == nil || *state.preference.AppliedDisplayName != *state.preference.OriginalDisplayName))
+	state.pending = enabled || state.needsNameRestore()
 	state.lastError = ""
 	m.putBotNameState(id, state)
 	select {
@@ -117,9 +146,6 @@ func (m *TelegramBotManager) syncBotName(ctx context.Context, id string, now tim
 	if bot == nil || !bot.record.Enabled || bot.record.LastError == "owner_changed" || now.Before(state.retryAt) {
 		return
 	}
-	if !p.InheritSessionName && !state.pending {
-		return
-	}
 	if !p.InheritSessionName && p.OriginalDisplayName == nil {
 		state.pending, state.lastError = false, ""
 		m.putBotNameState(id, state)
@@ -141,6 +167,13 @@ func (m *TelegramBotManager) syncBotName(ctx context.Context, id string, now tim
 		state.retryAt = time.Now().Add(delay)
 		m.putBotNameState(id, state)
 	}
+	// Resolve the current trusted source even if the previous applied name is
+	// cached or the flag is off: a newly recovered creation intent can correct
+	// the base without replacing the historical capture.
+	if err := m.loadBotNameBase(requestCtx, id, &state); err != nil {
+		fail("name_state_unavailable", err)
+		return
+	}
 	sessionName := ""
 	if p.InheritSessionName {
 		var err error
@@ -152,7 +185,7 @@ func (m *TelegramBotManager) syncBotName(ctx context.Context, id string, now tim
 	}
 	desired := ""
 	if p.OriginalDisplayName != nil {
-		desired = telegramBotSessionDisplayName(*p.OriginalDisplayName, sessionName, m.botNameRedactor)
+		desired = telegramBotSessionDisplayName(*state.originalDisplayName(), sessionName, m.botNameRedactor)
 		if p.AppliedDisplayName != nil && desired == *p.AppliedDisplayName {
 			state.pending, state.lastError, state.failures, state.retryAt = false, "", 0, time.Time{}
 			m.putBotNameState(id, state)
@@ -182,9 +215,12 @@ func (m *TelegramBotManager) syncBotName(ctx context.Context, id string, now tim
 			return
 		}
 		p.OriginalDisplayName, p.AppliedDisplayName = &original, &original
+		if state.baseName == nil {
+			state.baseName = &original
+		}
 		// Persist and publish the captured baseline before the first remote change.
 		m.putBotNameState(id, state)
-		desired = telegramBotSessionDisplayName(original, sessionName, m.botNameRedactor)
+		desired = telegramBotSessionDisplayName(*state.originalDisplayName(), sessionName, m.botNameRedactor)
 	}
 	if p.AppliedDisplayName == nil || desired != *p.AppliedDisplayName {
 		if err := m.store.MarkTelegramBotNamePending(requestCtx, id); err != nil {

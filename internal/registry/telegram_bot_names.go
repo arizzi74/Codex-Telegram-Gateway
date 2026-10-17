@@ -16,6 +16,37 @@ type TelegramBotNamePreference struct {
 	AppliedDisplayName  *string
 }
 
+// Imported managed bots can lack the manager identity. Their same-owner
+// connected creation still supplies the original name; a known manager scopes
+// which creation records are authoritative. Share this selection with the WebUI
+// so profile synchronization and the selector use the same creation name.
+func telegramBotCreationNameSQL(bot string) string {
+	return `(SELECT intent.display_name FROM telegram_managed_bot_intents intent
+        WHERE intent.bot_id=` + bot + `.bot_id AND intent.owner_id=` + bot + `.owner_id
+          AND (` + bot + `.managed_by='' OR intent.manager_id=` + bot + `.managed_by)
+          AND intent.status='connected'
+        ORDER BY intent.created_at DESC,intent.intent_id DESC LIMIT 1)`
+}
+
+// TelegramBotCreationName returns the authoritative managed creation name for
+// this bot and its configured owner. A missing bot, owner mismatch or absent
+// completed intent returns nil. Captured name preferences are never changed.
+func (s *Store) TelegramBotCreationName(ctx context.Context, id string, owner int64) (*string, error) {
+	var name sql.NullString
+	err := s.pool.QueryRow(ctx, `SELECT `+telegramBotCreationNameSQL("bot")+`
+        FROM telegram_bots bot WHERE bot.bot_id=$1 AND bot.owner_id=$2`, id, owner).Scan(&name)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if !name.Valid {
+		return nil, nil
+	}
+	return &name.String, nil
+}
+
 func (s *Store) TelegramBotNamePreferences(ctx context.Context) ([]TelegramBotNamePreference, error) {
 	rows, err := s.pool.Query(ctx, `SELECT bot_id,inherit_session_name,original_display_name,applied_display_name FROM telegram_bot_names ORDER BY bot_id`)
 	if err != nil {

@@ -39,13 +39,7 @@ func telegramOwnerPrivateBindingSQL(bot, binding string) string {
 func readWebUITelegramBots(ctx context.Context, db interface {
 	Query(context.Context, string, ...any) (*dbRows, error)
 }) (WebUITelegramBotSnapshot, error) {
-	// Imported managed bots can lack the manager identity. Their same-owner
-	// connected creation still supplies the original name; a known manager
-	// continues to scope which creation records are authoritative.
-	rows, err := db.Query(ctx, `SELECT bot.bot_id,COALESCE((SELECT intent.display_name
-            FROM telegram_managed_bot_intents intent WHERE intent.bot_id=bot.bot_id
-              AND (bot.managed_by='' OR intent.manager_id=bot.managed_by) AND intent.owner_id=bot.owner_id
-              AND intent.status='connected' ORDER BY intent.created_at DESC,intent.intent_id DESC LIMIT 1),
+	rows, err := db.Query(ctx, `SELECT bot.bot_id,COALESCE(`+telegramBotCreationNameSQL("bot")+`,
             names.original_display_name,bot.display_name),
         COALESCE((SELECT binding.session_id FROM telegram_bindings binding
             JOIN sessions session ON session.session_id=binding.session_id AND session.archived=0
