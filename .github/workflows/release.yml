@@ -1,0 +1,223 @@
+name: Legacy compatibility release
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ['v0.6.23']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: legacy-release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CANONICAL_REPO: arizzi74/MACT
+  CANONICAL_REPOSITORY_ID: '1369450599'
+  CANONICAL_SOURCE_COMMIT: 4b87b1e97197e4b2074f78a3e98ca43f952e68cf
+  LEGACY_REPO: arizzi74/Codex-Telegram-Gateway
+  LEGACY_VERIFIER_COMMIT: 7412bb8dfa618adf0b2e589f1fb9ab645ec80b77
+  RELEASE_TAG: v0.6.23
+
+jobs:
+  verify-and-attest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Require the exact compatibility repository and tag
+        run: |
+          test "$GITHUB_REPOSITORY" = "$LEGACY_REPO"
+          test "$GITHUB_REF" = "refs/tags/$RELEASE_TAG"
+          [[ "$CANONICAL_SOURCE_COMMIT" =~ ^[0-9a-f]{40}$ ]]
+          gh api "repos/$CANONICAL_REPO" > "$RUNNER_TEMP/canonical-repository.json"
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          repo = json.loads((Path(os.environ["RUNNER_TEMP"]) / "canonical-repository.json").read_text())
+          assert repo["id"] == int(os.environ["CANONICAL_REPOSITORY_ID"]), "Unexpected canonical repository ID"
+          assert repo["full_name"] == os.environ["CANONICAL_REPO"], "Unexpected canonical repository name"
+          PY
+          test "$(gh api "repos/$CANONICAL_REPO/commits/$RELEASE_TAG" --jq .sha)" = "$CANONICAL_SOURCE_COMMIT"
+          gh api "repos/$CANONICAL_REPO/releases/tags/$RELEASE_TAG" > "$RUNNER_TEMP/canonical-release.json"
+
+      - name: Check out the legacy workflow source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          repository: arizzi74/MACT
+          ref: ${{ env.CANONICAL_SOURCE_COMMIT }}
+          path: trusted-current
+          persist-credentials: false
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          repository: arizzi74/MACT
+          ref: ${{ env.LEGACY_VERIFIER_COMMIT }}
+          path: trusted-v019
+          persist-credentials: false
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: '1.26.x'
+          check-latest: true
+          cache: false
+
+      - name: Build verifiers from pinned trusted source
+        run: |
+          test "$(git -C trusted-current rev-parse HEAD)" = "$CANONICAL_SOURCE_COMMIT"
+          test "$(git -C trusted-v019 rev-parse HEAD)" = "$LEGACY_VERIFIER_COMMIT"
+          go -C trusted-current build -o "$RUNNER_TEMP/current-release-tool" ./cmd/release-tool
+          go -C trusted-v019 build -o "$RUNNER_TEMP/v019-release-tool" ./cmd/release-tool
+
+      - name: Require all 29 official release assets and exact URLs
+        run: |
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          tag, repo = os.environ["RELEASE_TAG"], os.environ["CANONICAL_REPO"]
+          release = json.loads((Path(os.environ["RUNNER_TEMP"]) / "canonical-release.json").read_text())
+          assert release["tag_name"] == tag
+          assert release["draft"] is False and release["prerelease"] is False
+          assert release["html_url"] == f"https://github.com/{repo}/releases/tag/{tag}"
+          names = {"install.sh", "SHA256SUMS", "SHA256SUMS.sigstore.json"}
+          for system in ("linux", "darwin"):
+              components = ("gateway", "worker", "local", "whisper") if system == "linux" else ("worker", "local", "whisper")
+              for arch in ("amd64", "arm64"):
+                  names.add(f"codex-telegramgw-{system}-{arch}")
+                  names.update(f"codex-{component}-{system}-{arch}.tar.gz" for component in (*components, "piper", "qwen-tts"))
+          assets = release["assets"]
+          assert len(names) == 29 and len(assets) == 29
+          assert {asset["name"] for asset in assets} == names, "Unexpected release asset set"
+          for asset in assets:
+              assert asset["browser_download_url"] == f"https://github.com/{repo}/releases/download/{tag}/{asset['name']}"
+          (Path(os.environ["RUNNER_TEMP"]) / "artifact-names.txt").write_text("".join(name + "\n" for name in sorted(names)))
+          PY
+          mkdir canonical
+          gh release download "$RELEASE_TAG" --repo "$CANONICAL_REPO" --dir canonical
+
+      - name: Verify canonical signature, every archive, and unchanged checksums
+        run: |
+          "$RUNNER_TEMP/current-release-tool" verify-provenance --dist "$GITHUB_WORKSPACE/canonical" --repo "$CANONICAL_REPO" --tag "$RELEASE_TAG"
+          "$RUNNER_TEMP/current-release-tool" verify --root "$GITHUB_WORKSPACE/trusted-current" --dist "$GITHUB_WORKSPACE/canonical"
+          (cd canonical && sha256sum --strict -c SHA256SUMS)
+          diff -u "$RUNNER_TEMP/artifact-names.txt" <(find canonical -mindepth 1 -maxdepth 1 -type f -printf '%f\n' | sort)
+          mkdir dist
+          cp canonical/* dist/
+          rm dist/SHA256SUMS.sigstore.json
+
+      - name: Attest the unchanged official checksum manifest for legacy clients
+        id: provenance
+        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3
+        with:
+          subject-path: dist/SHA256SUMS
+
+      - name: Verify the new legacy signer with current and actual v0.6.19 policies
+        env:
+          BUNDLE_PATH: ${{ steps.provenance.outputs.bundle-path }}
+        run: |
+          cp -- "$BUNDLE_PATH" dist/SHA256SUMS.sigstore.json
+          "$RUNNER_TEMP/current-release-tool" verify-provenance --dist "$GITHUB_WORKSPACE/dist" --repo "$LEGACY_REPO" --tag "$RELEASE_TAG"
+          "$RUNNER_TEMP/v019-release-tool" verify-provenance --dist "$GITHUB_WORKSPACE/dist" --repo "$LEGACY_REPO" --tag "$RELEASE_TAG"
+          "$RUNNER_TEMP/current-release-tool" verify --root "$GITHUB_WORKSPACE/trusted-current" --dist "$GITHUB_WORKSPACE/dist"
+          (cd dist && sha256sum --strict -c SHA256SUMS)
+          diff -u "$RUNNER_TEMP/artifact-names.txt" <(find dist -mindepth 1 -maxdepth 1 -type f -printf '%f\n' | sort)
+          for file in canonical/*; do
+            name=$(basename "$file")
+            if [ "$name" != SHA256SUMS.sigstore.json ]; then cmp -- "$file" "dist/$name"; fi
+          done
+          printf 'Canonical source: %s\nLegacy verifier source: %s\n' "$CANONICAL_SOURCE_COMMIT" "$LEGACY_VERIFIER_COMMIT"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: legacy-release-files
+          if-no-files-found: error
+          path: dist/*
+          retention-days: 7
+
+  publish:
+    needs: verify-and-attest
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: arizzi74/Codex-Telegram-Gateway
+    steps:
+      - name: Check out the legacy workflow source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          repository: arizzi74/MACT
+          ref: ${{ env.CANONICAL_SOURCE_COMMIT }}
+          path: trusted-current
+          persist-credentials: false
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          repository: arizzi74/MACT
+          ref: ${{ env.LEGACY_VERIFIER_COMMIT }}
+          path: trusted-v019
+          persist-credentials: false
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: '1.26.x'
+          check-latest: true
+          cache: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: legacy-release-files
+          path: dist
+
+      - name: Verify again and refuse to overwrite an existing release
+        run: |
+          test "$GITHUB_REPOSITORY" = "$LEGACY_REPO"
+          test "$GITHUB_REF" = "refs/tags/$RELEASE_TAG"
+          test "$(git -C trusted-current rev-parse HEAD)" = "$CANONICAL_SOURCE_COMMIT"
+          test "$(git -C trusted-v019 rev-parse HEAD)" = "$LEGACY_VERIFIER_COMMIT"
+          test "$(gh api "repos/$GH_REPO/commits/$RELEASE_TAG" --jq .sha)" = "$GITHUB_SHA"
+          go -C trusted-current build -o "$RUNNER_TEMP/current-release-tool" ./cmd/release-tool
+          go -C trusted-v019 build -o "$RUNNER_TEMP/v019-release-tool" ./cmd/release-tool
+          test "$(find dist -mindepth 1 -maxdepth 1 -type f | wc -l)" -eq 29
+          "$RUNNER_TEMP/current-release-tool" verify --root "$GITHUB_WORKSPACE/trusted-current" --dist "$GITHUB_WORKSPACE/dist"
+          "$RUNNER_TEMP/current-release-tool" verify-provenance --dist "$GITHUB_WORKSPACE/dist" --repo "$LEGACY_REPO" --tag "$RELEASE_TAG"
+          "$RUNNER_TEMP/v019-release-tool" verify-provenance --dist "$GITHUB_WORKSPACE/dist" --repo "$LEGACY_REPO" --tag "$RELEASE_TAG"
+          (cd dist && sha256sum --strict -c SHA256SUMS)
+          # Listing must succeed; any API error stops the job rather than being
+          # interpreted as proof that a release does not exist.
+          gh api --paginate "repos/$GH_REPO/releases?per_page=100" --jq '.[].tag_name' > "$RUNNER_TEMP/existing-tags.txt"
+          if grep -Fxq "$RELEASE_TAG" "$RUNNER_TEMP/existing-tags.txt"; then
+            echo 'A release already exists for this tag; refusing to replace it.' >&2
+            exit 1
+          fi
+          cat > "$RUNNER_TEMP/release-notes.md" <<'NOTES'
+          Compatibility bridge for existing Codex Telegram Gateway installations.
+
+          These application files are copied unchanged from [MACT v0.6.23](https://github.com/arizzi74/MACT/releases/tag/v0.6.23). The official checksum manifest is unchanged and has a fresh signed attestation from this legacy repository so older updaters can verify it.
+
+          After a legacy updater installs this bridge, the next successful normal update saves the canonical MACT repository. Source, issues, documentation, history, and future releases are maintained at https://github.com/arizzi74/MACT.
+          NOTES
+
+      - name: Upload and verify the draft before publishing
+        run: |
+          gh release create "$RELEASE_TAG" --repo "$GH_REPO" --draft --verify-tag --title "$RELEASE_TAG — MACT compatibility bridge" --notes-file "$RUNNER_TEMP/release-notes.md"
+          gh release upload "$RELEASE_TAG" dist/* --repo "$GH_REPO"
+          mkdir "$RUNNER_TEMP/downloaded-release"
+          gh release download "$RELEASE_TAG" --repo "$GH_REPO" --dir "$RUNNER_TEMP/downloaded-release"
+          test "$(find "$RUNNER_TEMP/downloaded-release" -mindepth 1 -maxdepth 1 -type f | wc -l)" -eq 29
+          for file in dist/*; do cmp -- "$file" "$RUNNER_TEMP/downloaded-release/$(basename "$file")"; done
+          "$RUNNER_TEMP/current-release-tool" verify --root "$GITHUB_WORKSPACE/trusted-current" --dist "$RUNNER_TEMP/downloaded-release"
+          "$RUNNER_TEMP/current-release-tool" verify-provenance --dist "$RUNNER_TEMP/downloaded-release" --repo "$LEGACY_REPO" --tag "$RELEASE_TAG"
+          "$RUNNER_TEMP/v019-release-tool" verify-provenance --dist "$RUNNER_TEMP/downloaded-release" --repo "$LEGACY_REPO" --tag "$RELEASE_TAG"
+          (cd "$RUNNER_TEMP/downloaded-release" && sha256sum --strict -c SHA256SUMS)
+          test "$(gh api "repos/$GH_REPO/commits/$RELEASE_TAG" --jq .sha)" = "$GITHUB_SHA"
+          gh release edit "$RELEASE_TAG" --repo "$GH_REPO" --draft=false --latest
+
