@@ -3,7 +3,7 @@ name: Legacy compatibility release
 on:
   workflow_dispatch:
   push:
-    tags: ['v0.6.23']
+    tags: ['v0.7.32']
 
 permissions:
   contents: read
@@ -14,11 +14,12 @@ concurrency:
 
 env:
   CANONICAL_REPO: arizzi74/MACT
+  CANONICAL_SIGNING_REPO: arizzi74/MACT
   CANONICAL_REPOSITORY_ID: '1369450599'
-  CANONICAL_SOURCE_COMMIT: 4b87b1e97197e4b2074f78a3e98ca43f952e68cf
+  CANONICAL_SOURCE_COMMIT: 3d08a0f67cec851bfd1e0de7179284f5c02c2ccb
   LEGACY_REPO: arizzi74/Codex-Telegram-Gateway
   LEGACY_VERIFIER_COMMIT: 7412bb8dfa618adf0b2e589f1fb9ab645ec80b77
-  RELEASE_TAG: v0.6.23
+  RELEASE_TAG: v0.7.32
 
 jobs:
   verify-and-attest:
@@ -53,13 +54,13 @@ jobs:
           persist-credentials: false
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          repository: arizzi74/MACT
+          repository: ${{ env.CANONICAL_REPO }}
           ref: ${{ env.CANONICAL_SOURCE_COMMIT }}
           path: trusted-current
           persist-credentials: false
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          repository: arizzi74/MACT
+          repository: ${{ env.CANONICAL_REPO }}
           ref: ${{ env.LEGACY_VERIFIER_COMMIT }}
           path: trusted-v019
           persist-credentials: false
@@ -76,7 +77,7 @@ jobs:
           go -C trusted-current build -o "$RUNNER_TEMP/current-release-tool" ./cmd/release-tool
           go -C trusted-v019 build -o "$RUNNER_TEMP/v019-release-tool" ./cmd/release-tool
 
-      - name: Require all 29 official release assets and exact URLs
+      - name: Require all 33 official release assets and exact URLs
         run: |
           python3 - <<'PY'
           import json, os
@@ -91,9 +92,10 @@ jobs:
               components = ("gateway", "worker", "local", "whisper") if system == "linux" else ("worker", "local", "whisper")
               for arch in ("amd64", "arm64"):
                   names.add(f"codex-telegramgw-{system}-{arch}")
+                  names.add(f"claude-worker-{system}-{arch}.tar.gz")
                   names.update(f"codex-{component}-{system}-{arch}.tar.gz" for component in (*components, "piper", "qwen-tts"))
           assets = release["assets"]
-          assert len(names) == 29 and len(assets) == 29
+          assert len(names) == 33 and len(assets) == 33
           assert {asset["name"] for asset in assets} == names, "Unexpected release asset set"
           for asset in assets:
               assert asset["browser_download_url"] == f"https://github.com/{repo}/releases/download/{tag}/{asset['name']}"
@@ -104,7 +106,7 @@ jobs:
 
       - name: Verify canonical signature, every archive, and unchanged checksums
         run: |
-          "$RUNNER_TEMP/current-release-tool" verify-provenance --dist "$GITHUB_WORKSPACE/canonical" --repo "$CANONICAL_REPO" --tag "$RELEASE_TAG"
+          "$RUNNER_TEMP/current-release-tool" verify-provenance --dist "$GITHUB_WORKSPACE/canonical" --repo "$CANONICAL_SIGNING_REPO" --tag "$RELEASE_TAG"
           "$RUNNER_TEMP/current-release-tool" verify --root "$GITHUB_WORKSPACE/trusted-current" --dist "$GITHUB_WORKSPACE/canonical"
           (cd canonical && sha256sum --strict -c SHA256SUMS)
           diff -u "$RUNNER_TEMP/artifact-names.txt" <(find canonical -mindepth 1 -maxdepth 1 -type f -printf '%f\n' | sort)
@@ -158,13 +160,13 @@ jobs:
           persist-credentials: false
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          repository: arizzi74/MACT
+          repository: ${{ env.CANONICAL_REPO }}
           ref: ${{ env.CANONICAL_SOURCE_COMMIT }}
           path: trusted-current
           persist-credentials: false
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          repository: arizzi74/MACT
+          repository: ${{ env.CANONICAL_REPO }}
           ref: ${{ env.LEGACY_VERIFIER_COMMIT }}
           path: trusted-v019
           persist-credentials: false
@@ -187,7 +189,7 @@ jobs:
           test "$(gh api "repos/$GH_REPO/commits/$RELEASE_TAG" --jq .sha)" = "$GITHUB_SHA"
           go -C trusted-current build -o "$RUNNER_TEMP/current-release-tool" ./cmd/release-tool
           go -C trusted-v019 build -o "$RUNNER_TEMP/v019-release-tool" ./cmd/release-tool
-          test "$(find dist -mindepth 1 -maxdepth 1 -type f | wc -l)" -eq 29
+          test "$(find dist -mindepth 1 -maxdepth 1 -type f | wc -l)" -eq 33
           "$RUNNER_TEMP/current-release-tool" verify --root "$GITHUB_WORKSPACE/trusted-current" --dist "$GITHUB_WORKSPACE/dist"
           "$RUNNER_TEMP/current-release-tool" verify-provenance --dist "$GITHUB_WORKSPACE/dist" --repo "$LEGACY_REPO" --tag "$RELEASE_TAG"
           "$RUNNER_TEMP/v019-release-tool" verify-provenance --dist "$GITHUB_WORKSPACE/dist" --repo "$LEGACY_REPO" --tag "$RELEASE_TAG"
@@ -202,9 +204,9 @@ jobs:
           cat > "$RUNNER_TEMP/release-notes.md" <<'NOTES'
           Compatibility bridge for existing Codex Telegram Gateway installations.
 
-          These application files are copied unchanged from [MACT v0.6.23](https://github.com/arizzi74/MACT/releases/tag/v0.6.23). The official checksum manifest is unchanged and has a fresh signed attestation from this legacy repository so older updaters can verify it.
+          These application files are copied unchanged from [MACT v0.7.32](https://github.com/arizzi74/MACT/releases/tag/v0.7.32). The official checksum manifest is unchanged and has a fresh signed attestation from this legacy repository so older updaters can verify it.
 
-          After a legacy updater installs this bridge, the next successful normal update saves the canonical MACT repository. Source, issues, documentation, history, and future releases are maintained at https://github.com/arizzi74/MACT.
+          After a legacy updater installs this bridge, the new manager resolves the official repository by its immutable identity on the next successful normal update, including after the Twarm rename. Source, issues, documentation, history, and future releases are maintained at https://github.com/arizzi74/MACT.
           NOTES
 
       - name: Upload and verify the draft before publishing
@@ -213,7 +215,7 @@ jobs:
           gh release upload "$RELEASE_TAG" dist/* --repo "$GH_REPO"
           mkdir "$RUNNER_TEMP/downloaded-release"
           gh release download "$RELEASE_TAG" --repo "$GH_REPO" --dir "$RUNNER_TEMP/downloaded-release"
-          test "$(find "$RUNNER_TEMP/downloaded-release" -mindepth 1 -maxdepth 1 -type f | wc -l)" -eq 29
+          test "$(find "$RUNNER_TEMP/downloaded-release" -mindepth 1 -maxdepth 1 -type f | wc -l)" -eq 33
           for file in dist/*; do cmp -- "$file" "$RUNNER_TEMP/downloaded-release/$(basename "$file")"; done
           "$RUNNER_TEMP/current-release-tool" verify --root "$GITHUB_WORKSPACE/trusted-current" --dist "$RUNNER_TEMP/downloaded-release"
           "$RUNNER_TEMP/current-release-tool" verify-provenance --dist "$RUNNER_TEMP/downloaded-release" --repo "$LEGACY_REPO" --tag "$RELEASE_TAG"
