@@ -13,7 +13,7 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  CANONICAL_REPO: arizzi74/MACT
+  CANONICAL_REPO: arizzi74/Twarm
   CANONICAL_SIGNING_REPO: arizzi74/MACT
   CANONICAL_REPOSITORY_ID: '1369450599'
   CANONICAL_SOURCE_COMMIT: 3d08a0f67cec851bfd1e0de7179284f5c02c2ccb
@@ -204,9 +204,9 @@ jobs:
           cat > "$RUNNER_TEMP/release-notes.md" <<'NOTES'
           Compatibility bridge for existing Codex Telegram Gateway installations.
 
-          These application files are copied unchanged from [MACT v0.7.32](https://github.com/arizzi74/MACT/releases/tag/v0.7.32). The official checksum manifest is unchanged and has a fresh signed attestation from this legacy repository so older updaters can verify it.
+          These application files are copied unchanged from [Twarm v0.7.32](https://github.com/arizzi74/Twarm/releases/tag/v0.7.32). The official checksum manifest is unchanged and has a fresh signed attestation from this legacy repository so older updaters can verify it.
 
-          After a legacy updater installs this bridge, the new manager resolves the official repository by its immutable identity on the next successful normal update, including after the Twarm rename. Source, issues, documentation, history, and future releases are maintained at https://github.com/arizzi74/MACT.
+          After a legacy updater installs this bridge, the new manager resolves the official repository by its immutable identity on the next successful normal update, including after the Twarm rename. Source, issues, documentation, history, and future releases are maintained at https://github.com/arizzi74/Twarm.
           NOTES
 
       - name: Upload and verify the draft before publishing
